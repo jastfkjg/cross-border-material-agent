@@ -12,12 +12,14 @@ from typing import Any
 
 
 try:
-    from PIL import Image, ImageOps
+    from PIL import Image, ImageFilter, ImageOps, ImageStat
 except (
     ImportError
 ):  # pragma: no cover - exercised in a deliberately dependency-free environment
     Image = None  # type: ignore[assignment]
+    ImageFilter = None  # type: ignore[assignment]
     ImageOps = None  # type: ignore[assignment]
+    ImageStat = None  # type: ignore[assignment]
 
 
 class MediaError(RuntimeError):
@@ -30,6 +32,14 @@ class ImageInfo:
     height: int
     format: str
     size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class ImageQualityInfo:
+    luminance_stddev: float
+    entropy: float
+    edge_mean: float
+    difference_hash: int
 
 
 def _png_dimensions(path: Path) -> tuple[int, int] | None:
@@ -109,6 +119,42 @@ def inspect_image(path: Path) -> ImageInfo:
     raise MediaError(f"不支持的图片格式且 Pillow 不可用: {path}")
 
 
+def inspect_image_quality(path: Path) -> ImageQualityInfo | None:
+    """Return cheap deterministic quality signals without changing the image."""
+
+    inspect_image(path)
+    if Image is None or ImageFilter is None or ImageStat is None:
+        return None
+    try:
+        with Image.open(path) as opened:
+            gray = ImageOps.exif_transpose(opened).convert("L")
+            sample = gray.resize((256, 256), Image.Resampling.LANCZOS)
+            inner = sample.crop((4, 4, 252, 252))
+            edges = inner.filter(ImageFilter.FIND_EDGES).crop((4, 4, 244, 244))
+            hash_sample = gray.resize((9, 8), Image.Resampling.LANCZOS)
+            pixels = list(hash_sample.getdata())
+    except Exception as exc:
+        raise MediaError(f"图片质量分析失败: {path}: {exc}") from exc
+
+    difference_hash = 0
+    for row in range(8):
+        offset = row * 9
+        for column in range(8):
+            difference_hash = (difference_hash << 1) | int(
+                pixels[offset + column] > pixels[offset + column + 1]
+            )
+    return ImageQualityInfo(
+        luminance_stddev=float(ImageStat.Stat(inner).stddev[0]),
+        entropy=float(sample.entropy()),
+        edge_mean=float(ImageStat.Stat(edges).mean[0]),
+        difference_hash=difference_hash,
+    )
+
+
+def hash_distance(left: int, right: int) -> int:
+    return (left ^ right).bit_count()
+
+
 def normalize_image(
     source: Path,
     destination: Path,
@@ -184,7 +230,7 @@ def _ffmpeg_executable() -> str:
         executable = imageio_ffmpeg.get_ffmpeg_exe()
         if executable and Path(executable).is_file():
             return executable
-    except (ImportError, OSError):
+    except (ImportError, OSError, RuntimeError):
         pass
     executable = shutil.which("ffmpeg")
     if executable:
@@ -251,4 +297,36 @@ def inspect_video(path: Path) -> dict[str, Any]:
         header = handle.read(64)
     if b"ftyp" not in header:
         raise MediaError("视频不是可识别的 MP4/MOV 容器")
-    return {"size_bytes": path.stat().st_size, "container": "mp4/mov"}
+    result: dict[str, Any] = {
+        "size_bytes": path.stat().st_size,
+        "container": "mp4/mov",
+        "decoded": False,
+    }
+    try:
+        ffmpeg = _ffmpeg_executable()
+    except MediaError:
+        return result
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-i",
+        str(path),
+        "-map",
+        "0:v:0",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            command, capture_output=True, text=True, timeout=120, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise MediaError(f"视频完整解码检查失败: {exc}") from exc
+    if completed.returncode != 0:
+        raise MediaError(f"视频无法完整解码: {completed.stderr[-1200:]}")
+    result["decoded"] = True
+    return result

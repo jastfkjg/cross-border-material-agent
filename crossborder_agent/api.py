@@ -28,8 +28,8 @@ class ApiConfig:
     openai_base_url: str
     chat_model: str = "qwen3.8-max"
     chat_fallback_model: str = "qwen3.7-plus"
-    image_model: str = "qwen-image-3.0-pro"
-    image_fallback_model: str = "wan2.7-image"
+    image_model: str = "wan2.7-image-pro"
+    image_fallback_model: str = "qwen-image-3.0-pro"
     video_model: str = "wan2.7-i2v-2026-04-25"
 
     @classmethod
@@ -47,9 +47,9 @@ class ApiConfig:
             chat_fallback_model=os.environ.get(
                 "AGENT_CHAT_FALLBACK_MODEL", "qwen3.7-plus"
             ),
-            image_model=os.environ.get("AGENT_IMAGE_MODEL", "qwen-image-3.0-pro"),
+            image_model=os.environ.get("AGENT_IMAGE_MODEL", "wan2.7-image-pro"),
             image_fallback_model=os.environ.get(
-                "AGENT_IMAGE_FALLBACK_MODEL", "wan2.7-image"
+                "AGENT_IMAGE_FALLBACK_MODEL", "qwen-image-3.0-pro"
             ),
             video_model=os.environ.get("AGENT_VIDEO_MODEL", "wan2.7-i2v-2026-04-25"),
         )
@@ -168,7 +168,7 @@ class HttpJsonClient:
         for attempt in range(4):
             try:
                 request = Request(
-                    url, headers={"User-Agent": "crossborder-material-agent/1.0"}
+                    url, headers={"User-Agent": "crossborder-material-agent/1.1"}
                 )
                 with urlopen(
                     request, timeout=self._remaining(timeout), context=self.ssl_context
@@ -254,12 +254,25 @@ class QwenClient:
         user_prompt: str,
         *,
         images: Iterable[str] = (),
+        videos: Iterable[str] = (),
         model: str = "",
     ) -> dict[str, Any]:
-        user_content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+        user_content: list[dict[str, Any]] = []
         for url in images:
             if url:
                 user_content.append({"type": "image_url", "image_url": {"url": url}})
+        for url in videos:
+            if url:
+                user_content.append(
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": url},
+                        "fps": 1.0,
+                        "min_pixels": 65_536,
+                        "max_pixels": 655_360,
+                    }
+                )
+        user_content.append({"type": "text", "text": user_prompt})
         selected_model = model or self.config.chat_model
         body = {
             "model": selected_model,
@@ -312,7 +325,10 @@ Verified source facts:
         return self.chat_json(system, prompt, images=image_urls[:12])
 
     def review_generated_images(
-        self, facts_json: str, image_urls: list[str]
+        self,
+        facts_json: str,
+        source_image_urls: list[str],
+        generated_image_urls: list[str],
     ) -> dict[str, Any]:
         system = (
             "You are a strict product-listing image quality gate. Return JSON only. "
@@ -320,8 +336,12 @@ Verified source facts:
             "visual artifacts, distorted anatomy, unreadable layouts, and images where the product is obscured."
         )
         prompt = f"""
-Review each generated image in the supplied order against the verified facts.
-Return JSON with key assets, an array of exactly {len(image_urls)} objects. Each object must contain:
+The first {len(source_image_urls)} supplied images are trusted source references. The next
+{len(generated_image_urls)} images are generated listing assets. Compare every generated asset
+against the source references and verified facts. Do not reject a faithful crop or a changed neutral
+background; reject changes to the product itself.
+
+Return JSON with key assets, an array of exactly {len(generated_image_urls)} objects. Each object must contain:
 - index: zero-based integer
 - usable: boolean
 - identity_consistent: boolean
@@ -332,37 +352,104 @@ Return JSON with key assets, an array of exactly {len(image_urls)} objects. Each
 Verified facts:
 {facts_json}
 """.strip()
-        return self.chat_json(system, prompt, images=image_urls)
+        return self.chat_json(
+            system,
+            prompt,
+            images=[*source_image_urls, *generated_image_urls],
+        )
+
+    def review_generated_video(
+        self,
+        facts_json: str,
+        source_image_urls: list[str],
+        video_url: str,
+    ) -> dict[str, Any]:
+        system = (
+            "You are a strict e-commerce product-video quality gate. Return JSON only. "
+            "Compare the generated video with the trusted source product images. Reject identity drift, "
+            "changed color or construction, morphing, duplicated limbs or garments, unreadable or unwanted "
+            "text, watermarks, violent camera motion, severe flicker, and frames where the product is obscured."
+        )
+        prompt = f"""
+The supplied images are trusted source references. The supplied video is a generated listing asset.
+Review the entire video and return a JSON object with exactly these keys:
+- usable: boolean
+- identity_consistent: boolean
+- unwanted_text: boolean
+- major_artifacts: boolean
+- reason: concise string
+
+Verified facts:
+{facts_json}
+""".strip()
+        return self.chat_json(
+            system,
+            prompt,
+            images=source_image_urls,
+            videos=[video_url],
+        )
 
     def generate_image(
-        self, prompt: str, reference_urls: list[str], *, size: str
+        self,
+        prompt: str,
+        reference_urls: list[str],
+        *,
+        size: str,
+        negative_prompt: str = "",
     ) -> tuple[str, str]:
         errors: list[str] = []
         with self._image_slots:
             try:
-                return self._generate_qwen_image(
-                    prompt, reference_urls, size=size
+                return self._generate_sync_image(
+                    self.config.image_model,
+                    prompt,
+                    reference_urls,
+                    size=size,
+                    negative_prompt=negative_prompt,
                 ), self.config.image_model
             except ApiError as exc:
                 errors.append(f"{self.config.image_model}: {exc}")
                 self.logger.warning("主图像模型失败，切换回退模型: %s", exc)
             try:
-                return self._generate_wan_image(
-                    prompt, reference_urls, size=size
+                return self._generate_sync_image(
+                    self.config.image_fallback_model,
+                    prompt,
+                    reference_urls,
+                    size=size,
+                    negative_prompt=negative_prompt,
                 ), self.config.image_fallback_model
             except ApiError as exc:
                 errors.append(f"{self.config.image_fallback_model}: {exc}")
         raise ApiError("; ".join(errors))
 
-    def _generate_qwen_image(
-        self, prompt: str, reference_urls: list[str], *, size: str
+    def _generate_sync_image(
+        self,
+        model: str,
+        prompt: str,
+        reference_urls: list[str],
+        *,
+        size: str,
+        negative_prompt: str,
     ) -> str:
-        content: list[dict[str, str]] = [{"text": prompt}]
-        content.extend({"image": url} for url in reference_urls[:3])
+        reference_limit = 9 if model.startswith("wan2.7-image") else 3
+        content: list[dict[str, str]] = [
+            {"image": url} for url in reference_urls[:reference_limit]
+        ]
+        content.append({"text": prompt})
+        parameters: dict[str, Any] = {
+            "size": size,
+            "watermark": False,
+        }
+        if model.startswith("wan2.7-image"):
+            parameters["n"] = 1
+        else:
+            parameters["prompt_extend"] = True
+            if negative_prompt:
+                parameters["negative_prompt"] = negative_prompt
         body = {
-            "model": self.config.image_model,
+            "model": model,
             "input": {"messages": [{"role": "user", "content": content}]},
-            "parameters": {"size": size, "prompt_extend": True, "watermark": False},
+            "parameters": parameters,
         }
         response = self.http.request_json(
             _endpoint(
@@ -371,7 +458,7 @@ Verified facts:
             ),
             headers={"Authorization": f"Bearer {self.config.api_key}"},
             body=body,
-            timeout=240,
+            timeout=360,
         )
         urls = _collect_urls(response, preferred_keys=("image", "url"))
         if not urls:
@@ -379,37 +466,6 @@ Verified facts:
                 f"图像响应没有 URL: {json.dumps(response, ensure_ascii=False)[:1000]}"
             )
         return urls[0]
-
-    def _generate_wan_image(
-        self, prompt: str, reference_urls: list[str], *, size: str
-    ) -> str:
-        content: list[dict[str, str]] = [{"text": prompt}]
-        content.extend({"image": url} for url in reference_urls[:9])
-        body = {
-            "model": self.config.image_fallback_model,
-            "input": {"messages": [{"role": "user", "content": content}]},
-            "parameters": {
-                "n": 1,
-                "size": size,
-                "watermark": False,
-                "thinking_mode": True,
-            },
-        }
-        response = self.http.request_json(
-            _endpoint(
-                self.config.dashscope_base_url,
-                "services/aigc/image-generation/generation",
-            ),
-            headers={
-                "Authorization": f"Bearer {self.config.api_key}",
-                "X-DashScope-Async": "enable",
-            },
-            body=body,
-            timeout=180,
-        )
-        return self._poll_task_for_url(
-            response, preferred_keys=("image", "url"), timeout_seconds=480
-        )
 
     def generate_video(self, prompt: str, first_frame_url: str) -> tuple[str, str]:
         body = {
@@ -420,7 +476,6 @@ Verified facts:
             },
             "parameters": {
                 "resolution": "720P",
-                "ratio": "16:9",
                 "duration": 8,
                 "prompt_extend": False,
                 "watermark": False,

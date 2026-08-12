@@ -5,7 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .media import MediaError, inspect_image, inspect_video
+from .media import (
+    MediaError,
+    hash_distance,
+    inspect_image,
+    inspect_image_quality,
+    inspect_video,
+)
 from .models import ProductFacts, TaxonomyResult
 
 
@@ -91,12 +97,18 @@ def validate_delivery(
             output_dir / f"product_description_{language}.md", facts, taxonomy, report
         )
 
+    image_hashes: list[tuple[str, int]] = []
     try:
         main = inspect_image(output_dir / "main_image.jpeg")
         if main.format not in {"JPEG", "JPG", "PNG"}:
             report.errors.append(f"主图格式不合规: {main.format}")
         if main.width < 800 or main.height < 800:
             report.errors.append(f"主图尺寸不足: {main.width}x{main.height}")
+        main_quality = inspect_image_quality(output_dir / "main_image.jpeg")
+        if main_quality is not None:
+            if main_quality.luminance_stddev < 2 or main_quality.entropy < 0.8:
+                report.errors.append("主图疑似空白或信息量过低")
+            image_hashes.append(("main_image.jpeg", main_quality.difference_hash))
     except MediaError as exc:
         report.errors.append(str(exc))
 
@@ -111,8 +123,28 @@ def validate_delivery(
                 )
             if detail.size_bytes > 5 * 1024 * 1024:
                 report.errors.append(f"详情图 {index} 超过 5MB")
+            detail_quality = inspect_image_quality(
+                output_dir / f"detail_image_{index}.jpeg"
+            )
+            if detail_quality is not None:
+                if (
+                    detail_quality.luminance_stddev < 2
+                    or detail_quality.entropy < 0.8
+                ):
+                    report.errors.append(f"详情图 {index} 疑似空白或信息量过低")
+                image_hashes.append(
+                    (f"detail_image_{index}.jpeg", detail_quality.difference_hash)
+                )
         except MediaError as exc:
             report.errors.append(str(exc))
+
+    detail_hashes = [item for item in image_hashes if item[0].startswith("detail_")]
+    for left_index, (left_name, left_hash) in enumerate(detail_hashes):
+        for right_name, right_hash in detail_hashes[left_index + 1 :]:
+            if hash_distance(left_hash, right_hash) <= 2:
+                report.warnings.append(
+                    f"详情图视觉内容可能重复: {left_name}, {right_name}"
+                )
 
     try:
         inspect_video(output_dir / "product_video.mp4")

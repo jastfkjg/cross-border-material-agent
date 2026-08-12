@@ -12,9 +12,10 @@ from pathlib import Path
 from unittest import mock
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageDraw
 except ImportError:
     Image = None
+    ImageDraw = None
 
 from crossborder_agent.media import create_slideshow_video
 from crossborder_agent.pipeline import Pipeline
@@ -144,6 +145,14 @@ class _ModelServiceHandler(BaseHTTPRequestHandler):
                     for index in range(image_count)
                 ]
             }
+        elif "product-video quality gate" in system:
+            payload = {
+                "usable": True,
+                "identity_consistent": True,
+                "unwanted_text": False,
+                "major_artifacts": False,
+                "reason": "ok",
+            }
         else:
             if "ko-KR" in system:
                 title, overview, fit = (
@@ -197,9 +206,15 @@ class ModelPipelineTests(unittest.TestCase):
             root = Path(temporary)
             source_image = root / "source.jpg"
             source_video = root / "video.mp4"
-            Image.new("RGB", (1400, 1400), (232, 226, 240)).save(
-                source_image, quality=94
+            fixture = Image.new("RGB", (1400, 1400), (248, 248, 248))
+            draw = ImageDraw.Draw(fixture)
+            draw.rounded_rectangle(
+                (360, 170, 1040, 1230), radius=70, fill=(173, 145, 207)
             )
+            draw.line((700, 210, 700, 1170), fill=(242, 236, 248), width=18)
+            for y in range(350, 1050, 150):
+                draw.ellipse((680, y, 720, y + 40), fill=(245, 245, 245))
+            fixture.save(source_image, quality=94)
             create_slideshow_video(source_image, source_video, duration=2)
 
             handler = type("ConfiguredModelHandler", (_ModelServiceHandler,), {})
@@ -254,7 +269,15 @@ class ModelPipelineTests(unittest.TestCase):
                 self.assertEqual(
                     {path.name for path in output_dir.iterdir()}, EXPECTED_FILES
                 )
-                self.assertTrue(all(asset.generated for asset in state.assets))
+                generated_names = {
+                    asset.name for asset in state.assets if asset.generated
+                }
+                self.assertIn("main_image.jpeg", generated_names)
+                self.assertIn("product_video.mp4", generated_names)
+                self.assertTrue(
+                    any("近重复" in warning for warning in state.warnings),
+                    state.warnings,
+                )
                 report = validate_delivery(output_dir, state.facts, state.taxonomy)
                 self.assertTrue(report.valid, report.errors)
             finally:

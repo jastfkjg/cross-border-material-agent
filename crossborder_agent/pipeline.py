@@ -17,7 +17,14 @@ from typing import Any
 from .api import ApiConfig, ApiError, HttpJsonClient, QwenClient
 from .input_loader import discover_input_files, load_json, load_product_facts
 from .localization import generate_copy_payload, render_description
-from .media import MediaError, create_slideshow_video, inspect_video, normalize_image
+from .media import (
+    MediaError,
+    create_slideshow_video,
+    hash_distance,
+    inspect_image_quality,
+    inspect_video,
+    normalize_image,
+)
 from .models import AssetResult, CreativePlan, ProductFacts, RunState, TaxonomyResult
 from .planning import create_creative_plan
 from .qa import EXPECTED_FILES, validate_delivery
@@ -26,6 +33,19 @@ from .taxonomy import resolve_taxonomy
 
 class PipelineError(RuntimeError):
     """Raised when the agent cannot produce a complete, validated delivery."""
+
+
+_IMAGE_NEGATIVE_PROMPT = (
+    "written text, letters, numbers, watermark, logo, brand mark, price tag, promotional badge, "
+    "unreadable typography, distorted anatomy, extra limbs, malformed hands, product deformation, "
+    "changed buttons, changed fasteners, changed pattern, changed color, blur, low resolution"
+)
+
+_MAIN_NEGATIVE_PROMPT = (
+    _IMAGE_NEGATIVE_PROMPT
+    + ", collage, montage, split screen, inset, duplicate garment, multiple products, multiple colorways, "
+    "cropped product, person, mannequin body"
+)
 
 
 class Pipeline:
@@ -338,8 +358,9 @@ Allowed leaf candidates:
             try:
                 generated_url, model = self.client.generate_image(
                     plan.main_prompt,
-                    source_urls[:3],
+                    source_urls[:1],
                     size="1600*1600",
+                    negative_prompt=_MAIN_NEGATIVE_PROMPT,
                 )
                 self._download_and_normalize(
                     generated_url,
@@ -399,16 +420,15 @@ Allowed leaf candidates:
             + facts.description_image_urls
         )
         if self.client is not None:
-            reference_selection = _unique(
-                [main_reference_url]
-                + facts.product_image_urls[:2]
-                + _even_sample(facts.sku_image_urls, 2)
+            reference_selection = self._detail_reference_selection(
+                index, facts, main_reference_url
             )
             try:
                 generated_url, model = self.client.generate_image(
                     plan.detail_prompts[index - 1],
                     reference_selection[:3],
                     size="1200*1500",
+                    negative_prompt=_IMAGE_NEGATIVE_PROMPT,
                 )
                 self._download_and_normalize(
                     generated_url,
@@ -446,6 +466,17 @@ Allowed leaf candidates:
             fallback_reason="image generation unavailable or rejected",
             description=f"Source-faithful detail image {index}",
         )
+
+    def _detail_reference_selection(
+        self, index: int, facts: ProductFacts, main_reference_url: str
+    ) -> list[str]:
+        product = facts.product_image_urls
+        sku = facts.sku_image_urls
+        if index == 4 and sku:
+            return _unique(_even_sample(sku, 3) + product[:1])
+        product_index = min(max(0, index - 1), max(0, len(product) - 1))
+        selected_product = product[product_index : product_index + 1]
+        return _unique(selected_product + product[:1] + [main_reference_url])
 
     def _build_video(
         self,
@@ -498,33 +529,63 @@ Allowed leaf candidates:
     ) -> None:
         if self.client is None:
             return
+        self._replace_near_duplicate_details(facts, assets, downloads_dir)
         image_assets = [
             asset
             for asset in assets
             if asset.name.endswith(".jpeg") and asset.generated
         ]
-        if not image_assets:
-            return
-        self._ensure_time(3 * 60)
-        try:
-            review = self.client.review_generated_images(
-                json.dumps(facts.compact_dict(), ensure_ascii=False),
-                [asset.source_url for asset in image_assets],
+        main_was_rejected = False
+        if image_assets and self.deadline - time.monotonic() > 3 * 60:
+            source_review_urls = _unique(
+                facts.product_image_urls[:3]
+                + _even_sample(facts.sku_image_urls, 1)
+                + _even_sample(facts.description_image_urls, 1)
+            )[:5]
+            try:
+                review = self.client.review_generated_images(
+                    json.dumps(facts.compact_dict(), ensure_ascii=False),
+                    source_review_urls,
+                    [asset.source_url for asset in image_assets],
+                )
+            except ApiError as exc:
+                self.logger.warning(
+                    "生成图片语义质检失败，保留已通过物理校验的图片: %s", exc
+                )
+                self.warnings.append(f"生成图片语义质检不可用: {exc}")
+            else:
+                main_was_rejected = self._apply_image_review(
+                    facts, image_assets, review, downloads_dir
+                )
+        elif image_assets:
+            self.warnings.append("剩余时间不足，跳过生成图片语义质检")
+
+        if main_was_rejected:
+            video_asset = next(
+                (asset for asset in assets if asset.name == "product_video.mp4"), None
             )
-        except ApiError as exc:
-            self.logger.warning(
-                "生成图片语义质检失败，保留已通过物理校验的图片: %s", exc
-            )
-            self.warnings.append(f"生成图片语义质检不可用: {exc}")
-            return
+            if video_asset and video_asset.generated:
+                replaced = self._fallback_video(
+                    video_asset,
+                    work_dir / "main_image.jpeg",
+                    "main image semantic QA rejection invalidated generated video",
+                )
+                if replaced:
+                    self.warnings.append("主图语义质检回退后，视频同步回退为源图展示")
+
+        self._review_generated_video(facts, assets, work_dir)
+
+    def _apply_image_review(
+        self,
+        facts: ProductFacts,
+        image_assets: list[AssetResult],
+        review: dict[str, Any],
+        downloads_dir: Path,
+    ) -> bool:
         reviews = review.get("assets")
         if not isinstance(reviews, list):
-            return
-        source_urls = _unique(
-            facts.product_image_urls
-            + facts.sku_image_urls
-            + facts.description_image_urls
-        )
+            self.warnings.append("生成图片语义质检返回结构无效，保留物理校验结果")
+            return False
         main_was_rejected = False
         for item in reviews:
             if not isinstance(item, dict) or not isinstance(item.get("index"), int):
@@ -545,7 +606,7 @@ Allowed leaf candidates:
             is_main = asset.name == "main_image.jpeg"
             try:
                 fallback_url = self._fallback_image(
-                    source_urls,
+                    self._fallback_sources_for_asset(facts, asset.name),
                     destination,
                     downloads_dir,
                     canvas=(1600, 1600) if is_main else (1200, 1500),
@@ -565,25 +626,124 @@ Allowed leaf candidates:
             self.warnings.append(f"{asset.name} 因语义质检回退到源图")
             if is_main:
                 main_was_rejected = True
-        if main_was_rejected:
-            video_asset = next(
-                (asset for asset in assets if asset.name == "product_video.mp4"), None
+        return main_was_rejected
+
+    def _replace_near_duplicate_details(
+        self,
+        facts: ProductFacts,
+        assets: list[AssetResult],
+        downloads_dir: Path,
+    ) -> None:
+        seen: list[tuple[str, int]] = []
+        for asset in assets:
+            if not asset.name.startswith("detail_image_") or not asset.generated:
+                continue
+            try:
+                quality = inspect_image_quality(Path(asset.path))
+            except MediaError as exc:
+                self.logger.warning("详情图质量信号读取失败 %s: %s", asset.name, exc)
+                continue
+            if quality is None:
+                return
+            duplicate_of = next(
+                (
+                    name
+                    for name, difference_hash in seen
+                    if hash_distance(quality.difference_hash, difference_hash) <= 2
+                ),
+                "",
             )
-            if video_asset and video_asset.generated:
-                video_path = Path(video_asset.path)
-                try:
-                    create_slideshow_video(
-                        work_dir / "main_image.jpeg", video_path, duration=8
-                    )
-                    video_asset.source_url = ""
-                    video_asset.model = "ffmpeg-slideshow-fallback"
-                    video_asset.generated = False
-                    video_asset.fallback_reason = (
-                        "main image semantic QA rejection invalidated generated video"
-                    )
-                    self.warnings.append("主图语义质检回退后，视频同步回退为源图展示")
-                except MediaError as exc:
-                    self.logger.warning("主图被拒后无法重建视频: %s", exc)
+            if not duplicate_of:
+                seen.append((asset.name, quality.difference_hash))
+                continue
+            try:
+                fallback_url = self._fallback_image(
+                    self._fallback_sources_for_asset(facts, asset.name),
+                    Path(asset.path),
+                    downloads_dir,
+                    canvas=(1200, 1500),
+                    white_background=False,
+                )
+            except PipelineError as exc:
+                self.logger.warning("重复详情图回退失败 %s: %s", asset.name, exc)
+                continue
+            asset.source_url = fallback_url
+            asset.model = "deterministic-source-fallback"
+            asset.generated = False
+            asset.fallback_reason = f"near-duplicate of {duplicate_of}"
+            self.warnings.append(f"{asset.name} 与 {duplicate_of} 近重复，已回退到源图")
+
+    def _fallback_sources_for_asset(
+        self, facts: ProductFacts, asset_name: str
+    ) -> list[str]:
+        source_urls = _unique(
+            facts.product_image_urls
+            + facts.sku_image_urls
+            + facts.description_image_urls
+        )
+        if not source_urls or not asset_name.startswith("detail_image_"):
+            return source_urls
+        try:
+            index = int(asset_name.removeprefix("detail_image_").split(".", 1)[0])
+        except ValueError:
+            return source_urls
+        offset = (index - 1) % len(source_urls)
+        return source_urls[offset:] + source_urls[:offset]
+
+    def _review_generated_video(
+        self, facts: ProductFacts, assets: list[AssetResult], work_dir: Path
+    ) -> None:
+        video_asset = next(
+            (asset for asset in assets if asset.name == "product_video.mp4"), None
+        )
+        if not video_asset or not video_asset.generated or not video_asset.source_url:
+            return
+        if self.deadline - time.monotonic() <= 2 * 60:
+            self.warnings.append("剩余时间不足，跳过生成视频语义质检")
+            return
+        source_review_urls = _unique(
+            facts.product_image_urls[:3] + _even_sample(facts.sku_image_urls, 1)
+        )[:4]
+        try:
+            review = self.client.review_generated_video(
+                json.dumps(facts.compact_dict(), ensure_ascii=False),
+                source_review_urls,
+                video_asset.source_url,
+            )
+        except ApiError as exc:
+            self.logger.warning("生成视频语义质检失败，保留完整解码通过的视频: %s", exc)
+            self.warnings.append(f"生成视频语义质检不可用: {exc}")
+            return
+        rejected = (
+            review.get("usable") is False
+            or review.get("identity_consistent") is False
+            or review.get("unwanted_text") is True
+            or review.get("major_artifacts") is True
+        )
+        if not rejected:
+            return
+        replaced = self._fallback_video(
+            video_asset,
+            work_dir / "main_image.jpeg",
+            f"semantic QA rejected generated video: {review.get('reason', '')}",
+        )
+        if replaced:
+            self.warnings.append("product_video.mp4 因语义质检回退到稳定主图视频")
+
+    def _fallback_video(
+        self, video_asset: AssetResult, main_image_path: Path, reason: str
+    ) -> bool:
+        video_path = Path(video_asset.path)
+        try:
+            create_slideshow_video(main_image_path, video_path, duration=8)
+        except MediaError as exc:
+            self.logger.warning("无法重建视频回退: %s", exc)
+            return False
+        video_asset.source_url = ""
+        video_asset.model = "ffmpeg-slideshow-fallback"
+        video_asset.generated = False
+        video_asset.fallback_reason = reason
+        return True
 
     def _write_strategy_document(
         self,
@@ -653,13 +813,14 @@ Allowed leaf candidates:
             "## 6. 合规与质检",
             "",
             "生成提示词统一禁止虚假功能、绝对化宣传、额外商标、价格折扣、认证和测量值。"
-            "图片下载后统一解码为 RGB JPEG，并校验尺寸和文件大小；模型生成图还会接受商品身份一致性、"
-            "意外文字、水印和重大瑕疵检查。视频必须为可识别的 MP4/MOV 容器且小于 200MB。"
+            "图片下载后统一解码为 RGB JPEG，并校验尺寸、文件大小、空白图和近重复图；模型生成图还会与"
+            "可信源图共同输入视觉质检，检查商品身份一致性、意外文字、水印和重大瑕疵。视频除容器和"
+            "200MB 上限外，还须完成全视频流解码，并通过源图对照的时序语义质检。"
             "所有输出在写入最终目录前进行一次完整交付质检，写入后再次复核。",
             "",
             "## 7. 降级与稳定性",
             "",
-            "API 请求对限流和暂时性错误执行指数退避；异步图像/视频任务保存 task_id 并轮询。"
+            "API 请求对限流和暂时性错误执行指数退避；图片优先走同步多模态生成，视频异步任务保存 task_id 并轮询。"
             "图片模型失败或语义质检不通过时，回退到经规格归一化的商品源图；视频模型失败时，"
             "使用已验证主图生成可播放的 H.264 商品展示视频。所有回退都优先保证商品事实一致性和文件可用性。",
         ]

@@ -16,6 +16,26 @@ _PRESERVATION = (
     "Do not invent text, measurements, materials, certifications or brand marks. No watermark."
 )
 
+_MAIN_PRESENTATION = (
+    "Show exactly one physical product in exactly one verified colorway. The complete product must be visible, "
+    "including collar or waistband, both sleeves or legs, cuffs and hem. Use a product-only studio presentation "
+    "such as a clean flat lay, hanger, or invisible mannequin; no person, mannequin body, colorway lineup, duplicate "
+    "garment, inset, split screen, montage or collage."
+)
+
+_DETAIL_SLOT_DIRECTIVES = (
+    "This is detail slot 1: show a complete front three-quarter product presentation on a hanger or invisible form "
+    "against a warm neutral editorial wall. It must be visibly different from the square white-background hero.",
+    "This is detail slot 2: make a tight but readable upper-garment close-up centered on the verified collar, "
+    "front opening and visible fastening construction. Do not show an isolated generic fabric swatch.",
+    "This is detail slot 3: make a distinct close-up of the verified sleeve, cuff, hem and natural drape while "
+    "keeping enough of the product visible to identify it.",
+    "This is detail slot 4: create a clean catalog lineup using only color variants visibly present in the supplied "
+    "references. Show two or three complete products with identical construction and no labels or swatches.",
+    "This is detail slot 5: show one adult wearer in a restrained everyday styling context, with the product fully "
+    "visible and unobstructed from collar through hem. Keep anatomy natural and do not add accessories to the product.",
+)
+
 
 def fallback_creative_plan(
     facts: ProductFacts, taxonomy: TaxonomyResult
@@ -29,32 +49,44 @@ def fallback_creative_plan(
             "Use a clean white-to-very-light-gray studio background, soft realistic shadow, even lighting, "
             "accurate color, centered composition, and generous margins. Product occupies about 80 percent of frame. "
             "No promotional text, badges, borders, collage or extra props. "
+            + _MAIN_PRESENTATION
+            + " "
             + _PRESERVATION
         ),
         detail_prompts=[
             (
                 f"Create a vertical 4:5 full-product editorial view. {identity} Use a restrained neutral lifestyle "
                 "setting appropriate for a global marketplace, with the product unobstructed and clearly readable. "
+                + _DETAIL_SLOT_DIRECTIVES[0]
+                + " "
                 + _PRESERVATION
             ),
             (
                 f"Create a vertical 4:5 detail-focused commerce image showing visible construction and design details. "
                 f"{identity} Use realistic close-up photography while keeping the full product identity consistent. "
+                + _DETAIL_SLOT_DIRECTIVES[1]
+                + " "
                 + _PRESERVATION
             ),
             (
                 f"Create a vertical 4:5 premium product feature composition. {identity} Use clean visual hierarchy and "
                 "subtle graphic dividers but no generated words, numbers, icons with claims, or labels. "
+                + _DETAIL_SLOT_DIRECTIVES[2]
+                + " "
                 + _PRESERVATION
             ),
             (
                 f"Create a vertical 4:5 product-variant presentation based only on colors and variants visible in the "
                 f"reference images. {identity} Arrange the variants in a clean, consistent catalog composition without text. "
+                + _DETAIL_SLOT_DIRECTIVES[3]
+                + " "
                 + _PRESERVATION
             ),
             (
                 f"Create a vertical 4:5 final commerce image showing a practical styling or use context suitable for "
                 f"the product. {identity} Keep the composition inclusive and culturally neutral. No written size claims. "
+                + _DETAIL_SLOT_DIRECTIVES[4]
+                + " "
                 + _PRESERVATION
             ),
         ],
@@ -127,7 +159,7 @@ Return JSON with exactly these keys:
 Hard constraints for every image prompt:
 {_PRESERVATION}
 
-Main image: square, clean near-white studio background, centered, no text.
+Main image: square, clean near-white studio background, centered, no text. {_MAIN_PRESENTATION}
 Details: vertical 4:5; cover overall view, construction/detail, verified features, variants, and practical context.
 Do not request measurements, care instructions, material performance, certification, price, discount or brand claims.
 
@@ -155,9 +187,20 @@ Conservative source-image observations:
         return fallback, "content-compliance-guard"
     plan = CreativePlan(
         visual_theme=payload["visual_theme"].strip(),
-        main_prompt=payload["main_prompt"].strip() + " " + _PRESERVATION,
+        main_prompt=(
+            payload["main_prompt"].strip()
+            + " "
+            + _MAIN_PRESENTATION
+            + " "
+            + _PRESERVATION
+        ),
         detail_prompts=[
-            item.strip() + " " + _PRESERVATION for item in payload["detail_prompts"]
+            item.strip()
+            + " "
+            + _DETAIL_SLOT_DIRECTIVES[index]
+            + " "
+            + _PRESERVATION
+            for index, item in enumerate(payload["detail_prompts"])
         ],
         video_prompt=payload["video_prompt"].strip(),
         market_angles={

@@ -11,9 +11,10 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageDraw
 except ImportError:
     Image = None
+    ImageDraw = None
 
 from crossborder_agent.pipeline import Pipeline
 from crossborder_agent.qa import EXPECTED_FILES, validate_delivery
@@ -34,9 +35,15 @@ class OfflinePipelineTests(unittest.TestCase):
             web.mkdir()
             (input_dir / "product_info").mkdir(parents=True)
 
-            Image.new("RGB", (1400, 1400), (236, 232, 242)).save(
-                web / "source.jpg", quality=94
+            fixture = Image.new("RGB", (1400, 1400), (248, 248, 248))
+            draw = ImageDraw.Draw(fixture)
+            draw.rounded_rectangle(
+                (360, 170, 1040, 1230), radius=70, fill=(173, 145, 207)
             )
+            draw.line((700, 210, 700, 1170), fill=(242, 236, 248), width=18)
+            for y in range(350, 1050, 150):
+                draw.ellipse((680, y, 720, y + 40), fill=(245, 245, 245))
+            fixture.save(web / "source.jpg", quality=94)
             handler = functools.partial(SimpleHTTPRequestHandler, directory=str(web))
             server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
