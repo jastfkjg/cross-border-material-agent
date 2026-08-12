@@ -1,0 +1,375 @@
+{
+  "ret": {
+    "result": {
+      "result": {
+        "platform": "123批发网",
+        "url": "https://www.123.com/",
+        "offerId": 5681480836479,
+        "subject": "韩版挂脖露肩设计感针织衫女秋冬长袖修身百搭打底毛衣温柔风上衣",
+        "subjectTrans": "韩版挂脖露肩设计感针织衫女秋冬长袖修身百搭打底毛衣温柔风上衣",
+        "categoryId": 121307086,
+        "category_name": "女式针织衫",
+        "secondCategoryId": 121307086,
+        "topCategoryId": 61601,
+        "description": "<div id='offer-template-0'></div><div style='width: 790.0px;'>\r\n        \r\n         <img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/oXrEO/5681480836479_description_01.jpg?Expires=3362177741&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=nU9CLbYCNyaybDTt1M67daLyrP8%3D' style='display: block;width: 100.0%;height: auto;' usemap='#_sdmap_0'/>\r\n        \r\n        \r\n    \r\n        \r\n         <img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/Xs9XD/5681480836479_description_02.jpg?Expires=3362177741&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=PzjyYu%2FlRPW30ZpkzV1hFISxXME%3D' style='display: block;width: 100.0%;height: auto;' usemap='#_sdmap_1'/>\r\n        \r\n        \r\n    \r\n        \r\n         <img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/8TemO/5681480836479_description_03.jpg?Expires=3362177741&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=JWmzg4o4KadIGG2Ab2G6eFwwG2k%3D' style='display: block;width: 100.0%;height: auto;' usemap='#_sdmap_2'/>\r\n        \r\n        \r\n    \r\n        \r\n         <img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/TwNEZ/5681480836479_description_04.jpg?Expires=3362177741&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=8f2FEJ6gi87Fe%2FJCJtu6q%2B6aRlw%3D' style='display: block;width: 100.0%;height: auto;' usemap='#_sdmap_3'/>\r\n        \r\n        \r\n    \r\n        \r\n         <img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/uvbwm/5681480836479_description_05.jpg?Expires=3362177741&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=k3YWN9LN0NXb5HvQuULf7ks3AMc%3D' style='display: block;width: 100.0%;height: auto;' usemap='#_sdmap_4'/>\r\n        \r\n        \r\n    </div>",
+        "productAttribute": [
+          {
+            "attributeId": "9813",
+            "valueTrans": "8350",
+            "attributeName": "货号",
+            "attributeNameTrans": "货号",
+            "value": "8350"
+          },
+          {
+            "attributeId": "6721",
+            "valueTrans": "韩媛熙",
+            "attributeName": "品牌",
+            "attributeNameTrans": "品牌",
+            "value": "韩媛熙"
+          },
+          {
+            "attributeId": "100120351",
+            "valueTrans": "安迪绒",
+            "attributeName": "面料名称",
+            "attributeNameTrans": "面料名称",
+            "value": "安迪绒"
+          },
+          {
+            "attributeId": "714518418",
+            "valueTrans": "粘胶纤维",
+            "attributeName": "主面料成分2",
+            "attributeNameTrans": "主面料成分2",
+            "value": "粘胶纤维"
+          },
+          {
+            "attributeId": "718301711",
+            "valueTrans": "粘胶纤维",
+            "attributeName": "主面料成分",
+            "attributeNameTrans": "主面料成分",
+            "value": "粘胶纤维"
+          },
+          {
+            "attributeId": "9002",
+            "valueTrans": "纯色",
+            "attributeName": "图案",
+            "attributeNameTrans": "图案",
+            "value": "纯色"
+          },
+          {
+            "attributeId": "2070",
+            "valueTrans": "常规",
+            "attributeName": "厚薄",
+            "attributeNameTrans": "厚薄",
+            "value": "常规"
+          },
+          {
+            "attributeId": "8111",
+            "valueTrans": "基本款",
+            "attributeName": "款式",
+            "attributeNameTrans": "款式",
+            "value": "基本款"
+          },
+          {
+            "attributeId": "48258452",
+            "valueTrans": "修身型",
+            "attributeName": "版型",
+            "attributeNameTrans": "版型",
+            "value": "修身型"
+          },
+          {
+            "attributeId": "9180327",
+            "valueTrans": "常规袖",
+            "attributeName": "袖型",
+            "attributeNameTrans": "袖型",
+            "value": "常规袖"
+          },
+          {
+            "attributeId": "26606",
+            "valueTrans": "2025年秋季",
+            "attributeName": "上市年份/季节",
+            "attributeNameTrans": "上市年份/季节",
+            "value": "2025年秋季"
+          },
+          {
+            "attributeId": "60220",
+            "valueTrans": "挂脖",
+            "attributeName": "领型",
+            "attributeNameTrans": "领型",
+            "value": "挂脖"
+          },
+          {
+            "attributeId": "1700",
+            "valueTrans": "长袖",
+            "attributeName": "袖长",
+            "attributeNameTrans": "袖长",
+            "value": "长袖"
+          },
+          {
+            "attributeId": "8146",
+            "valueTrans": "几何",
+            "attributeName": "流行元素",
+            "attributeNameTrans": "流行元素",
+            "value": "几何"
+          },
+          {
+            "attributeId": "10361",
+            "valueTrans": "普通款(50cm<衣长≤65cm)",
+            "attributeName": "衣长",
+            "attributeNameTrans": "衣长",
+            "value": "普通款(50cm<衣长≤65cm)"
+          },
+          {
+            "attributeId": "1508",
+            "valueTrans": "针织",
+            "attributeName": "工艺",
+            "attributeNameTrans": "工艺",
+            "value": "针织"
+          },
+          {
+            "attributeId": "6312",
+            "valueTrans": "黑色",
+            "attributeName": "颜色",
+            "attributeNameTrans": "颜色",
+            "value": "黑色"
+          },
+          {
+            "attributeId": "6312",
+            "valueTrans": "杏色",
+            "attributeName": "颜色",
+            "attributeNameTrans": "颜色",
+            "value": "杏色"
+          },
+          {
+            "attributeId": "6312",
+            "valueTrans": "黄色",
+            "attributeName": "颜色",
+            "attributeNameTrans": "颜色",
+            "value": "黄色"
+          },
+          {
+            "attributeId": "6312",
+            "valueTrans": "燕麦色",
+            "attributeName": "颜色",
+            "attributeNameTrans": "颜色",
+            "value": "燕麦色"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "均码【80-120斤】",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "均码【80-120斤】"
+          },
+          {
+            "attributeId": "2438986",
+            "valueTrans": "气质通勤",
+            "attributeName": "风格类型",
+            "attributeNameTrans": "风格类型",
+            "value": "气质通勤"
+          },
+          {
+            "attributeId": "8058",
+            "valueTrans": "套头",
+            "attributeName": "穿着方式",
+            "attributeNameTrans": "穿着方式",
+            "value": "套头"
+          },
+          {
+            "attributeId": "411482909",
+            "valueTrans": "30%以下",
+            "attributeName": "主面料成分含量",
+            "attributeNameTrans": "主面料成分含量",
+            "value": "30%以下"
+          },
+          {
+            "attributeId": "110356247",
+            "valueTrans": "30%以下",
+            "attributeName": "主面料成分2含量",
+            "attributeNameTrans": "主面料成分2含量",
+            "value": "30%以下"
+          },
+          {
+            "attributeId": "900100070",
+            "valueTrans": "套头",
+            "attributeName": "门襟",
+            "attributeNameTrans": "门襟",
+            "value": "套头"
+          },
+          {
+            "attributeId": "410",
+            "valueTrans": "通勤风",
+            "attributeName": "风格",
+            "attributeNameTrans": "风格",
+            "value": "通勤风"
+          },
+          {
+            "attributeId": "100233012",
+            "valueTrans": "适中",
+            "attributeName": "柔软度",
+            "attributeNameTrans": "柔软度",
+            "value": "适中"
+          },
+          {
+            "attributeId": "192572361",
+            "valueTrans": "否",
+            "attributeName": "是否跨境货源",
+            "attributeNameTrans": "是否跨境货源",
+            "value": "否"
+          },
+          {
+            "attributeId": "257816201",
+            "valueTrans": "无领标",
+            "attributeName": "领标",
+            "attributeNameTrans": "领标",
+            "value": "无领标"
+          },
+          {
+            "attributeId": "643",
+            "valueTrans": "毛衣",
+            "attributeName": "产品类别",
+            "attributeNameTrans": "产品类别",
+            "value": "毛衣"
+          },
+          {
+            "attributeId": "643",
+            "valueTrans": "针织衫",
+            "attributeName": "产品类别",
+            "attributeNameTrans": "产品类别",
+            "value": "针织衫"
+          },
+          {
+            "attributeId": "120506003",
+            "valueTrans": "其他品牌",
+            "attributeName": "货源类型",
+            "attributeNameTrans": "货源类型",
+            "value": "其他品牌"
+          },
+          {
+            "attributeId": "913680006",
+            "valueTrans": "无吊牌",
+            "attributeName": "吊牌",
+            "attributeNameTrans": "吊牌",
+            "value": "无吊牌"
+          },
+          {
+            "attributeId": "1107",
+            "valueTrans": "通用",
+            "attributeName": "适用人群",
+            "attributeNameTrans": "适用人群",
+            "value": "通用"
+          }
+        ],
+        "productImage": {
+          "images": [
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/8R1rH/5681480836479_productImage_01.jpg?Expires=3362177740&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=OguNVgrhbN6cGlTwTdzHuSxvUuw%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/0GQr6/5681480836479_productImage_02.jpg?Expires=3362177740&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=LYLzhyNYSSZf9P%2FLJYlsV6fhwqI%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/ojJF4/5681480836479_productImage_03.jpg?Expires=3362177740&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=ZQCU%2B%2BSjqM8wbUtIAqCdJcNuyUc%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/rTrpk/5681480836479_productImage_04.jpg?Expires=3362177740&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=XAIp7A6iZ1PS7PavMRPz75%2BjNq0%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/8zVb8/5681480836479_productImage_05.jpg?Expires=3362177741&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=V01hYg8wRjTRUayVam04FrsARNU%3D"
+          ]
+        },
+        "productSkuInfos": [
+          {
+            "skuId": 3577824934086,
+            "specId": "b4c787204c39c82945a28ba1db05ddb2",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/GU3Bc/5681480836479_sku_sku001_%E9%BB%91%E8%89%B2.jpg?Expires=3362177739&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=0t0jL4gdHzn6EKakm1WmT0ztDls%3D",
+                "valueTrans": "黑色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "黑色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "均码【80-120斤】",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "均码【80-120斤】"
+              }
+            ],
+            "amountOnSale": 100000
+          },
+          {
+            "skuId": 3002608725300,
+            "specId": "42c5a08415d721ebdc1bc1bba37689d4",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/TrM8m/5681480836479_sku_sku002_%E6%9D%8F%E8%89%B2.jpg?Expires=3362177740&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=6XuDAmc8p2siRKUYkSftC8mxxFo%3D",
+                "valueTrans": "杏色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "杏色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "均码【80-120斤】",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "均码【80-120斤】"
+              }
+            ],
+            "amountOnSale": 100000
+          },
+          {
+            "skuId": 4367891489042,
+            "specId": "995424eac26fa6829c4d08f3328c5f4e",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/8r7pa/5681480836479_sku_sku003_%E9%BB%84%E8%89%B2.jpg?Expires=3362177740&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=zE6mdBeB%2FD1vhJ0jyjLBPmFR50g%3D",
+                "valueTrans": "黄色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "黄色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "均码【80-120斤】",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "均码【80-120斤】"
+              }
+            ],
+            "amountOnSale": 100000
+          },
+          {
+            "skuId": 6840766364107,
+            "specId": "817d3ce3f9e0bc2ac2c39fb087cef74e",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/7jwsD/5681480836479_sku_sku004_%E7%87%95%E9%BA%A6%E8%89%B2.jpg?Expires=3362177740&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=bwPDHrs2dsura5t4d1Yty0InsfU%3D",
+                "valueTrans": "燕麦色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "燕麦色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "均码【80-120斤】",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "均码【80-120斤】"
+              }
+            ],
+            "amountOnSale": 100000
+          }
+        ],
+        "minOrderQuantity": 1,
+        "productSaleInfo": {
+          "amountOnSale": 400000,
+          "unitInfo": {
+            "unit": "件",
+            "transUnit": "件"
+          }
+        },
+        "tradeScore": "0.0"
+      },
+      "code": "200",
+      "success": true
+    }
+  }
+}

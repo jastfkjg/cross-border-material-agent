@@ -1,0 +1,319 @@
+{
+  "ret": {
+    "result": {
+      "result": {
+        "platform": "123批发网",
+        "url": "https://www.123.com/",
+        "offerId": 8822221153828,
+        "subject": "温柔韩版高腰百褶半身裙通勤显瘦气质长裙粉色大摆裙2026夏季新款",
+        "subjectTrans": "温柔韩版高腰百褶半身裙通勤显瘦气质长裙粉色大摆裙2026夏季新款",
+        "categoryId": 2101193,
+        "category_name": "半身裙",
+        "secondCategoryId": 2101193,
+        "topCategoryId": 61601,
+        "description": "<div id='offer-template-0'></div><p><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/WXhNb/8822221153828_description_01.jpg?Expires=3362177706&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=yBiGoCozNKBd7UjxPN%2BppBpky2w%3D'/><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/hywAm/8822221153828_description_02.jpg?Expires=3362177706&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=UhcwN8dNspmnrGhfRc82OBWivrY%3D'/><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/JWn1n/8822221153828_description_03.jpg?Expires=3362177706&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=iDkAyC1l9JLPwfruhYMlXMmb1LE%3D'/><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/aNqen/8822221153828_description_04.jpg?Expires=3362177706&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=cezI0sFYD1lxGHsYhUvTj76v4Zw%3D'/><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/fpeuj/8822221153828_description_05.jpg?Expires=3362177707&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=uaTEYUJ30r3BmKN6rGaMpauph98%3D'/><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/LXarN/8822221153828_description_06.jpg?Expires=3362177707&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=Gv5dZQKs%2BLFVCwZ4DEbdDx7baII%3D'/><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/zluVb/8822221153828_description_07.jpg?Expires=3362177707&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=W6gz4GwH%2BOzYAeOpgdTbtu7h2m0%3D'/></p>",
+        "productAttribute": [
+          {
+            "attributeId": "9002",
+            "valueTrans": "纯色",
+            "attributeName": "图案",
+            "attributeNameTrans": "图案",
+            "value": "纯色"
+          },
+          {
+            "attributeId": "1508",
+            "valueTrans": "百褶",
+            "attributeName": "工艺",
+            "attributeNameTrans": "工艺",
+            "value": "百褶"
+          },
+          {
+            "attributeId": "100120351",
+            "valueTrans": "涤纶（聚酯纤维）",
+            "attributeName": "面料名称",
+            "attributeNameTrans": "面料名称",
+            "value": "涤纶（聚酯纤维）"
+          },
+          {
+            "attributeId": "714518418",
+            "valueTrans": "其他/other",
+            "attributeName": "主面料成分2",
+            "attributeNameTrans": "主面料成分2",
+            "value": "其他/other"
+          },
+          {
+            "attributeId": "26606",
+            "valueTrans": "2026年夏季",
+            "attributeName": "上市年份/季节",
+            "attributeNameTrans": "上市年份/季节",
+            "value": "2026年夏季"
+          },
+          {
+            "attributeId": "9813",
+            "valueTrans": "BM146-2633#",
+            "attributeName": "货号",
+            "attributeNameTrans": "货号",
+            "value": "BM146-2633#"
+          },
+          {
+            "attributeId": "6721",
+            "valueTrans": "无",
+            "attributeName": "品牌",
+            "attributeNameTrans": "品牌",
+            "value": "无"
+          },
+          {
+            "attributeId": "13324",
+            "valueTrans": "百褶裙",
+            "attributeName": "裙型",
+            "attributeNameTrans": "裙型",
+            "value": "百褶裙"
+          },
+          {
+            "attributeId": "20608",
+            "valueTrans": "长裙",
+            "attributeName": "裙长",
+            "attributeNameTrans": "裙长",
+            "value": "长裙"
+          },
+          {
+            "attributeId": "8146",
+            "valueTrans": "百褶",
+            "attributeName": "流行元素",
+            "attributeNameTrans": "流行元素",
+            "value": "百褶"
+          },
+          {
+            "attributeId": "6312",
+            "valueTrans": "粉色半身裙",
+            "attributeName": "颜色",
+            "attributeNameTrans": "颜色",
+            "value": "粉色半身裙"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "S",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "S"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "M",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "M"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "L",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "L"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "XL",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "XL"
+          },
+          {
+            "attributeId": "2438986",
+            "valueTrans": "日韩休闲",
+            "attributeName": "风格类型",
+            "attributeNameTrans": "风格类型",
+            "value": "日韩休闲"
+          },
+          {
+            "attributeId": "410",
+            "valueTrans": "休闲风",
+            "attributeName": "风格",
+            "attributeNameTrans": "风格",
+            "value": "休闲风"
+          },
+          {
+            "attributeId": "6971",
+            "valueTrans": "半身裙",
+            "attributeName": "裙类别",
+            "attributeNameTrans": "裙类别",
+            "value": "半身裙"
+          },
+          {
+            "attributeId": "60911336",
+            "valueTrans": "休闲",
+            "attributeName": "适用场景",
+            "attributeNameTrans": "适用场景",
+            "value": "休闲"
+          },
+          {
+            "attributeId": "24528736",
+            "valueTrans": "无弹",
+            "attributeName": "弹力",
+            "attributeNameTrans": "弹力",
+            "value": "无弹"
+          },
+          {
+            "attributeId": "192572361",
+            "valueTrans": "否",
+            "attributeName": "是否跨境货源",
+            "attributeNameTrans": "是否跨境货源",
+            "value": "否"
+          },
+          {
+            "attributeId": "257816201",
+            "valueTrans": "有领标",
+            "attributeName": "领标",
+            "attributeNameTrans": "领标",
+            "value": "有领标"
+          },
+          {
+            "attributeId": "120506003",
+            "valueTrans": "源头工厂",
+            "attributeName": "货源类型",
+            "attributeNameTrans": "货源类型",
+            "value": "源头工厂"
+          },
+          {
+            "attributeId": "913680006",
+            "valueTrans": "有吊牌",
+            "attributeName": "吊牌",
+            "attributeNameTrans": "吊牌",
+            "value": "有吊牌"
+          },
+          {
+            "attributeId": "110356247",
+            "valueTrans": "30%（含）-50%（不含）",
+            "attributeName": "主面料成分2含量",
+            "attributeNameTrans": "主面料成分2含量",
+            "value": "30%（含）-50%（不含）"
+          },
+          {
+            "attributeId": "1107",
+            "valueTrans": "青年",
+            "attributeName": "适用人群",
+            "attributeNameTrans": "适用人群",
+            "value": "青年"
+          },
+          {
+            "attributeId": "870192741",
+            "valueTrans": "苹果型",
+            "attributeName": "适用体型",
+            "attributeNameTrans": "适用体型",
+            "value": "苹果型"
+          }
+        ],
+        "productImage": {
+          "images": [
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/ZBe2y/8822221153828_productImage_01.jpg?Expires=3362177706&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=8hLaGva1JthSt4bjTTRsdj0UQog%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/MqV5b/8822221153828_productImage_02.jpg?Expires=3362177706&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=ywLnc7YmShYsXK9Rp1b3tWcUhro%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/YuocW/8822221153828_productImage_03.jpg?Expires=3362177706&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=Zr4MFsrHnaqyke53vdidCE8h3Io%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/KW2Fs/8822221153828_productImage_04.jpg?Expires=3362177706&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=js86tpLcCxIGGWp2Yi4DsgJT1z8%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/Oc1Pk/8822221153828_productImage_05.jpg?Expires=3362177706&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=VD2F8eEvf3aOveZdWqIZmp%2FnXOw%3D"
+          ]
+        },
+        "productSkuInfos": [
+          {
+            "skuId": 9028664459290,
+            "specId": "f476be3ec9586f18fd6d443420f3d22a",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/jbsby/8822221153828_sku_sku001_%E7%B2%89%E8%89%B2%E5%8D%8A%E8%BA%AB%E8%A3%99.jpg?Expires=3362177706&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=3AruuDmmSgQLMtQ3EHtxOciqJRo%3D",
+                "valueTrans": "粉色半身裙",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "粉色半身裙"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "S",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "S"
+              }
+            ],
+            "amountOnSale": 98
+          },
+          {
+            "skuId": 1339986150992,
+            "specId": "0687552241a04838c266301ecd9b4e83",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/KnnRl/8822221153828_sku_sku002_%E7%B2%89%E8%89%B2%E5%8D%8A%E8%BA%AB%E8%A3%99.jpg?Expires=3362177706&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=v8nsxiYBskNn6%2FhSU5xFa8BX300%3D",
+                "valueTrans": "粉色半身裙",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "粉色半身裙"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "M",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "M"
+              }
+            ],
+            "amountOnSale": 99
+          },
+          {
+            "skuId": 5568020389660,
+            "specId": "4c721beabc336a03ff35548b3c72252f",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/a4lZ0/8822221153828_sku_sku003_%E7%B2%89%E8%89%B2%E5%8D%8A%E8%BA%AB%E8%A3%99.jpg?Expires=3362177706&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=c8m4J61z09md%2BBbmytmPgjsSPZY%3D",
+                "valueTrans": "粉色半身裙",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "粉色半身裙"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "L",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "L"
+              }
+            ],
+            "amountOnSale": 100
+          },
+          {
+            "skuId": 4217159770196,
+            "specId": "d6b42617d889938357b37b27a68dbeba",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/XmPlN/8822221153828_sku_sku004_%E7%B2%89%E8%89%B2%E5%8D%8A%E8%BA%AB%E8%A3%99.jpg?Expires=3362177706&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=28UP%2B0rQQCzYt6dLFKM0%2BqkdpZQ%3D",
+                "valueTrans": "粉色半身裙",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "粉色半身裙"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "XL"
+              }
+            ],
+            "amountOnSale": 100
+          }
+        ],
+        "minOrderQuantity": 1,
+        "productSaleInfo": {
+          "amountOnSale": 397,
+          "unitInfo": {
+            "unit": "件",
+            "transUnit": "件"
+          }
+        },
+        "tradeScore": "5.0"
+      },
+      "code": "200",
+      "success": true
+    }
+  }
+}

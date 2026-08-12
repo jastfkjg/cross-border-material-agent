@@ -1,0 +1,4 @@
+# Runtime dependencies are vendored into vendor/ by scripts/build_submission.py.
+# Pinned here so the submission remains reproducible on Debian 12 x86_64.
+Pillow==11.3.0
+imageio-ffmpeg==0.6.0

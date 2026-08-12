@@ -1,0 +1,582 @@
+{
+  "ret": {
+    "result": {
+      "result": {
+        "platform": "123批发网",
+        "url": "https://www.123.com/",
+        "offerId": 9451226053560,
+        "subject": "2023男士商务免烫弹力衬衫长袖光泽丝滑透气休闲纯色衬衣男装批发",
+        "subjectTrans": "2023男士商务免烫弹力衬衫长袖光泽丝滑透气休闲纯色衬衣男装批发",
+        "categoryId": 134,
+        "category_name": "男式衬衫",
+        "secondCategoryId": 134,
+        "topCategoryId": 61105,
+        "description": "<div id='offer-template-0'></div><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/mwXfb/9451226053560_description_01.jpg?Expires=3362177705&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=6rpR%2B5sQ%2FxISRhmjqOl9oSY4gfY%3D'/><p><img alt='10' src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/trI04/9451226053560_description_02.jpg?Expires=3362177705&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=1F5EeyRUJBtnZ6XGccBNiBp9nVE%3D'/></p>",
+        "productAttribute": [
+          {
+            "attributeId": "601000901",
+            "valueTrans": "现货",
+            "attributeName": "货源类别",
+            "attributeNameTrans": "货源类别",
+            "value": "现货"
+          },
+          {
+            "attributeId": "6721",
+            "valueTrans": "JINMAOPORO/津猫保罗",
+            "attributeName": "品牌",
+            "attributeNameTrans": "品牌",
+            "value": "JINMAOPORO/津猫保罗"
+          },
+          {
+            "attributeId": "9813",
+            "valueTrans": "C215",
+            "attributeName": "货号",
+            "attributeNameTrans": "货号",
+            "value": "C215"
+          },
+          {
+            "attributeId": "100120351",
+            "valueTrans": "化纤类混纺",
+            "attributeName": "面料名称",
+            "attributeNameTrans": "面料名称",
+            "value": "化纤类混纺"
+          },
+          {
+            "attributeId": "171509542",
+            "valueTrans": "透气",
+            "attributeName": "材质功能",
+            "attributeNameTrans": "材质功能",
+            "value": "透气"
+          },
+          {
+            "attributeId": "171509542",
+            "valueTrans": "可机洗",
+            "attributeName": "材质功能",
+            "attributeNameTrans": "材质功能",
+            "value": "可机洗"
+          },
+          {
+            "attributeId": "171509542",
+            "valueTrans": "防皱",
+            "attributeName": "材质功能",
+            "attributeNameTrans": "材质功能",
+            "value": "防皱"
+          },
+          {
+            "attributeId": "171509542",
+            "valueTrans": "高弹",
+            "attributeName": "材质功能",
+            "attributeNameTrans": "材质功能",
+            "value": "高弹"
+          },
+          {
+            "attributeId": "171509542",
+            "valueTrans": "免烫",
+            "attributeName": "材质功能",
+            "attributeNameTrans": "材质功能",
+            "value": "免烫"
+          },
+          {
+            "attributeId": "171509542",
+            "valueTrans": "吸湿排汗",
+            "attributeName": "材质功能",
+            "attributeNameTrans": "材质功能",
+            "value": "吸湿排汗"
+          },
+          {
+            "attributeId": "171509542",
+            "valueTrans": "不易褪色",
+            "attributeName": "材质功能",
+            "attributeNameTrans": "材质功能",
+            "value": "不易褪色"
+          },
+          {
+            "attributeId": "8969598",
+            "valueTrans": "50支",
+            "attributeName": "面料支数",
+            "attributeNameTrans": "面料支数",
+            "value": "50支"
+          },
+          {
+            "attributeId": "379",
+            "valueTrans": "轻商务",
+            "attributeName": "风格",
+            "attributeNameTrans": "风格",
+            "value": "轻商务"
+          },
+          {
+            "attributeId": "830425192",
+            "valueTrans": "商务绅士（35岁以上）",
+            "attributeName": "淘货类别",
+            "attributeNameTrans": "淘货类别",
+            "value": "商务绅士（35岁以上）"
+          },
+          {
+            "attributeId": "8111",
+            "valueTrans": "开衫",
+            "attributeName": "款式",
+            "attributeNameTrans": "款式",
+            "value": "开衫"
+          },
+          {
+            "attributeId": "48258452",
+            "valueTrans": "合体型",
+            "attributeName": "版型",
+            "attributeNameTrans": "版型",
+            "value": "合体型"
+          },
+          {
+            "attributeId": "60220",
+            "valueTrans": "翻领",
+            "attributeName": "领型",
+            "attributeNameTrans": "领型",
+            "value": "翻领"
+          },
+          {
+            "attributeId": "1700",
+            "valueTrans": "长袖",
+            "attributeName": "袖长",
+            "attributeNameTrans": "袖长",
+            "value": "长袖"
+          },
+          {
+            "attributeId": "9002",
+            "valueTrans": "纯色",
+            "attributeName": "图案",
+            "attributeNameTrans": "图案",
+            "value": "纯色"
+          },
+          {
+            "attributeId": "2070",
+            "valueTrans": "普通",
+            "attributeName": "厚薄",
+            "attributeNameTrans": "厚薄",
+            "value": "普通"
+          },
+          {
+            "attributeId": "195007010",
+            "valueTrans": "1-2cm",
+            "attributeName": "误差范围",
+            "attributeNameTrans": "误差范围",
+            "value": "1-2cm"
+          },
+          {
+            "attributeId": "1780",
+            "valueTrans": "是",
+            "attributeName": "是否库存",
+            "attributeNameTrans": "是否库存",
+            "value": "是"
+          },
+          {
+            "attributeId": "3284",
+            "valueTrans": "整单",
+            "attributeName": "库存类型",
+            "attributeNameTrans": "库存类型",
+            "value": "整单"
+          },
+          {
+            "attributeId": "6528",
+            "valueTrans": "其它",
+            "attributeName": "款式细节",
+            "attributeNameTrans": "款式细节",
+            "value": "其它"
+          },
+          {
+            "attributeId": "2792171",
+            "valueTrans": "中年",
+            "attributeName": "适合人群",
+            "attributeNameTrans": "适合人群",
+            "value": "中年"
+          },
+          {
+            "attributeId": "26606",
+            "valueTrans": "2025年春季",
+            "attributeName": "上市年份/季节",
+            "attributeNameTrans": "上市年份/季节",
+            "value": "2025年春季"
+          },
+          {
+            "attributeId": "718301711",
+            "valueTrans": "氨纶",
+            "attributeName": "主面料成分",
+            "attributeNameTrans": "主面料成分",
+            "value": "氨纶"
+          },
+          {
+            "attributeId": "108611152",
+            "valueTrans": "4",
+            "attributeName": "主面料成分的含量",
+            "attributeNameTrans": "主面料成分的含量",
+            "value": "4"
+          },
+          {
+            "attributeId": "60911336",
+            "valueTrans": "日常",
+            "attributeName": "适用场景",
+            "attributeNameTrans": "适用场景",
+            "value": "日常"
+          },
+          {
+            "attributeId": "6312",
+            "valueTrans": "GC21-6薄荷绿",
+            "attributeName": "颜色",
+            "attributeNameTrans": "颜色",
+            "value": "GC21-6薄荷绿"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "38码",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "38码"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "39码",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "39码"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "40码",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "40码"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "41码",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "41码"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "42码",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "42码"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "43码",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "43码"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "44码",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "44码"
+          },
+          {
+            "attributeId": "1253",
+            "valueTrans": "四季",
+            "attributeName": "适合季节",
+            "attributeNameTrans": "适合季节",
+            "value": "四季"
+          },
+          {
+            "attributeId": "1508",
+            "valueTrans": "免烫处理",
+            "attributeName": "工艺",
+            "attributeNameTrans": "工艺",
+            "value": "免烫处理"
+          },
+          {
+            "attributeId": "188831912",
+            "valueTrans": "独立站",
+            "attributeName": "主要下游平台",
+            "attributeNameTrans": "主要下游平台",
+            "value": "独立站"
+          },
+          {
+            "attributeId": "188831912",
+            "valueTrans": "其他",
+            "attributeName": "主要下游平台",
+            "attributeNameTrans": "主要下游平台",
+            "value": "其他"
+          },
+          {
+            "attributeId": "230920091",
+            "valueTrans": "欧洲",
+            "attributeName": "主要销售地区",
+            "attributeNameTrans": "主要销售地区",
+            "value": "欧洲"
+          },
+          {
+            "attributeId": "230920091",
+            "valueTrans": "南美",
+            "attributeName": "主要销售地区",
+            "attributeNameTrans": "主要销售地区",
+            "value": "南美"
+          },
+          {
+            "attributeId": "230920091",
+            "valueTrans": "东南亚",
+            "attributeName": "主要销售地区",
+            "attributeNameTrans": "主要销售地区",
+            "value": "东南亚"
+          },
+          {
+            "attributeId": "230920091",
+            "valueTrans": "北美",
+            "attributeName": "主要销售地区",
+            "attributeNameTrans": "主要销售地区",
+            "value": "北美"
+          },
+          {
+            "attributeId": "230920091",
+            "valueTrans": "东北亚",
+            "attributeName": "主要销售地区",
+            "attributeNameTrans": "主要销售地区",
+            "value": "东北亚"
+          },
+          {
+            "attributeId": "230920091",
+            "valueTrans": "中东",
+            "attributeName": "主要销售地区",
+            "attributeNameTrans": "主要销售地区",
+            "value": "中东"
+          },
+          {
+            "attributeId": "230920091",
+            "valueTrans": "其他",
+            "attributeName": "主要销售地区",
+            "attributeNameTrans": "主要销售地区",
+            "value": "其他"
+          },
+          {
+            "attributeId": "300120993",
+            "valueTrans": "是",
+            "attributeName": "有可授权的自有品牌",
+            "attributeNameTrans": "有可授权的自有品牌",
+            "value": "是"
+          },
+          {
+            "attributeId": "282221382",
+            "valueTrans": "是",
+            "attributeName": "是否跨境出口专供货源",
+            "attributeNameTrans": "是否跨境出口专供货源",
+            "value": "是"
+          },
+          {
+            "attributeId": "256457483",
+            "valueTrans": "是",
+            "attributeName": "原创设计货源",
+            "attributeNameTrans": "原创设计货源",
+            "value": "是"
+          },
+          {
+            "attributeId": "465242411",
+            "valueTrans": "否",
+            "attributeName": "有无质检报告",
+            "attributeNameTrans": "有无质检报告",
+            "value": "否"
+          },
+          {
+            "attributeId": "1770",
+            "valueTrans": "成人",
+            "attributeName": "适用年龄段",
+            "attributeNameTrans": "适用年龄段",
+            "value": "成人"
+          },
+          {
+            "attributeId": "6200",
+            "valueTrans": "男",
+            "attributeName": "适用性别",
+            "attributeNameTrans": "适用性别",
+            "value": "男"
+          },
+          {
+            "attributeId": "643",
+            "valueTrans": "衬衫",
+            "attributeName": "产品类别",
+            "attributeNameTrans": "产品类别",
+            "value": "衬衫"
+          }
+        ],
+        "productImage": {
+          "images": [
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/EU4RN/9451226053560_productImage_01.jpg?Expires=3362177705&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=H73ViDoMHWLMx7D5YoxRRELuuGg%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/nJbED/9451226053560_productImage_02.jpg?Expires=3362177705&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=MhVzLqO7uwylVzUoA0X0BQ7e0nY%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/tTLon/9451226053560_productImage_03.jpg?Expires=3362177705&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=GVEsojGuGGwl83CQ%2F2I3CUSMWhU%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/EAy6Q/9451226053560_productImage_04.jpg?Expires=3362177705&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=elHueGsFByWzOOxnlf5IPBif9tM%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/Hp2Fy/9451226053560_productImage_05.jpg?Expires=3362177705&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=72pcdhSfobReI%2FpGzGSuWefRjKQ%3D"
+          ],
+          "whiteImage": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/v1So7/9451226053560_whiteImage_whiteImage.jpg?Expires=3362177704&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=%2FjX2XP%2B%2FSJvLdJqWtBVOfhGeeVg%3D"
+        },
+        "productSkuInfos": [
+          {
+            "skuId": 3954143783476,
+            "specId": "106827298bd1534615eee831c9d75761",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/Keg2V/9451226053560_sku_sku001_GC21-6%E8%96%84%E8%8D%B7%E7%BB%BF.jpg?Expires=3362177704&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=qM1oJ3eb7CgUsWJ%2F3vkccjjFk5s%3D",
+                "valueTrans": "GC21-6薄荷绿",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "GC21-6薄荷绿"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "38码",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "38码"
+              }
+            ],
+            "amountOnSale": 999
+          },
+          {
+            "skuId": 3679402073716,
+            "specId": "c078208c08fabc0c885a019c38659653",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/Zn3kQ/9451226053560_sku_sku002_GC21-6%E8%96%84%E8%8D%B7%E7%BB%BF.jpg?Expires=3362177704&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=jISHqz6%2FeyZCHAXfhR5T8wunnUk%3D",
+                "valueTrans": "GC21-6薄荷绿",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "GC21-6薄荷绿"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "39码",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "39码"
+              }
+            ],
+            "amountOnSale": 998
+          },
+          {
+            "skuId": 6584644386131,
+            "specId": "7942a2c16e3557c22cc4189169ef458e",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/R1XuA/9451226053560_sku_sku003_GC21-6%E8%96%84%E8%8D%B7%E7%BB%BF.jpg?Expires=3362177705&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=vZsxDOa2yFC%2B0Qd%2BFQhdMA9Bcws%3D",
+                "valueTrans": "GC21-6薄荷绿",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "GC21-6薄荷绿"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "40码",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "40码"
+              }
+            ],
+            "amountOnSale": 998
+          },
+          {
+            "skuId": 8225341427399,
+            "specId": "01e96a5e1cdb57acbb0a515c4d4bdeb9",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/twVH0/9451226053560_sku_sku004_GC21-6%E8%96%84%E8%8D%B7%E7%BB%BF.jpg?Expires=3362177705&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=%2B%2BMoG6I9rCBMG9iCC8mxfals7xs%3D",
+                "valueTrans": "GC21-6薄荷绿",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "GC21-6薄荷绿"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "41码",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "41码"
+              }
+            ],
+            "amountOnSale": 998
+          },
+          {
+            "skuId": 4478908769856,
+            "specId": "84f92e3ba08895d18adf258f55543e5d",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/5nnVH/9451226053560_sku_sku005_GC21-6%E8%96%84%E8%8D%B7%E7%BB%BF.jpg?Expires=3362177705&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=%2Fm4Dx%2FPmyp1OYdpv3qFMCzjgjHY%3D",
+                "valueTrans": "GC21-6薄荷绿",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "GC21-6薄荷绿"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "42码",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "42码"
+              }
+            ],
+            "amountOnSale": 999
+          },
+          {
+            "skuId": 7781103643226,
+            "specId": "3e7a72761d05e5cea0184a032dacd0b1",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/Idf6K/9451226053560_sku_sku006_GC21-6%E8%96%84%E8%8D%B7%E7%BB%BF.jpg?Expires=3362177705&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=EFiSYdZWF7mlzrMqDB%2Fr8TzNpWA%3D",
+                "valueTrans": "GC21-6薄荷绿",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "GC21-6薄荷绿"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "43码",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "43码"
+              }
+            ],
+            "amountOnSale": 999
+          },
+          {
+            "skuId": 1832560324198,
+            "specId": "0b1ebd8324b0e1906c7280b368594906",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/GIfqS/9451226053560_sku_sku007_GC21-6%E8%96%84%E8%8D%B7%E7%BB%BF.jpg?Expires=3362177705&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=QGfCgzFj2QYBehe18Z%2F2zudN7dQ%3D",
+                "valueTrans": "GC21-6薄荷绿",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "GC21-6薄荷绿"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "44码",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "44码"
+              }
+            ],
+            "amountOnSale": 999
+          }
+        ],
+        "minOrderQuantity": 1,
+        "productSaleInfo": {
+          "amountOnSale": 6990,
+          "unitInfo": {
+            "unit": "件",
+            "transUnit": "件"
+          }
+        },
+        "tradeScore": "0.0"
+      },
+      "code": "200",
+      "success": true
+    }
+  }
+}

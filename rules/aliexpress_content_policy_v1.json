@@ -1,0 +1,51 @@
+{
+  "version": "2026-08-v1",
+  "scope": "Generated marketing prose and generated visual prompts",
+  "prohibited_claims": {
+    "en": [
+      "100% guaranteed",
+      "guaranteed results",
+      "best on the market",
+      "number one",
+      "miracle",
+      "cures",
+      "medical grade",
+      "clinically proven",
+      "officially certified"
+    ],
+    "ko": [
+      "100% 보장",
+      "무조건",
+      "업계 최고",
+      "기적",
+      "치료",
+      "의료용",
+      "임상적으로 입증",
+      "공식 인증"
+    ],
+    "pt": [
+      "100% garantido",
+      "resultado garantido",
+      "o melhor do mercado",
+      "número um",
+      "milagroso",
+      "cura",
+      "grau médico",
+      "clinicamente comprovado",
+      "oficialmente certificado"
+    ]
+  },
+  "visual_prompt_forbidden": [
+    "price tag",
+    "discount badge",
+    "five-star review",
+    "certification seal",
+    "before and after body",
+    "celebrity endorsement",
+    "new brand logo"
+  ],
+  "notes": [
+    "This local ruleset is a conservative runtime guard, not a substitute for legal review.",
+    "Canonical source data is preserved even when it contains terms that may not be suitable as generated marketing claims."
+  ]
+}

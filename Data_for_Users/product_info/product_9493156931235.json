@@ -1,0 +1,1418 @@
+{
+  "ret": {
+    "result": {
+      "result": {
+        "platform": "123批发网",
+        "url": "https://www.123.com/",
+        "offerId": 9493156931235,
+        "subject": "夏季士五分沙滩短裤大裤头外穿宽松纯色居家休闲花裤衩潮男士弹",
+        "subjectTrans": "夏季士五分沙滩短裤大裤头外穿宽松纯色居家休闲花裤衩潮男士弹",
+        "categoryId": 9801013,
+        "category_name": "男式休闲裤",
+        "secondCategoryId": 9801013,
+        "topCategoryId": 61105,
+        "description": "<div id='offer-template-0'></div><p>&nbsp;</p><div>&nbsp;</div><div>&nbsp;</div><p style='text-align: center;'><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/YbG38/9493156931235_description_01.jpg?Expires=3362177704&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=hsnrB23LfQPo3S%2FHIfPf4Uro8sg%3D' alt='undefined' width='790' height='869'/><br/><br/><br/><br/><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/tsYMz/9493156931235_description_02.jpg?Expires=3362177704&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=A88Fq2ysnw4cERZjlRZRHqJERPY%3D' alt='undefined' width='790' height='790'/><br/><br/><br/><br/><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/Scp6l/9493156931235_description_03.jpg?Expires=3362177704&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=WbehFSjfjVf9zSjeKHVu7cSW1Ks%3D' alt='undefined' width='790' height='790'/><br/><br/><br/><br/><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/VflPy/9493156931235_description_04.jpg?Expires=3362177704&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=o0LuJqhETENRe75joipJ2gw1AoY%3D' alt='undefined' width='790' height='790'/><br/><br/><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/xj6WT/9493156931235_description_05.jpg?Expires=3362177704&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=jmoe69o0bPEQ9jeK%2F1p2aOzraIQ%3D' alt='undefined' width='790' height='790'/><br/><br/><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/WsMws/9493156931235_description_06.jpg?Expires=3362177704&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=biGtSiuLxPDGM%2FcKMBu1CnUyrn4%3D' alt='undefined' width='790' height='790'/><br/><br/><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/09AR5/9493156931235_description_07.jpg?Expires=3362177704&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=uGupwrGWLD145Cj3GeVgWO9rZsg%3D' alt='undefined' width='790' height='790'/><br/><br/><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/7dyC2/9493156931235_description_08.jpg?Expires=3362177704&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=hleOjfvZUdUHXUc0gmfpxAK3bKg%3D' alt='undefined' width='790' height='790'/><br/><br/><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/B6rEU/9493156931235_description_09.jpg?Expires=3362177704&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=lmstlPvPKQuOoHV%2BnSmSBRwC8Hs%3D' alt='undefined' width='790' height='790'/><br/><span style='font-size: 22.0pt;color: #ff0000;'><img src='https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/D9D2N/9493156931235_description_10.jpg?Expires=3362177704&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=khQF39XbJ8af2jDBRtzxzzlItcY%3D' alt='undefined'/><br class='img-brk'/><br class='img-brk'/></span></p>",
+        "productAttribute": [
+          {
+            "attributeId": "601000901",
+            "valueTrans": "现货",
+            "attributeName": "货源类别",
+            "attributeNameTrans": "货源类别",
+            "value": "现货"
+          },
+          {
+            "attributeId": "6721",
+            "valueTrans": "其它",
+            "attributeName": "品牌",
+            "attributeNameTrans": "品牌",
+            "value": "其它"
+          },
+          {
+            "attributeId": "9813",
+            "valueTrans": "直贡呢五分裤",
+            "attributeName": "货号",
+            "attributeNameTrans": "货号",
+            "value": "直贡呢五分裤"
+          },
+          {
+            "attributeId": "379",
+            "valueTrans": "韩版",
+            "attributeName": "风格",
+            "attributeNameTrans": "风格",
+            "value": "韩版"
+          },
+          {
+            "attributeId": "830425192",
+            "valueTrans": "青春流行（18-24岁）",
+            "attributeName": "淘货类别",
+            "attributeNameTrans": "淘货类别",
+            "value": "青春流行（18-24岁）"
+          },
+          {
+            "attributeId": "8111",
+            "valueTrans": "基本款",
+            "attributeName": "款式",
+            "attributeNameTrans": "款式",
+            "value": "基本款"
+          },
+          {
+            "attributeId": "62706",
+            "valueTrans": "直筒型",
+            "attributeName": "裤型",
+            "attributeNameTrans": "裤型",
+            "value": "直筒型"
+          },
+          {
+            "attributeId": "5082",
+            "valueTrans": "五分裤",
+            "attributeName": "裤长",
+            "attributeNameTrans": "裤长",
+            "value": "五分裤"
+          },
+          {
+            "attributeId": "76720",
+            "valueTrans": "中腰",
+            "attributeName": "腰型",
+            "attributeNameTrans": "腰型",
+            "value": "中腰"
+          },
+          {
+            "attributeId": "83458115",
+            "valueTrans": "有腰带",
+            "attributeName": "是否有腰带",
+            "attributeNameTrans": "是否有腰带",
+            "value": "有腰带"
+          },
+          {
+            "attributeId": "8235",
+            "valueTrans": "系绳闭襟",
+            "attributeName": "裤门襟",
+            "attributeNameTrans": "裤门襟",
+            "value": "系绳闭襟"
+          },
+          {
+            "attributeId": "2070",
+            "valueTrans": "普通",
+            "attributeName": "厚薄",
+            "attributeNameTrans": "厚薄",
+            "value": "普通"
+          },
+          {
+            "attributeId": "9002",
+            "valueTrans": "纯色",
+            "attributeName": "图案",
+            "attributeNameTrans": "图案",
+            "value": "纯色"
+          },
+          {
+            "attributeId": "195007010",
+            "valueTrans": "1-2cm",
+            "attributeName": "误差范围",
+            "attributeNameTrans": "误差范围",
+            "value": "1-2cm"
+          },
+          {
+            "attributeId": "1253",
+            "valueTrans": "夏季",
+            "attributeName": "适合季节",
+            "attributeNameTrans": "适合季节",
+            "value": "夏季"
+          },
+          {
+            "attributeId": "1780",
+            "valueTrans": "是",
+            "attributeName": "是否库存",
+            "attributeNameTrans": "是否库存",
+            "value": "是"
+          },
+          {
+            "attributeId": "3284",
+            "valueTrans": "整单",
+            "attributeName": "库存类型",
+            "attributeNameTrans": "库存类型",
+            "value": "整单"
+          },
+          {
+            "attributeId": "2792171",
+            "valueTrans": "青年",
+            "attributeName": "适合人群",
+            "attributeNameTrans": "适合人群",
+            "value": "青年"
+          },
+          {
+            "attributeId": "26606",
+            "valueTrans": "2026年夏季",
+            "attributeName": "上市年份/季节",
+            "attributeNameTrans": "上市年份/季节",
+            "value": "2026年夏季"
+          },
+          {
+            "attributeId": "100120351",
+            "valueTrans": "其他",
+            "attributeName": "面料名称",
+            "attributeNameTrans": "面料名称",
+            "value": "其他"
+          },
+          {
+            "attributeId": "718301711",
+            "valueTrans": "涤纶（聚酯纤维）",
+            "attributeName": "主面料成分",
+            "attributeNameTrans": "主面料成分",
+            "value": "涤纶（聚酯纤维）"
+          },
+          {
+            "attributeId": "108611152",
+            "valueTrans": "60",
+            "attributeName": "主面料成分的含量",
+            "attributeNameTrans": "主面料成分的含量",
+            "value": "60"
+          },
+          {
+            "attributeId": "60911336",
+            "valueTrans": "休闲",
+            "attributeName": "适用场景",
+            "attributeNameTrans": "适用场景",
+            "value": "休闲"
+          },
+          {
+            "attributeId": "367421227",
+            "valueTrans": "直筒",
+            "attributeName": "裤脚口款式",
+            "attributeNameTrans": "裤脚口款式",
+            "value": "直筒"
+          },
+          {
+            "attributeId": "1508",
+            "valueTrans": "免烫处理",
+            "attributeName": "工艺",
+            "attributeNameTrans": "工艺",
+            "value": "免烫处理"
+          },
+          {
+            "attributeId": "6528",
+            "valueTrans": "其他",
+            "attributeName": "款式细节",
+            "attributeNameTrans": "款式细节",
+            "value": "其他"
+          },
+          {
+            "attributeId": "24528736",
+            "valueTrans": "微弹",
+            "attributeName": "弹力",
+            "attributeNameTrans": "弹力",
+            "value": "微弹"
+          },
+          {
+            "attributeId": "9911",
+            "valueTrans": "雪纺",
+            "attributeName": "面料",
+            "attributeNameTrans": "面料",
+            "value": "雪纺"
+          },
+          {
+            "attributeId": "6312",
+            "valueTrans": "白色",
+            "attributeName": "颜色",
+            "attributeNameTrans": "颜色",
+            "value": "白色"
+          },
+          {
+            "attributeId": "6312",
+            "valueTrans": "杏色",
+            "attributeName": "颜色",
+            "attributeNameTrans": "颜色",
+            "value": "杏色"
+          },
+          {
+            "attributeId": "6312",
+            "valueTrans": "绿色",
+            "attributeName": "颜色",
+            "attributeNameTrans": "颜色",
+            "value": "绿色"
+          },
+          {
+            "attributeId": "6312",
+            "valueTrans": "黑色",
+            "attributeName": "颜色",
+            "attributeNameTrans": "颜色",
+            "value": "黑色"
+          },
+          {
+            "attributeId": "6312",
+            "valueTrans": "蓝色",
+            "attributeName": "颜色",
+            "attributeNameTrans": "颜色",
+            "value": "蓝色"
+          },
+          {
+            "attributeId": "6312",
+            "valueTrans": "深灰色",
+            "attributeName": "颜色",
+            "attributeNameTrans": "颜色",
+            "value": "深灰色"
+          },
+          {
+            "attributeId": "6312",
+            "valueTrans": "卡其色",
+            "attributeName": "颜色",
+            "attributeNameTrans": "颜色",
+            "value": "卡其色"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "M",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "M"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "L",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "L"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "XL",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "XL"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "2XL",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "2XL"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "3XL",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "3XL"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "4XL",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "4XL"
+          },
+          {
+            "attributeId": "540",
+            "valueTrans": "5XL",
+            "attributeName": "尺码",
+            "attributeNameTrans": "尺码",
+            "value": "5XL"
+          },
+          {
+            "attributeId": "282221382",
+            "valueTrans": "否",
+            "attributeName": "是否跨境出口专供货源",
+            "attributeNameTrans": "是否跨境出口专供货源",
+            "value": "否"
+          },
+          {
+            "attributeId": "73240",
+            "valueTrans": "运动休闲裤",
+            "attributeName": "类别",
+            "attributeNameTrans": "类别",
+            "value": "运动休闲裤"
+          },
+          {
+            "attributeId": "256457483",
+            "valueTrans": "否",
+            "attributeName": "原创设计货源",
+            "attributeNameTrans": "原创设计货源",
+            "value": "否"
+          },
+          {
+            "attributeId": "465242411",
+            "valueTrans": "否",
+            "attributeName": "有无质检报告",
+            "attributeNameTrans": "有无质检报告",
+            "value": "否"
+          },
+          {
+            "attributeId": "171509542",
+            "valueTrans": "高弹",
+            "attributeName": "材质功能",
+            "attributeNameTrans": "材质功能",
+            "value": "高弹"
+          },
+          {
+            "attributeId": "1770",
+            "valueTrans": "成人",
+            "attributeName": "适用年龄段",
+            "attributeNameTrans": "适用年龄段",
+            "value": "成人"
+          },
+          {
+            "attributeId": "57607417",
+            "valueTrans": "否",
+            "attributeName": "是否加绒",
+            "attributeNameTrans": "是否加绒",
+            "value": "否"
+          },
+          {
+            "attributeId": "6200",
+            "valueTrans": "男",
+            "attributeName": "适用性别",
+            "attributeNameTrans": "适用性别",
+            "value": "男"
+          },
+          {
+            "attributeId": "257816201",
+            "valueTrans": "无领标",
+            "attributeName": "领标",
+            "attributeNameTrans": "领标",
+            "value": "无领标"
+          },
+          {
+            "attributeId": "643",
+            "valueTrans": "休闲裤",
+            "attributeName": "产品类别",
+            "attributeNameTrans": "产品类别",
+            "value": "休闲裤"
+          },
+          {
+            "attributeId": "120506003",
+            "valueTrans": "其他品牌",
+            "attributeName": "货源类型",
+            "attributeNameTrans": "货源类型",
+            "value": "其他品牌"
+          },
+          {
+            "attributeId": "913680006",
+            "valueTrans": "无吊牌",
+            "attributeName": "吊牌",
+            "attributeNameTrans": "吊牌",
+            "value": "无吊牌"
+          },
+          {
+            "attributeId": "870192741",
+            "valueTrans": "直筒型",
+            "attributeName": "适用体型",
+            "attributeNameTrans": "适用体型",
+            "value": "直筒型"
+          }
+        ],
+        "productImage": {
+          "images": [
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/i84dm/9493156931235_productImage_01.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=icM1%2BTiV0JeHAaJBFlEq%2BArg1E4%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/lp1Qh/9493156931235_productImage_02.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=uQMybs1bhqLYpO%2Ft1moa1SSENmM%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/lkLPQ/9493156931235_productImage_03.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=vh3qxCPTJe3Z%2FYs3hRVGy22S7Hc%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/UEYZS/9493156931235_productImage_04.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=NTTKDYtm2N7vrX9%2FUGAT7wBAjAE%3D",
+            "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/6Dr4J/9493156931235_productImage_05.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=GTWaIt8%2FjWfaPZUqCvXZKZz3WIM%3D"
+          ],
+          "whiteImage": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/Jlj0g/9493156931235_whiteImage_whiteImage.jpg?Expires=3362177700&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=jChBCjoV%2FSjABnQCwCmHFAjbdns%3D"
+        },
+        "productSkuInfos": [
+          {
+            "skuId": 6476859460588,
+            "specId": "ed45465dda95eec0534bfa1f566fa014",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/j2j5d/9493156931235_sku_sku001_%E7%99%BD%E8%89%B2.jpg?Expires=3362177700&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=cCI1DhK0Otf2j75ZDy7MlUsyY8U%3D",
+                "valueTrans": "白色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "白色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "M",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "M"
+              }
+            ],
+            "amountOnSale": 9569
+          },
+          {
+            "skuId": 6391025655579,
+            "specId": "7e9119789a7dbe9d61692269c7891640",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/kZ44E/9493156931235_sku_sku002_%E7%99%BD%E8%89%B2.jpg?Expires=3362177700&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=jepQdyn0njzCYxA2cfzKT3%2FtZ4I%3D",
+                "valueTrans": "白色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "白色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "L",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "L"
+              }
+            ],
+            "amountOnSale": 10012
+          },
+          {
+            "skuId": 9990059794888,
+            "specId": "02fc08c22c9afa3aa97a858c2d8a8493",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/FlumW/9493156931235_sku_sku003_%E7%99%BD%E8%89%B2.jpg?Expires=3362177700&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=3l7%2FLpxkT1G5YEEwCUetDCx3n54%3D",
+                "valueTrans": "白色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "白色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "XL"
+              }
+            ],
+            "amountOnSale": 9743
+          },
+          {
+            "skuId": 8330383448719,
+            "specId": "7fa766dce3e7057779222484ea64869e",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/HeL75/9493156931235_sku_sku004_%E7%99%BD%E8%89%B2.jpg?Expires=3362177700&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=cCTd0bRUgdpVwoVN0lopNZl5es4%3D",
+                "valueTrans": "白色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "白色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "2XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "2XL"
+              }
+            ],
+            "amountOnSale": 9247
+          },
+          {
+            "skuId": 9523115114657,
+            "specId": "ec113766c27784a9ddad480ce153d103",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/3VcHN/9493156931235_sku_sku005_%E7%99%BD%E8%89%B2.jpg?Expires=3362177700&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=Qw3jLieDI1VNwoBmudmhq%2FHzhT0%3D",
+                "valueTrans": "白色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "白色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "3XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "3XL"
+              }
+            ],
+            "amountOnSale": 9639
+          },
+          {
+            "skuId": 5863085434518,
+            "specId": "1094124acf0512fd17b8aeab80a8d6f3",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/MnSGd/9493156931235_sku_sku006_%E7%99%BD%E8%89%B2.jpg?Expires=3362177700&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=un%2F2AWsAGC9oFwnCz1qOvvlFC%2Fk%3D",
+                "valueTrans": "白色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "白色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "4XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "4XL"
+              }
+            ],
+            "amountOnSale": 1649
+          },
+          {
+            "skuId": 2083531294051,
+            "specId": "21ee358158b13d567654d87e9139ca77",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/g4yx8/9493156931235_sku_sku007_%E7%99%BD%E8%89%B2.jpg?Expires=3362177700&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=8oC2ItSmA1G4WLttBP5rznGVAqY%3D",
+                "valueTrans": "白色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "白色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "5XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "5XL"
+              }
+            ],
+            "amountOnSale": 1794
+          },
+          {
+            "skuId": 6056924162630,
+            "specId": "b6a9bf7e3991e8fbd22f905224e503a5",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/z2TI8/9493156931235_sku_sku008_%E6%9D%8F%E8%89%B2.jpg?Expires=3362177700&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=PYUoov7qGJlMkSXT7RfuXXfssbU%3D",
+                "valueTrans": "杏色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "杏色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "M",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "M"
+              }
+            ],
+            "amountOnSale": 2893
+          },
+          {
+            "skuId": 1323428724131,
+            "specId": "17e9e2d75eaf44c208e4c234ff3fee98",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/trJc6/9493156931235_sku_sku009_%E6%9D%8F%E8%89%B2.jpg?Expires=3362177700&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=IHgu%2BxbiLhf7Wguq9T5IkdTj4Ko%3D",
+                "valueTrans": "杏色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "杏色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "L",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "L"
+              }
+            ],
+            "amountOnSale": 2846
+          },
+          {
+            "skuId": 3617492731009,
+            "specId": "3f65aea9679550e5052431bd0636ef47",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/EOVHo/9493156931235_sku_sku010_%E6%9D%8F%E8%89%B2.jpg?Expires=3362177701&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=8pZ3R5c3UcyopD6Kb8M2fzTubFk%3D",
+                "valueTrans": "杏色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "杏色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "XL"
+              }
+            ],
+            "amountOnSale": 2844
+          },
+          {
+            "skuId": 2193519571821,
+            "specId": "17eb8fb95c89f46997ba3f1dc71e9317",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/lQAlS/9493156931235_sku_sku011_%E6%9D%8F%E8%89%B2.jpg?Expires=3362177701&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=pU2u3sVkGksfvqwckldl4JGl9JE%3D",
+                "valueTrans": "杏色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "杏色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "2XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "2XL"
+              }
+            ],
+            "amountOnSale": 2862
+          },
+          {
+            "skuId": 6531735257696,
+            "specId": "01308fbdc81a77af55af063282bc5302",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/nAgNH/9493156931235_sku_sku012_%E6%9D%8F%E8%89%B2.jpg?Expires=3362177701&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=zlDOqEdChBRIikh5LaT%2FC2j32WU%3D",
+                "valueTrans": "杏色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "杏色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "3XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "3XL"
+              }
+            ],
+            "amountOnSale": 2876
+          },
+          {
+            "skuId": 8070175199171,
+            "specId": "dd2c52a85fa02783be206e6e6f21d062",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/e2IM7/9493156931235_sku_sku013_%E6%9D%8F%E8%89%B2.jpg?Expires=3362177701&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=M957OSR%2Bfv8Ws1prwBE57GFcIqI%3D",
+                "valueTrans": "杏色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "杏色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "4XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "4XL"
+              }
+            ],
+            "amountOnSale": 1733
+          },
+          {
+            "skuId": 1440253955786,
+            "specId": "5331da949aa593421f6dab0053770c37",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/pm8uS/9493156931235_sku_sku014_%E6%9D%8F%E8%89%B2.jpg?Expires=3362177701&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=2DSKjnX6jW3pILrQw%2FcTDZiA1pE%3D",
+                "valueTrans": "杏色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "杏色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "5XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "5XL"
+              }
+            ],
+            "amountOnSale": 1912
+          },
+          {
+            "skuId": 4379337283449,
+            "specId": "efc065ba2265190540b95f3a02452250",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/M4Z9g/9493156931235_sku_sku015_%E7%BB%BF%E8%89%B2.jpg?Expires=3362177701&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=ftOiLBRg0U7S36o%2BFkWLR9GXCsA%3D",
+                "valueTrans": "绿色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "绿色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "M",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "M"
+              }
+            ],
+            "amountOnSale": 9922
+          },
+          {
+            "skuId": 3191548176974,
+            "specId": "c84ef25141cd95bac1e400fc3917771b",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/amqh0/9493156931235_sku_sku016_%E7%BB%BF%E8%89%B2.jpg?Expires=3362177701&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=eJsQrx89rzfWggsK6bQPQCow%2Bws%3D",
+                "valueTrans": "绿色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "绿色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "L",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "L"
+              }
+            ],
+            "amountOnSale": 9927
+          },
+          {
+            "skuId": 1203184127887,
+            "specId": "c888c1b78863852e06a6769b200b8182",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/jyIef/9493156931235_sku_sku017_%E7%BB%BF%E8%89%B2.jpg?Expires=3362177701&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=iC3zVc8LEnqdA8c4arACw4MMqk4%3D",
+                "valueTrans": "绿色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "绿色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "XL"
+              }
+            ],
+            "amountOnSale": 9876
+          },
+          {
+            "skuId": 3043894458968,
+            "specId": "416bb1add438dec30afd07879575ee22",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/9Vo6B/9493156931235_sku_sku018_%E7%BB%BF%E8%89%B2.jpg?Expires=3362177701&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=qpeq9chJ5SDlss8aheNbgtbkS0w%3D",
+                "valueTrans": "绿色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "绿色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "2XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "2XL"
+              }
+            ],
+            "amountOnSale": 9896
+          },
+          {
+            "skuId": 5807172898301,
+            "specId": "4e8b0430f27d51b87de7e6bc2adcaac3",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/5CQRG/9493156931235_sku_sku019_%E7%BB%BF%E8%89%B2.jpg?Expires=3362177701&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=MkYK%2F388rWyQq9YNQsGZYE5BO88%3D",
+                "valueTrans": "绿色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "绿色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "3XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "3XL"
+              }
+            ],
+            "amountOnSale": 9866
+          },
+          {
+            "skuId": 1586759640051,
+            "specId": "628bf6357ce4237a22f8451e494175d7",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/ao9vl/9493156931235_sku_sku020_%E7%BB%BF%E8%89%B2.jpg?Expires=3362177701&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=FI7qMig1qd3drBg3kzdYbYAl9Js%3D",
+                "valueTrans": "绿色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "绿色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "4XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "4XL"
+              }
+            ],
+            "amountOnSale": 1915
+          },
+          {
+            "skuId": 8983193649603,
+            "specId": "010f32b499d30beaf33ca011b6670e29",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/sRLfz/9493156931235_sku_sku021_%E7%BB%BF%E8%89%B2.jpg?Expires=3362177701&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=oeCYbtBauvfO%2BUgUYQAqGN9fHCY%3D",
+                "valueTrans": "绿色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "绿色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "5XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "5XL"
+              }
+            ],
+            "amountOnSale": 1942
+          },
+          {
+            "skuId": 2044978359342,
+            "specId": "2fed7571ad37fed3e8b2540e05824f37",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/GuSgT/9493156931235_sku_sku022_%E9%BB%91%E8%89%B2.jpg?Expires=3362177701&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=j9Ws4X1wQe%2B1cGOJwDBc%2FgYf7JY%3D",
+                "valueTrans": "黑色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "黑色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "M",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "M"
+              }
+            ],
+            "amountOnSale": 8892
+          },
+          {
+            "skuId": 5133594581297,
+            "specId": "6b6f5619319e6a7e81746c4e6f5c857d",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/nU7yk/9493156931235_sku_sku023_%E9%BB%91%E8%89%B2.jpg?Expires=3362177702&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=X0Kwq5DMbGDF8Nev6QmM%2Bj%2Fwr%2Bk%3D",
+                "valueTrans": "黑色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "黑色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "L",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "L"
+              }
+            ],
+            "amountOnSale": 8280
+          },
+          {
+            "skuId": 4248416650091,
+            "specId": "ab9262ac930c7f7e8e043fdf9079c45c",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/3LCXv/9493156931235_sku_sku024_%E9%BB%91%E8%89%B2.jpg?Expires=3362177702&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=0%2BiH70QSuZI48%2Fgam1ABRg8Rwbg%3D",
+                "valueTrans": "黑色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "黑色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "XL"
+              }
+            ],
+            "amountOnSale": 7905
+          },
+          {
+            "skuId": 6716457821539,
+            "specId": "41fb7e35001b48adf571073dcee2df26",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/SlQPJ/9493156931235_sku_sku025_%E9%BB%91%E8%89%B2.jpg?Expires=3362177702&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=jH9%2FIgKVTyibd3VQinrNtHMwHU4%3D",
+                "valueTrans": "黑色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "黑色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "2XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "2XL"
+              }
+            ],
+            "amountOnSale": 8029
+          },
+          {
+            "skuId": 9604824433757,
+            "specId": "0bf8b06c766e77d794135a6942af5475",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/3FxWJ/9493156931235_sku_sku026_%E9%BB%91%E8%89%B2.jpg?Expires=3362177702&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=0RWFN7d4hGs%2Fve1RhIEC8oJUEPI%3D",
+                "valueTrans": "黑色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "黑色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "3XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "3XL"
+              }
+            ],
+            "amountOnSale": 8940
+          },
+          {
+            "skuId": 8539323568732,
+            "specId": "35ca322150773aa32f3a20d18146dfe5",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/TbQhV/9493156931235_sku_sku027_%E9%BB%91%E8%89%B2.jpg?Expires=3362177702&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=6OCvH1mgSbggNupxpNbY378pwMg%3D",
+                "valueTrans": "黑色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "黑色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "4XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "4XL"
+              }
+            ],
+            "amountOnSale": 629
+          },
+          {
+            "skuId": 3695065319785,
+            "specId": "bf469206444f69f8e615d99244b41a24",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/BRTK7/9493156931235_sku_sku028_%E9%BB%91%E8%89%B2.jpg?Expires=3362177702&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=QDFN2NKd9YzsAnRCKChspfUwhRk%3D",
+                "valueTrans": "黑色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "黑色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "5XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "5XL"
+              }
+            ],
+            "amountOnSale": 1527
+          },
+          {
+            "skuId": 4506873074106,
+            "specId": "2f36ea766a47ff05aec26350104e9d65",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/U9Brd/9493156931235_sku_sku029_%E8%93%9D%E8%89%B2.jpg?Expires=3362177702&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=MyjShiS8BKtz%2BOkRmmmwcnaaMjo%3D",
+                "valueTrans": "蓝色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "蓝色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "M",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "M"
+              }
+            ],
+            "amountOnSale": 9936
+          },
+          {
+            "skuId": 4422772516078,
+            "specId": "9be1d895104a43461c1f0cc89995566f",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/1awEF/9493156931235_sku_sku030_%E8%93%9D%E8%89%B2.jpg?Expires=3362177702&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=ZIvjF6FfJutrbaOx6YJQZIbgN10%3D",
+                "valueTrans": "蓝色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "蓝色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "L",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "L"
+              }
+            ],
+            "amountOnSale": 9912
+          },
+          {
+            "skuId": 2806123480196,
+            "specId": "5df06c83689790a426f99aebe5d232cb",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/ETyF9/9493156931235_sku_sku031_%E8%93%9D%E8%89%B2.jpg?Expires=3362177702&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=bl1n%2Ffmu0KXBRvpoK3MBsasZfls%3D",
+                "valueTrans": "蓝色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "蓝色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "XL"
+              }
+            ],
+            "amountOnSale": 9831
+          },
+          {
+            "skuId": 4680092770550,
+            "specId": "f0cdeeba86f5c80b0e3043e0c437ab4b",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/Kw7v6/9493156931235_sku_sku032_%E8%93%9D%E8%89%B2.jpg?Expires=3362177702&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=riKQ0qFir58LMJCGGkEfV4HM4Z4%3D",
+                "valueTrans": "蓝色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "蓝色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "2XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "2XL"
+              }
+            ],
+            "amountOnSale": 9893
+          },
+          {
+            "skuId": 6968208774108,
+            "specId": "2e93c082bdaae50dc2e75d685c16c6c3",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/KtMv6/9493156931235_sku_sku033_%E8%93%9D%E8%89%B2.jpg?Expires=3362177702&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=rH9e%2B%2FljxwGVwoF4ug%2BTxRqfGP4%3D",
+                "valueTrans": "蓝色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "蓝色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "3XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "3XL"
+              }
+            ],
+            "amountOnSale": 9888
+          },
+          {
+            "skuId": 4946868461736,
+            "specId": "d258fd89a24a848c598566a4e5d454f3",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/6apM1/9493156931235_sku_sku034_%E8%93%9D%E8%89%B2.jpg?Expires=3362177702&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=FHKJJb0CnThQltb0H5yqx5GSbYM%3D",
+                "valueTrans": "蓝色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "蓝色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "4XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "4XL"
+              }
+            ],
+            "amountOnSale": 1777
+          },
+          {
+            "skuId": 9943301280439,
+            "specId": "4d558945291932eec80fea8892c4629b",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/fepBv/9493156931235_sku_sku035_%E8%93%9D%E8%89%B2.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=vPGVElT3zoHOTPTpuR6MmpKnJBg%3D",
+                "valueTrans": "蓝色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "蓝色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "5XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "5XL"
+              }
+            ],
+            "amountOnSale": 1919
+          },
+          {
+            "skuId": 7931894165304,
+            "specId": "db4649ac0548925c1186908545b6cdb1",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/4CQic/9493156931235_sku_sku036_%E6%B7%B1%E7%81%B0%E8%89%B2.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=8xr8G1xyDLYb%2Fxr8%2B1rh%2Fd9ksUc%3D",
+                "valueTrans": "深灰色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "深灰色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "M",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "M"
+              }
+            ],
+            "amountOnSale": 9965
+          },
+          {
+            "skuId": 6131915289136,
+            "specId": "4da8aa02b7235b1873f3f0b8f974bfe0",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/Se1ql/9493156931235_sku_sku037_%E6%B7%B1%E7%81%B0%E8%89%B2.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=e%2BKAUNzq1ExEi2voDUMJEn3%2BOrc%3D",
+                "valueTrans": "深灰色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "深灰色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "L",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "L"
+              }
+            ],
+            "amountOnSale": 9936
+          },
+          {
+            "skuId": 1551481194526,
+            "specId": "7490643b5a4d20fbcee82e85b1ba395f",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/xlyJt/9493156931235_sku_sku038_%E6%B7%B1%E7%81%B0%E8%89%B2.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=9eqy%2FQrDEC6ppoz41jQrmgiblCQ%3D",
+                "valueTrans": "深灰色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "深灰色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "XL"
+              }
+            ],
+            "amountOnSale": 9923
+          },
+          {
+            "skuId": 2488478957739,
+            "specId": "417b92bfdde34d515a5ceb6a5e1847ba",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/uHA8g/9493156931235_sku_sku039_%E6%B7%B1%E7%81%B0%E8%89%B2.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=NvMp8stIzboAtZzt%2F71tChKw81I%3D",
+                "valueTrans": "深灰色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "深灰色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "2XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "2XL"
+              }
+            ],
+            "amountOnSale": 9915
+          },
+          {
+            "skuId": 6385465582903,
+            "specId": "f3adef31de2a0bae110d2ced958a4266",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/x0Inn/9493156931235_sku_sku040_%E6%B7%B1%E7%81%B0%E8%89%B2.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=xmGvL%2FGXOYjaJCaJvSlrYQ8s39E%3D",
+                "valueTrans": "深灰色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "深灰色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "3XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "3XL"
+              }
+            ],
+            "amountOnSale": 9942
+          },
+          {
+            "skuId": 3244161143814,
+            "specId": "04cca8fbb407a5d415d5a79bb7bcda78",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/TPmHp/9493156931235_sku_sku041_%E6%B7%B1%E7%81%B0%E8%89%B2.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=KbruaLPFs383YwiK8lTSu0GBgXw%3D",
+                "valueTrans": "深灰色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "深灰色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "4XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "4XL"
+              }
+            ],
+            "amountOnSale": 9958
+          },
+          {
+            "skuId": 5378384740063,
+            "specId": "d1406987d0c1af74f7a90c5ef4c552f6",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/1TSe0/9493156931235_sku_sku042_%E6%B7%B1%E7%81%B0%E8%89%B2.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=6cRBjvFhF1HxoImaMdPy1ZRqpf8%3D",
+                "valueTrans": "深灰色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "深灰色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "5XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "5XL"
+              }
+            ],
+            "amountOnSale": 9938
+          },
+          {
+            "skuId": 7420760192777,
+            "specId": "a2c15892fdf30036d69c7fd60c116286",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/l4zB6/9493156931235_sku_sku043_%E5%8D%A1%E5%85%B6%E8%89%B2.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=lJhZCXJAisOOYoY%2FKuaWTpZc5ZE%3D",
+                "valueTrans": "卡其色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "卡其色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "M",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "M"
+              }
+            ],
+            "amountOnSale": 109
+          },
+          {
+            "skuId": 5408672652781,
+            "specId": "d466ab73db4008b78efae3493edeee88",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/W34rO/9493156931235_sku_sku044_%E5%8D%A1%E5%85%B6%E8%89%B2.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=tl3oBPOsTgHZH%2Bj5W0RA3W0sRvQ%3D",
+                "valueTrans": "卡其色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "卡其色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "4XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "4XL"
+              }
+            ],
+            "amountOnSale": 116
+          },
+          {
+            "skuId": 8392992344417,
+            "specId": "02673a12d3c4ead392b8d07287ee3409",
+            "skuAttributes": [
+              {
+                "attributeId": "6312",
+                "skuImageUrl": "https://aib-innovation-oss.oss-accelerate.aliyuncs.com/AI_Business/0ZVgZ/9493156931235_sku_sku045_%E5%8D%A1%E5%85%B6%E8%89%B2.jpg?Expires=3362177703&OSSAccessKeyId=LTAI5tE8X3gEy66SRU1V8dig&Signature=mWtKwbyd%2FDA50EQifgqx4hgysCk%3D",
+                "valueTrans": "卡其色",
+                "attributeName": "颜色",
+                "attributeNameTrans": "颜色",
+                "value": "卡其色"
+              },
+              {
+                "attributeId": "540",
+                "valueTrans": "5XL",
+                "attributeName": "尺码",
+                "attributeNameTrans": "尺码",
+                "value": "5XL"
+              }
+            ],
+            "amountOnSale": 116
+          }
+        ],
+        "minOrderQuantity": 1,
+        "productSaleInfo": {
+          "amountOnSale": 290239,
+          "unitInfo": {
+            "unit": "条",
+            "transUnit": "条"
+          }
+        },
+        "tradeScore": "4.7"
+      },
+      "code": "200",
+      "success": true
+    }
+  }
+}
