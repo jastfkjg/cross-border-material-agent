@@ -20,6 +20,17 @@ from urllib.request import Request, urlopen
 class ApiError(RuntimeError):
     """A retryable or terminal model service failure."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool | None = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = retryable
+
 
 @dataclass(frozen=True, slots=True)
 class ApiConfig:
@@ -102,6 +113,10 @@ class HttpJsonClient:
             raise ApiError("全局运行截止时间已到")
         return max(1.0, min(maximum, remaining))
 
+    @property
+    def remaining_seconds(self) -> float:
+        return max(0.0, self.deadline - time.monotonic())
+
     def request_json(
         self,
         url: str,
@@ -135,7 +150,9 @@ class HttpJsonClient:
                 last_error = f"HTTP {exc.code}: {detail}"
                 retryable = exc.code in {408, 409, 425, 429, 500, 502, 503, 504}
                 if not retryable or attempt + 1 >= attempts:
-                    raise ApiError(last_error) from exc
+                    raise ApiError(
+                        last_error, status_code=exc.code, retryable=retryable
+                    ) from exc
                 retry_after = exc.headers.get("Retry-After", "")
                 try:
                     delay = float(retry_after)
@@ -217,6 +234,34 @@ class QwenClient:
         self._chat_slots = threading.BoundedSemaphore(3)
         self._image_slots = threading.BoundedSemaphore(2)
         self._video_slots = threading.BoundedSemaphore(1)
+        self._metrics: list[dict[str, Any]] = []
+        self._metrics_lock = threading.Lock()
+
+    @property
+    def metrics(self) -> list[dict[str, Any]]:
+        with self._metrics_lock:
+            return [dict(item) for item in self._metrics]
+
+    def _record_metric(
+        self,
+        *,
+        operation: str,
+        model: str,
+        started: float,
+        status: str,
+        error: str = "",
+    ) -> None:
+        item: dict[str, Any] = {
+            "operation": operation,
+            "model": model,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "status": status,
+            "remaining_seconds": round(self.http.remaining_seconds, 1),
+        }
+        if error:
+            item["error"] = error[:300]
+        with self._metrics_lock:
+            self._metrics.append(item)
 
     @property
     def model_summary(self) -> dict[str, str]:
@@ -228,12 +273,30 @@ class QwenClient:
         }
 
     def _chat_response(self, body: dict[str, Any]) -> str:
+        started = time.monotonic()
+        selected_model = str(body.get("model") or "")
         endpoint = _endpoint(self.config.openai_base_url, "chat/completions")
-        response = self.http.request_json(
-            endpoint,
-            headers={"Authorization": f"Bearer {self.config.api_key}"},
-            body=body,
-            timeout=180,
+        try:
+            response = self.http.request_json(
+                endpoint,
+                headers={"Authorization": f"Bearer {self.config.api_key}"},
+                body=body,
+                timeout=180,
+            )
+        except ApiError as exc:
+            self._record_metric(
+                operation="chat",
+                model=selected_model,
+                started=started,
+                status="error",
+                error=str(exc),
+            )
+            raise
+        self._record_metric(
+            operation="chat",
+            model=selected_model,
+            started=started,
+            status="ok",
         )
         try:
             content = response["choices"][0]["message"]["content"]
@@ -318,6 +381,40 @@ Return a JSON object with keys:
 - image_quality_notes: string[]
 - prohibited_or_risky_visuals: string[]
 - preservation_constraints: string[]
+- images: an array of exactly {len(image_urls[:12])} objects, one for every supplied image in input order.
+  Every object must contain:
+  - index: zero-based integer
+  - role: one of hero, front, back, side, detail, variant, size_chart, lifestyle, packaging, unknown
+  - dominant_color: concise observed color or empty string
+  - product_coverage: one of high, medium, low, unknown
+  - sharpness: one of high, medium, low, unknown
+  - has_text: boolean
+  - has_logo: boolean
+  - has_watermark: boolean
+  - has_contact_info: boolean
+  - has_qr_code: boolean
+  - has_price_or_discount: boolean
+  - has_review_graphic: boolean
+  - has_certification_seal: boolean
+  - has_platform_mark: boolean
+  - has_third_party_brand: boolean (true only when a third-party brand is visible or strongly suspected)
+  - has_before_after: boolean
+  - adult_or_sensitive_visual: boolean
+  - product_obscured: boolean
+  - low_sharpness: boolean
+  - has_person: boolean
+  - has_unrelated_props: boolean (bags, newspapers, furniture or styling objects not part of the product)
+  - multiple_products: boolean
+  - product_complete: boolean (the entire sellable item is visible without cropping or obstruction)
+  - clean_neutral_background: boolean (white or near-white studio background without a lifestyle scene)
+  - safe_for_generation_reference: boolean
+  - risk_reasons: string[]
+
+Read all visible text as carefully as possible. A product's own sewn label or print still counts as
+has_text/has_logo. Contact details, QR codes, marketplace marks, watermarks, price/discount badges,
+review graphics and suspected third-party branding make safe_for_generation_reference false.
+For a marketplace hero, a person, unrelated prop, multiple products, incomplete product or lifestyle
+background makes the source unsuitable even when it remains usable as a detail reference.
 
 Verified source facts:
 {facts_json}
@@ -329,6 +426,7 @@ Verified source facts:
         facts_json: str,
         source_image_urls: list[str],
         generated_image_urls: list[str],
+        expected_assets: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         system = (
             "You are a strict product-listing image quality gate. Return JSON only. "
@@ -345,9 +443,50 @@ Return JSON with key assets, an array of exactly {len(generated_image_urls)} obj
 - index: zero-based integer
 - usable: boolean
 - identity_consistent: boolean
+- construction_consistent: boolean (check visible collar, sleeves, pockets, buttons/fasteners, hem and pattern)
+- slot_match: boolean (whether this asset fulfills its intended storyboard purpose)
 - unwanted_text: boolean
 - major_artifacts: boolean
+- unexpected_collage: boolean (true for montage, grid, split-screen or repeated panels; detail slot 4 may intentionally show a clean variant lineup)
+- product_coverage: one of high, medium, low
 - reason: concise string
+
+Verified facts:
+{facts_json}
+
+Expected asset purposes in generated-image order:
+{json.dumps(expected_assets or [], ensure_ascii=False)}
+""".strip()
+        return self.chat_json(
+            system,
+            prompt,
+            images=[*source_image_urls, *generated_image_urls],
+        )
+
+    def select_best_generated_image(
+        self,
+        facts_json: str,
+        source_image_urls: list[str],
+        candidate_urls: list[str],
+    ) -> dict[str, Any]:
+        system = (
+            "You are a strict e-commerce hero-image selector. Return JSON only. "
+            "The source images define product identity. Favor exact construction, color and pattern, "
+            "a single unobscured product, clean background, high product coverage and no text or marks."
+        )
+        prompt = f"""
+The first {len(source_image_urls)} images are trusted source references. The next
+{len(candidate_urls)} images are generated hero candidates. Compare every candidate with the source.
+
+Return JSON with:
+- selected_index: zero-based candidate index, or -1 if every candidate is unusable
+- candidates: exactly {len(candidate_urls)} objects, each containing index, usable,
+  identity_consistent, construction_consistent, correct_color, single_product,
+  product_complete, clean_neutral_background, has_person, has_unrelated_props,
+  unwanted_text, major_artifacts, product_coverage (high/medium/low), score (0-100), and reason.
+
+Explicitly inspect visible product type, silhouette, collar/neckline, sleeve or leg length,
+pockets, button/fastener count where visible, hem, pattern and any product logo.
 
 Verified facts:
 {facts_json}
@@ -355,7 +494,7 @@ Verified facts:
         return self.chat_json(
             system,
             prompt,
-            images=[*source_image_urls, *generated_image_urls],
+            images=[*source_image_urls, *candidate_urls],
         )
 
     def review_generated_video(
@@ -397,32 +536,56 @@ Verified facts:
         size: str,
         negative_prompt: str = "",
     ) -> tuple[str, str]:
+        urls, model = self.generate_image_candidates(
+            prompt,
+            reference_urls,
+            size=size,
+            negative_prompt=negative_prompt,
+            count=1,
+        )
+        return urls[0], model
+
+    def generate_image_candidates(
+        self,
+        prompt: str,
+        reference_urls: list[str],
+        *,
+        size: str,
+        negative_prompt: str = "",
+        count: int = 2,
+    ) -> tuple[list[str], str]:
         errors: list[str] = []
+        requested = max(1, min(4, int(count)))
         with self._image_slots:
             try:
-                return self._generate_sync_image(
+                return self._generate_sync_images(
                     self.config.image_model,
                     prompt,
                     reference_urls,
                     size=size,
                     negative_prompt=negative_prompt,
+                    count=requested,
                 ), self.config.image_model
             except ApiError as exc:
                 errors.append(f"{self.config.image_model}: {exc}")
                 self.logger.warning("主图像模型失败，切换回退模型: %s", exc)
+            if self.http.remaining_seconds < 300:
+                errors.append("剩余时间不足 300 秒，跳过慢速图像回退模型")
+                raise ApiError("; ".join(errors), retryable=False)
             try:
-                return self._generate_sync_image(
+                return self._generate_sync_images(
                     self.config.image_fallback_model,
                     prompt,
                     reference_urls,
                     size=size,
                     negative_prompt=negative_prompt,
+                    count=1,
                 ), self.config.image_fallback_model
             except ApiError as exc:
                 errors.append(f"{self.config.image_fallback_model}: {exc}")
         raise ApiError("; ".join(errors))
 
-    def _generate_sync_image(
+    def _generate_sync_images(
         self,
         model: str,
         prompt: str,
@@ -430,7 +593,8 @@ Verified facts:
         *,
         size: str,
         negative_prompt: str,
-    ) -> str:
+        count: int,
+    ) -> list[str]:
         reference_limit = 9 if model.startswith("wan2.7-image") else 3
         content: list[dict[str, str]] = [
             {"image": url} for url in reference_urls[:reference_limit]
@@ -439,10 +603,9 @@ Verified facts:
         parameters: dict[str, Any] = {
             "size": size,
             "watermark": False,
+            "n": count,
         }
-        if model.startswith("wan2.7-image"):
-            parameters["n"] = 1
-        else:
+        if not model.startswith("wan2.7-image"):
             parameters["prompt_extend"] = True
             if negative_prompt:
                 parameters["negative_prompt"] = negative_prompt
@@ -451,23 +614,42 @@ Verified facts:
             "input": {"messages": [{"role": "user", "content": content}]},
             "parameters": parameters,
         }
-        response = self.http.request_json(
-            _endpoint(
-                self.config.dashscope_base_url,
-                "services/aigc/multimodal-generation/generation",
-            ),
-            headers={"Authorization": f"Bearer {self.config.api_key}"},
-            body=body,
-            timeout=360,
+        started = time.monotonic()
+        try:
+            response = self.http.request_json(
+                _endpoint(
+                    self.config.dashscope_base_url,
+                    "services/aigc/multimodal-generation/generation",
+                ),
+                headers={"Authorization": f"Bearer {self.config.api_key}"},
+                body=body,
+                timeout=360,
+            )
+        except ApiError as exc:
+            self._record_metric(
+                operation="image",
+                model=model,
+                started=started,
+                status="error",
+                error=str(exc),
+            )
+            raise
+        self._record_metric(
+            operation="image",
+            model=model,
+            started=started,
+            status="ok",
         )
         urls = _collect_urls(response, preferred_keys=("image", "url"))
         if not urls:
             raise ApiError(
                 f"图像响应没有 URL: {json.dumps(response, ensure_ascii=False)[:1000]}"
             )
-        return urls[0]
+        return urls[:count]
 
-    def generate_video(self, prompt: str, first_frame_url: str) -> tuple[str, str]:
+    def generate_video(
+        self, prompt: str, first_frame_url: str, *, negative_prompt: str = ""
+    ) -> tuple[str, str]:
         body = {
             "model": self.config.video_model,
             "input": {
@@ -481,22 +663,41 @@ Verified facts:
                 "watermark": False,
             },
         }
+        if negative_prompt:
+            body["input"]["negative_prompt"] = negative_prompt
+        started = time.monotonic()
         with self._video_slots:
-            response = self.http.request_json(
-                _endpoint(
-                    self.config.dashscope_base_url,
-                    "services/aigc/video-generation/video-synthesis",
-                ),
-                headers={
-                    "Authorization": f"Bearer {self.config.api_key}",
-                    "X-DashScope-Async": "enable",
-                },
-                body=body,
-                timeout=180,
-            )
-            url = self._poll_task_for_url(
-                response, preferred_keys=("video", "url"), timeout_seconds=720
-            )
+            try:
+                response = self.http.request_json(
+                    _endpoint(
+                        self.config.dashscope_base_url,
+                        "services/aigc/video-generation/video-synthesis",
+                    ),
+                    headers={
+                        "Authorization": f"Bearer {self.config.api_key}",
+                        "X-DashScope-Async": "enable",
+                    },
+                    body=body,
+                    timeout=180,
+                )
+                url = self._poll_task_for_url(
+                    response, preferred_keys=("video", "url"), timeout_seconds=720
+                )
+            except ApiError as exc:
+                self._record_metric(
+                    operation="video",
+                    model=self.config.video_model,
+                    started=started,
+                    status="error",
+                    error=str(exc),
+                )
+                raise
+        self._record_metric(
+            operation="video",
+            model=self.config.video_model,
+            started=started,
+            status="ok",
+        )
         return url, self.config.video_model
 
     def _poll_task_for_url(

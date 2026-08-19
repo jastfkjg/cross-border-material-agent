@@ -1,6 +1,28 @@
 {
-  "version": "2026-08-v1",
-  "scope": "Generated marketing prose and generated visual prompts",
+  "version": "2026-08-v2",
+  "scope": "Generated listing copy, generated visual prompts, source-reference selection and delivery QA",
+  "policy_layers": {
+    "platform_explicit": [
+      "The seller is responsible for having lawful rights to product content and for compliance with applicable laws.",
+      "Listing and campaign material must not infringe third-party intellectual-property rights.",
+      "AliExpress or affiliated trademarks and marketing material may not be used without authorization."
+    ],
+    "conservative_runtime_guard": [
+      "Reject or avoid source images with contact details, QR codes, watermarks, price or discount badges, review graphics, certification seals, platform marks, or suspected third-party branding.",
+      "Do not generate unsupported claims, endorsements, ratings, prices, promotions, certifications, body transformations, or new brand marks.",
+      "Treat visible text or logos as review signals even when they are not independently sufficient to establish infringement."
+    ]
+  },
+  "official_sources": [
+    {
+      "title": "AliExpress.com Terms of Use",
+      "url": "https://terms.alicdn.com/legal-agreement/terms/suit_bu1_aliexpress/suit_bu1_aliexpress202204182115_66077.html"
+    },
+    {
+      "title": "AliExpress marketing campaign seller rules",
+      "url": "https://terms.alicdn.com/legal-agreement/terms/product/20221027172120871/20221027172120871.html"
+    }
+  ],
   "prohibited_claims": {
     "en": [
       "100% guaranteed",
@@ -11,7 +33,10 @@
       "cures",
       "medical grade",
       "clinically proven",
-      "officially certified"
+      "officially certified",
+      "celebrity endorsed",
+      "limited stock",
+      "lowest price"
     ],
     "ko": [
       "100% 보장",
@@ -21,7 +46,10 @@
       "치료",
       "의료용",
       "임상적으로 입증",
-      "공식 인증"
+      "공식 인증",
+      "연예인 추천",
+      "재고 한정",
+      "최저가"
     ],
     "pt": [
       "100% garantido",
@@ -32,20 +60,72 @@
       "cura",
       "grau médico",
       "clinicamente comprovado",
-      "oficialmente certificado"
+      "oficialmente certificado",
+      "recomendado por celebridade",
+      "estoque limitado",
+      "menor preço"
     ]
   },
+  "generated_text_regex": [
+    "(?i)(?:https?://|www\\.)\\S+",
+    "(?i)\\b[\\w.+-]+@[\\w.-]+\\.[a-z]{2,}\\b",
+    "(?i)(?:whats?app|wechat|telegram|line|kakao(?:talk)?|instagram|facebook|tiktok)\\s*[:@]?\\s*[\\w+.-]+",
+    "(?i)(?:call|text|contact|message|dm)\\s+(?:us|me|seller)\\s*(?:at|on|:)\\s*[^\\n,;]+",
+    "(?i)(?:us\\$|r\\$|krw|usd|brl|₩|\\$)\\s*\\d+(?:[.,]\\d+)?"
+  ],
   "visual_prompt_forbidden": [
     "price tag",
     "discount badge",
+    "coupon",
     "five-star review",
+    "customer review",
     "certification seal",
     "before and after body",
     "celebrity endorsement",
-    "new brand logo"
+    "new brand logo",
+    "platform logo",
+    "qr code",
+    "contact information",
+    "social media handle"
+  ],
+  "source_visual_hard_risk_fields": [
+    "has_watermark",
+    "has_contact_info",
+    "has_qr_code",
+    "has_price_or_discount",
+    "has_review_graphic",
+    "has_certification_seal",
+    "has_platform_mark",
+    "has_third_party_brand",
+    "has_before_after",
+    "adult_or_sensitive_visual"
+  ],
+  "source_visual_review_fields": [
+    "has_text",
+    "has_logo",
+    "product_obscured",
+    "low_sharpness",
+    "has_person",
+    "has_unrelated_props",
+    "multiple_products",
+    "product_complete",
+    "clean_neutral_background"
+  ],
+  "allowed_source_roles": [
+    "hero",
+    "front",
+    "back",
+    "side",
+    "detail",
+    "variant",
+    "size_chart",
+    "lifestyle",
+    "packaging",
+    "unknown"
   ],
   "notes": [
-    "This local ruleset is a conservative runtime guard, not a substitute for legal review.",
-    "Canonical source data is preserved even when it contains terms that may not be suitable as generated marketing claims."
+    "This local ruleset distinguishes cited platform requirements from conservative runtime controls and is not a substitute for legal review.",
+    "Canonical source data is preserved even when it contains terms that may not be suitable as generated marketing claims.",
+    "A visible logo is a review signal; the agent treats suspected third-party or platform branding as a hard rejection signal."
   ]
 }

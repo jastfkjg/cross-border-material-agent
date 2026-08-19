@@ -23,7 +23,7 @@ _MAIN_PRESENTATION = (
     "garment, inset, split screen, montage or collage."
 )
 
-_DETAIL_SLOT_DIRECTIVES = (
+_BASE_DETAIL_SLOT_DIRECTIVES = (
     "This is detail slot 1: show a complete front three-quarter product presentation on a hanger or invisible form "
     "against a warm neutral editorial wall. It must be visibly different from the square white-background hero.",
     "This is detail slot 2: make a tight but readable upper-garment close-up centered on the verified collar, "
@@ -37,11 +37,76 @@ _DETAIL_SLOT_DIRECTIVES = (
 )
 
 
+def _product_family(taxonomy: TaxonomyResult) -> str:
+    category_id = taxonomy.category.category_id
+    if category_id in {"30341", "30335", "39153"}:
+        return "bottom"
+    if category_id in {"30843", "29553"}:
+        return "children"
+    if category_id == "39107":
+        return "dress"
+    return "top"
+
+
+def _detail_slot_directives(taxonomy: TaxonomyResult) -> tuple[str, ...]:
+    family = _product_family(taxonomy)
+    slot_1 = _BASE_DETAIL_SLOT_DIRECTIVES[0]
+    slot_4 = _BASE_DETAIL_SLOT_DIRECTIVES[3]
+    if family == "bottom":
+        return (
+            slot_1,
+            "This is detail slot 2: make a tight but readable close-up centered on the verified waistband, "
+            "front closure and pocket construction. Do not invent a fly, drawstring, belt loop or pocket.",
+            "This is detail slot 3: make a distinct close-up of the verified leg shape, side seam and hem, "
+            "while keeping enough of the product visible to identify it.",
+            slot_4,
+            "This is detail slot 5: show one wearer in a restrained everyday styling context, with the waistband, "
+            "both legs and hem visible and unobstructed. Keep anatomy and garment length natural.",
+        )
+    if family == "children":
+        return (
+            slot_1,
+            _BASE_DETAIL_SLOT_DIRECTIVES[1],
+            _BASE_DETAIL_SLOT_DIRECTIVES[2],
+            slot_4,
+            "This is detail slot 5: create a product-only, age-appropriate outfit flat lay. Keep the item complete "
+            "and unobstructed, use only neutral unbranded props, and do not depict a child or adult wearer.",
+        )
+    if family == "dress":
+        return (
+            slot_1,
+            "This is detail slot 2: make a tight but readable close-up centered on the verified neckline, bodice "
+            "and closure construction. Do not invent buttons, a zipper, belt or trim.",
+            "This is detail slot 3: show the verified waist transition, skirt drape and hem while keeping enough "
+            "of the dress visible to identify its silhouette and length.",
+            slot_4,
+            _BASE_DETAIL_SLOT_DIRECTIVES[4],
+        )
+    return _BASE_DETAIL_SLOT_DIRECTIVES
+
+
+def _video_guard(taxonomy: TaxonomyResult) -> str:
+    family = _product_family(taxonomy)
+    focus = {
+        "bottom": "Keep the waistband, closure, pockets, both legs and hem stable and fully visible.",
+        "children": "Use a product-only presentation; do not add a child, adult, hands, toys or character graphics.",
+        "dress": "Keep the neckline, bodice, waist transition, skirt silhouette and hem stable.",
+        "top": "Keep the collar or neckline, front opening, pockets, both sleeves, cuffs and hem stable.",
+    }[family]
+    return (
+        "Use one continuous slow 10-to-15-degree camera arc with a subtle push-in; no scene cuts. "
+        + focus
+        + " Preserve exact product construction, pattern and color in every frame. No morphing, duplicate product, "
+        "new accessories, hands covering the product, text, logo animation, camera shake, flicker, speech or music."
+    )
+
+
 def fallback_creative_plan(
     facts: ProductFacts, taxonomy: TaxonomyResult
 ) -> CreativePlan:
     verified = ", ".join(f"{item.name}: {item.value}" for item in facts.attributes[:10])
     identity = f"Product type: {facts.source_category_name}. Verified source attributes: {verified}."
+    slot_directives = _detail_slot_directives(taxonomy)
     return CreativePlan(
         visual_theme="Clean international marketplace editorial with neutral, culturally inclusive styling",
         main_prompt=(
@@ -57,44 +122,42 @@ def fallback_creative_plan(
             (
                 f"Create a vertical 4:5 full-product editorial view. {identity} Use a restrained neutral lifestyle "
                 "setting appropriate for a global marketplace, with the product unobstructed and clearly readable. "
-                + _DETAIL_SLOT_DIRECTIVES[0]
+                + slot_directives[0]
                 + " "
                 + _PRESERVATION
             ),
             (
                 f"Create a vertical 4:5 detail-focused commerce image showing visible construction and design details. "
                 f"{identity} Use realistic close-up photography while keeping the full product identity consistent. "
-                + _DETAIL_SLOT_DIRECTIVES[1]
+                + slot_directives[1]
                 + " "
                 + _PRESERVATION
             ),
             (
                 f"Create a vertical 4:5 premium product feature composition. {identity} Use clean visual hierarchy and "
                 "subtle graphic dividers but no generated words, numbers, icons with claims, or labels. "
-                + _DETAIL_SLOT_DIRECTIVES[2]
+                + slot_directives[2]
                 + " "
                 + _PRESERVATION
             ),
             (
                 f"Create a vertical 4:5 product-variant presentation based only on colors and variants visible in the "
                 f"reference images. {identity} Arrange the variants in a clean, consistent catalog composition without text. "
-                + _DETAIL_SLOT_DIRECTIVES[3]
+                + slot_directives[3]
                 + " "
                 + _PRESERVATION
             ),
             (
                 f"Create a vertical 4:5 final commerce image showing a practical styling or use context suitable for "
                 f"the product. {identity} Keep the composition inclusive and culturally neutral. No written size claims. "
-                + _DETAIL_SLOT_DIRECTIVES[4]
+                + slot_directives[4]
                 + " "
                 + _PRESERVATION
             ),
         ],
         video_prompt=(
-            "An 8-second premium e-commerce product video based on the first frame. Slow stable camera push-in with "
-            "very subtle parallax and natural fabric movement. Preserve the exact garment shape, color, pattern and "
-            "details throughout every frame. No morphing, no new accessories, no hands covering the product, no text, "
-            "no logo animation, no cuts, no camera shake, no speech. Clean neutral commercial lighting."
+            "An 8-second premium e-commerce product video based on the first frame. Clean neutral commercial lighting. "
+            + _video_guard(taxonomy)
         ),
         market_angles={
             "en": "clear specifications and versatile styling",
@@ -185,6 +248,7 @@ Conservative source-image observations:
     ]
     if any(visual_prompt_violations(prompt) for prompt in all_prompts):
         return fallback, "content-compliance-guard"
+    slot_directives = _detail_slot_directives(taxonomy)
     plan = CreativePlan(
         visual_theme=payload["visual_theme"].strip(),
         main_prompt=(
@@ -197,12 +261,12 @@ Conservative source-image observations:
         detail_prompts=[
             item.strip()
             + " "
-            + _DETAIL_SLOT_DIRECTIVES[index]
+            + slot_directives[index]
             + " "
             + _PRESERVATION
             for index, item in enumerate(payload["detail_prompts"])
         ],
-        video_prompt=payload["video_prompt"].strip(),
+        video_prompt=payload["video_prompt"].strip() + " " + _video_guard(taxonomy),
         market_angles={
             key: str(value) for key, value in payload["market_angles"].items()
         },

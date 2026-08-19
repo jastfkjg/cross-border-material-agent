@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .api import ApiConfig, ApiError, HttpJsonClient, QwenClient
+from .compliance import normalize_source_image_observations
 from .input_loader import discover_input_files, load_json, load_product_facts
 from .localization import generate_copy_payload, render_description
 from .media import (
@@ -24,6 +25,7 @@ from .media import (
     inspect_image_quality,
     inspect_video,
     normalize_image,
+    strip_video_audio,
 )
 from .models import AssetResult, CreativePlan, ProductFacts, RunState, TaxonomyResult
 from .planning import create_creative_plan
@@ -45,6 +47,12 @@ _MAIN_NEGATIVE_PROMPT = (
     _IMAGE_NEGATIVE_PROMPT
     + ", collage, montage, split screen, inset, duplicate garment, multiple products, multiple colorways, "
     "cropped product, person, mannequin body"
+)
+
+_VIDEO_NEGATIVE_PROMPT = (
+    "product morphing, changed garment construction, changed color, changed pattern, added pockets, "
+    "added buttons, duplicate product, extra garment, warped fabric, flicker, scene cut, camera shake, "
+    "hands covering product, text, subtitles, watermark, logo animation, speech, music"
 )
 
 
@@ -77,6 +85,8 @@ class Pipeline:
         self.warnings: list[str] = []
         self._raw_counter = 0
         self._raw_counter_lock = threading.Lock()
+        self._source_image_observations: dict[str, dict[str, Any]] = {}
+        self._source_selection_warnings: set[str] = set()
 
     def _ensure_time(self, reserve_seconds: float = 0) -> None:
         remaining = self.deadline - time.monotonic()
@@ -147,6 +157,8 @@ class Pipeline:
                     Path(main_asset.path),
                     work_dir,
                     downloads_dir,
+                    main_asset.generated
+                    or self._safe_generation_reference(main_reference_url),
                 )
                 detail_futures = {
                     executor.submit(
@@ -198,6 +210,8 @@ class Pipeline:
                 state.assets.append(video_result)
 
             self._review_generated_assets(facts, state.assets, work_dir, downloads_dir)
+            if self.client is not None:
+                state.api_calls = self.client.metrics
             self._write_strategy_document(
                 state, localization_sources, plan_model, work_dir
             )
@@ -279,7 +293,32 @@ Allowed leaf candidates:
             result = self.client.analyze_product_images(
                 json.dumps(facts.compact_dict(), ensure_ascii=False), urls
             )
+            source_images = normalize_source_image_observations(result, urls)
+            result["source_images"] = source_images
+            self._source_image_observations = {
+                str(item["url"]): item for item in source_images
+            }
+            rejected = sum(
+                not item.get("safe_for_generation_reference", False)
+                for item in source_images
+            )
             self.logger.info("完成 %d 张源图片的视觉理解", len(urls))
+            if rejected:
+                self.logger.info("源图片风控筛出 %d 张不宜作为生成参考图", rejected)
+            third_party_count = sum(
+                item.get("has_third_party_brand") is True for item in source_images
+            )
+            if third_party_count:
+                self.warnings.append(
+                    f"{third_party_count} 张源图疑似含第三方品牌或角色；发布前须核验授权，且不用于衍生生成"
+                )
+            global_risks = result.get("prohibited_or_risky_visuals")
+            if isinstance(global_risks, list) and global_risks:
+                risk_summary = "; ".join(
+                    str(item).strip() for item in global_risks[:3] if str(item).strip()
+                )
+                if risk_summary:
+                    self.warnings.append(f"源图视觉风险需人工复核: {risk_summary[:500]}")
             return result
         except ApiError as exc:
             self.logger.warning("源图片视觉理解失败，使用结构化事实继续: %s", exc)
@@ -289,11 +328,196 @@ Allowed leaf candidates:
     def _ordered_source_urls(
         self, facts: ProductFacts, vision: dict[str, Any]
     ) -> list[str]:
-        ordered = list(facts.product_image_urls)
+        ordered = _unique(
+            facts.product_image_urls
+            + facts.sku_image_urls
+            + facts.description_image_urls
+        )
+        best_url = ""
+        source_images = vision.get("source_images") if isinstance(vision, dict) else None
         best = vision.get("best_hero_image_index") if isinstance(vision, dict) else None
-        if isinstance(best, int) and 0 <= best < len(ordered):
-            ordered.insert(0, ordered.pop(best))
-        return _unique(ordered + facts.sku_image_urls + facts.description_image_urls)
+        if isinstance(source_images, list) and isinstance(best, int):
+            best_item = next(
+                (
+                    item
+                    for item in source_images
+                    if isinstance(item, dict) and item.get("index") == best
+                ),
+                None,
+            )
+            if isinstance(best_item, dict):
+                best_url = str(best_item.get("url") or "")
+        if best_url in ordered:
+            ordered.insert(0, ordered.pop(ordered.index(best_url)))
+        ranked = self._source_urls_for_use(
+            ordered,
+            use="reference",
+            preferred_roles=("hero", "front", "variant", "detail"),
+        )
+        product_roles = {"hero", "front", "back", "side", "detail", "variant", "lifestyle"}
+        inspected_product = [
+            url
+            for url in ranked
+            if self._source_image_observations.get(url, {}).get("role") in product_roles
+        ]
+        return inspected_product or [
+            url for url in ranked if url in facts.product_image_urls or url in facts.sku_image_urls
+        ]
+
+    def _source_urls_for_use(
+        self,
+        urls: list[str],
+        *,
+        use: str,
+        preferred_roles: tuple[str, ...] = (),
+    ) -> list[str]:
+        """Rank safe source images first and isolate known hard-risk material."""
+
+        unique_urls = _unique(urls)
+        role_rank = {role: index for index, role in enumerate(preferred_roles)}
+
+        def rank(url: str) -> tuple[int, int]:
+            observation = self._source_image_observations.get(url)
+            if not observation or not observation.get("inspection_complete"):
+                safety = 3 if use == "reference" and self._source_image_observations else 2
+                return safety, len(role_rank)
+            safe_key = (
+                "safe_for_listing_fallback"
+                if use == "fallback"
+                else "safe_for_generation_reference"
+            )
+            if observation.get(safe_key) is True:
+                safety = 0
+            elif use == "fallback" and not self._terminal_fallback_risks(observation):
+                safety = 1
+            else:
+                safety = 3
+            return safety, role_rank.get(
+                str(observation.get("role") or "unknown"), len(role_rank)
+            )
+
+        ranked = sorted(enumerate(unique_urls), key=lambda pair: (*rank(pair[1]), pair[0]))
+        non_hard_risk = [url for _, url in ranked if rank(url)[0] < 3]
+        if non_hard_risk:
+            return non_hard_risk
+
+        warning = f"所有可用源图均触发视觉风险信号，{use} 阶段仅作最后兜底"
+        if warning not in self._source_selection_warnings:
+            self._source_selection_warnings.add(warning)
+            self.warnings.append(warning)
+            self.logger.warning(warning)
+        if use == "reference":
+            return []
+        return [url for _, url in ranked]
+
+    @staticmethod
+    def _terminal_fallback_risks(observation: dict[str, Any]) -> list[str]:
+        terminal_fields = {
+            "has_watermark",
+            "has_contact_info",
+            "has_qr_code",
+            "has_price_or_discount",
+            "has_review_graphic",
+            "has_certification_seal",
+            "has_platform_mark",
+            "has_before_after",
+            "adult_or_sensitive_visual",
+        }
+        reasons = [
+            str(reason).casefold()
+            for reason in observation.get("risk_reasons", [])
+            if str(reason) != "inspection_incomplete"
+        ]
+        explicit = [field for field in terminal_fields if observation.get(field) is True]
+        keywords = (
+            "contact",
+            "phone",
+            "email",
+            "qr",
+            "watermark",
+            "price",
+            "discount",
+            "review",
+            "certification",
+            "platform mark",
+            "before and after",
+            "adult",
+        )
+        return explicit + [reason for reason in reasons if any(key in reason for key in keywords)]
+
+    def _fallback_source_urls(
+        self, facts: ProductFacts, *, asset_name: str
+    ) -> list[str]:
+        primary = _unique(facts.product_image_urls + facts.sku_image_urls)
+        if asset_name == "main_image.jpeg":
+            all_sources = _unique(primary + facts.description_image_urls)
+            inspected_hero_sources = [
+                url
+                for url in all_sources
+                if self._source_image_observations.get(url, {}).get(
+                    "safe_for_main_image"
+                )
+                is True
+            ]
+            if inspected_hero_sources:
+                return self._source_urls_for_use(
+                    inspected_hero_sources,
+                    use="fallback",
+                    preferred_roles=("hero", "front", "variant"),
+                )
+            if self._source_image_observations:
+                warning = (
+                    "未发现同时满足单品、完整展示、无人物道具和干净背景的源主图；"
+                    "主图进入质量降级兜底"
+                )
+                if warning not in self.warnings:
+                    self.warnings.append(warning)
+                    self.logger.warning(warning)
+        if asset_name.startswith("detail_image_") and primary:
+            try:
+                index = int(asset_name.removeprefix("detail_image_").split(".", 1)[0])
+            except ValueError:
+                index = 1
+            offset = (index - 1) % len(primary)
+            primary = primary[offset:] + primary[:offset]
+        preferred = (
+            ("hero", "front", "variant", "side", "back", "detail", "lifestyle")
+            if asset_name == "main_image.jpeg"
+            else ("detail", "front", "side", "back", "variant", "lifestyle", "hero")
+        )
+        ranked_primary = self._source_urls_for_use(
+            primary, use="fallback", preferred_roles=preferred
+        )
+        usable_primary = [
+            url
+            for url in ranked_primary
+            if self._source_image_observations.get(url, {}).get("role")
+            not in {"size_chart", "packaging"}
+            and not self._terminal_fallback_risks(
+                self._source_image_observations.get(url, {})
+            )
+        ]
+        if usable_primary:
+            return usable_primary
+        ranked_description = self._source_urls_for_use(
+            facts.description_image_urls,
+            use="fallback",
+            preferred_roles=preferred,
+        )
+        usable_description = [
+            url
+            for url in ranked_description
+            if self._source_image_observations.get(url, {}).get("role")
+            not in {"size_chart", "packaging"}
+            and not self._terminal_fallback_risks(
+                self._source_image_observations.get(url, {})
+            )
+        ]
+        return usable_description or ranked_primary or ranked_description
+
+    def _safe_generation_reference(self, url: str) -> bool:
+        observation = self._source_image_observations.get(url)
+        return not observation or observation.get("safe_for_generation_reference") is True
 
     def _next_raw_path(self, downloads_dir: Path, suffix: str) -> Path:
         with self._raw_counter_lock:
@@ -328,20 +552,37 @@ Allowed leaf candidates:
         *,
         canvas: tuple[int, int],
         white_background: bool,
+        avoid_hashes: list[int] | None = None,
     ) -> str:
         errors: list[str] = []
         for url in source_urls:
+            candidate_destination = destination
+            if avoid_hashes:
+                candidate_destination = destination.with_name(
+                    f".{destination.stem}-{uuid.uuid4().hex}.candidate.jpeg"
+                )
             try:
                 self._download_and_normalize(
                     url,
-                    destination,
+                    candidate_destination,
                     downloads_dir,
                     canvas=canvas,
                     white_background=white_background,
                 )
+                if avoid_hashes:
+                    quality = inspect_image_quality(candidate_destination)
+                    if quality is not None and any(
+                        hash_distance(quality.difference_hash, seen_hash) <= 2
+                        for seen_hash in avoid_hashes
+                    ):
+                        errors.append(f"候选源图与已用详情图近重复: {url}")
+                        candidate_destination.unlink(missing_ok=True)
+                        continue
+                    os.replace(candidate_destination, destination)
                 return url
             except (ApiError, MediaError) as exc:
                 errors.append(str(exc))
+                candidate_destination.unlink(missing_ok=True)
         raise PipelineError("所有源图片回退均失败: " + "; ".join(errors[-3:]))
 
     def _build_main_image(
@@ -354,13 +595,17 @@ Allowed leaf candidates:
     ) -> tuple[AssetResult, str]:
         destination = work_dir / "main_image.jpeg"
         source_urls = self._ordered_source_urls(facts, vision)
-        if self.client is not None:
+        if self.client is not None and source_urls:
             try:
-                generated_url, model = self.client.generate_image(
+                candidate_urls, model = self.client.generate_image_candidates(
                     plan.main_prompt,
                     source_urls[:1],
                     size="1600*1600",
                     negative_prompt=_MAIN_NEGATIVE_PROMPT,
+                    count=3,
+                )
+                generated_url = self._select_main_candidate(
+                    facts, source_urls[:3], candidate_urls
                 )
                 self._download_and_normalize(
                     generated_url,
@@ -384,7 +629,7 @@ Allowed leaf candidates:
                 self.logger.warning("主图生成失败，使用源图回退: %s", exc)
                 self.warnings.append(f"主图生成回退: {exc}")
         fallback_url = self._fallback_image(
-            source_urls,
+            self._fallback_source_urls(facts, asset_name="main_image.jpeg"),
             destination,
             downloads_dir,
             canvas=(1600, 1600),
@@ -403,6 +648,61 @@ Allowed leaf candidates:
             fallback_url,
         )
 
+    def _select_main_candidate(
+        self,
+        facts: ProductFacts,
+        source_urls: list[str],
+        candidate_urls: list[str],
+    ) -> str:
+        if not candidate_urls:
+            raise ApiError("主图模型未返回候选")
+        if len(candidate_urls) == 1 or self.client is None:
+            return candidate_urls[0]
+        try:
+            review = self.client.select_best_generated_image(
+                json.dumps(facts.compact_dict(), ensure_ascii=False),
+                source_urls,
+                candidate_urls,
+            )
+        except ApiError as exc:
+            self.logger.warning("主图候选自动选优不可用，拒绝未经语义验收的候选: %s", exc)
+            self.warnings.append(f"主图候选自动选优不可用: {exc}")
+            raise ApiError("主图候选无法完成语义验收") from exc
+
+        candidates = review.get("candidates")
+        selected = review.get("selected_index")
+        if isinstance(candidates, list):
+            usable_indices = {
+                item.get("index")
+                for item in candidates
+                if isinstance(item, dict)
+                and isinstance(item.get("index"), int)
+                and 0 <= item["index"] < len(candidate_urls)
+                and item.get("usable") is True
+                and item.get("identity_consistent") is not False
+                and item.get("construction_consistent") is not False
+                and item.get("correct_color") is not False
+                and item.get("single_product") is not False
+                and item.get("product_complete") is True
+                and item.get("clean_neutral_background") is True
+                and item.get("has_person") is not True
+                and item.get("has_unrelated_props") is not True
+                and item.get("unwanted_text") is not True
+                and item.get("major_artifacts") is not True
+            }
+        else:
+            usable_indices = set()
+        if isinstance(selected, int) and selected in usable_indices:
+            if 0 <= selected < len(candidate_urls):
+                self.logger.info(
+                    "主图候选自动选优: 选择 %d/%d", selected + 1, len(candidate_urls)
+                )
+                return candidate_urls[selected]
+        if usable_indices:
+            fallback_index = min(usable_indices)
+            return candidate_urls[fallback_index]
+        raise ApiError("主图候选均未通过商品身份与结构一致性质检")
+
     def _build_detail_image(
         self,
         index: int,
@@ -419,10 +719,13 @@ Allowed leaf candidates:
             + facts.sku_image_urls
             + facts.description_image_urls
         )
-        if self.client is not None:
-            reference_selection = self._detail_reference_selection(
-                index, facts, main_reference_url
-            )
+        source_urls = self._fallback_source_urls(
+            facts, asset_name=f"detail_image_{index}.jpeg"
+        )
+        reference_selection = self._detail_reference_selection(
+            index, facts, main_reference_url
+        )
+        if self.client is not None and reference_selection:
             try:
                 generated_url, model = self.client.generate_image(
                     plan.detail_prompts[index - 1],
@@ -443,7 +746,10 @@ Allowed leaf candidates:
                     source_url=generated_url,
                     model=model,
                     generated=True,
-                    description=f"Detail storyboard slot {index}",
+                    description=(
+                        f"Detail storyboard slot {index}: "
+                        f"{plan.detail_prompts[index - 1][:240]}"
+                    ),
                 )
             except (ApiError, MediaError) as exc:
                 self.logger.warning("详情图 %d 生成失败，使用源图回退: %s", index, exc)
@@ -473,10 +779,25 @@ Allowed leaf candidates:
         product = facts.product_image_urls
         sku = facts.sku_image_urls
         if index == 4 and sku:
-            return _unique(_even_sample(sku, 3) + product[:1])
+            return self._source_urls_for_use(
+                _unique(_even_sample(sku, 3) + product[:1]),
+                use="reference",
+                preferred_roles=("variant", "front", "hero"),
+            )
         product_index = min(max(0, index - 1), max(0, len(product) - 1))
         selected_product = product[product_index : product_index + 1]
-        return _unique(selected_product + product[:1] + [main_reference_url])
+        role_preferences = {
+            1: ("front", "hero", "lifestyle"),
+            2: ("detail", "front", "side"),
+            3: ("detail", "side", "back"),
+            4: ("variant", "front", "hero"),
+            5: ("size_chart", "lifestyle", "front"),
+        }
+        return self._source_urls_for_use(
+            _unique(selected_product + product[:1] + [main_reference_url]),
+            use="reference",
+            preferred_roles=role_preferences.get(index, ()),
+        )
 
     def _build_video(
         self,
@@ -486,19 +807,25 @@ Allowed leaf candidates:
         main_image_path: Path,
         work_dir: Path,
         downloads_dir: Path,
+        allow_generation: bool,
     ) -> AssetResult:
         destination = work_dir / "product_video.mp4"
-        if self.client is not None:
+        if self.client is not None and allow_generation:
             try:
                 video_url, model = self.client.generate_video(
-                    plan.video_prompt, first_frame_url
+                    plan.video_prompt,
+                    first_frame_url,
+                    negative_prompt=_VIDEO_NEGATIVE_PROMPT,
                 )
                 raw_video = self._next_raw_path(downloads_dir, ".mp4")
                 self.downloader.download(
                     video_url, raw_video, max_bytes=199 * 1024 * 1024, timeout=300
                 )
-                shutil.copyfile(raw_video, destination)
-                inspect_video(destination)
+                if os.environ.get("AGENT_KEEP_VIDEO_AUDIO", "").strip() == "1":
+                    shutil.copyfile(raw_video, destination)
+                    inspect_video(destination)
+                else:
+                    strip_video_audio(raw_video, destination)
                 return AssetResult(
                     name=destination.name,
                     path=str(destination),
@@ -510,6 +837,8 @@ Allowed leaf candidates:
             except (ApiError, MediaError, OSError) as exc:
                 self.logger.warning("视频模型失败，创建确定性视频回退: %s", exc)
                 self.warnings.append(f"视频生成回退: {exc}")
+        elif self.client is not None:
+            self.warnings.append("首帧源图触发知识产权或视觉风险，跳过衍生视频生成")
         create_slideshow_video(main_image_path, destination, duration=8)
         return AssetResult(
             name=destination.name,
@@ -542,11 +871,18 @@ Allowed leaf candidates:
                 + _even_sample(facts.sku_image_urls, 1)
                 + _even_sample(facts.description_image_urls, 1)
             )[:5]
+            source_review_urls = self._source_urls_for_use(
+                source_review_urls, use="reference"
+            )[:5]
             try:
                 review = self.client.review_generated_images(
                     json.dumps(facts.compact_dict(), ensure_ascii=False),
                     source_review_urls,
                     [asset.source_url for asset in image_assets],
+                    [
+                        {"name": asset.name, "purpose": asset.description}
+                        for asset in image_assets
+                    ],
                 )
             except ApiError as exc:
                 self.logger.warning(
@@ -574,6 +910,9 @@ Allowed leaf candidates:
                     self.warnings.append("主图语义质检回退后，视频同步回退为源图展示")
 
         self._review_generated_video(facts, assets, work_dir)
+        self._replace_near_duplicate_details(
+            facts, assets, downloads_dir, include_fallback=True
+        )
 
     def _apply_image_review(
         self,
@@ -593,20 +932,30 @@ Allowed leaf candidates:
             index = item["index"]
             if not 0 <= index < len(image_assets):
                 continue
+            asset = image_assets[index]
             rejected = (
                 item.get("usable") is False
                 or item.get("identity_consistent") is False
+                or item.get("construction_consistent") is False
+                or item.get("slot_match") is False
                 or item.get("unwanted_text") is True
                 or item.get("major_artifacts") is True
+                or (
+                    item.get("unexpected_collage") is True
+                    and asset.name != "detail_image_4.jpeg"
+                )
+                or str(item.get("product_coverage") or "").lower() == "low"
             )
             if not rejected:
                 continue
-            asset = image_assets[index]
             destination = Path(asset.path)
             is_main = asset.name == "main_image.jpeg"
             try:
                 fallback_url = self._fallback_image(
-                    self._fallback_sources_for_asset(facts, asset.name),
+                    self._source_urls_for_use(
+                        self._fallback_source_urls(facts, asset_name=asset.name),
+                        use="fallback",
+                    ),
                     destination,
                     downloads_dir,
                     canvas=(1600, 1600) if is_main else (1200, 1500),
@@ -633,10 +982,14 @@ Allowed leaf candidates:
         facts: ProductFacts,
         assets: list[AssetResult],
         downloads_dir: Path,
+        *,
+        include_fallback: bool = False,
     ) -> None:
         seen: list[tuple[str, int]] = []
         for asset in assets:
-            if not asset.name.startswith("detail_image_") or not asset.generated:
+            if not asset.name.startswith("detail_image_") or (
+                not include_fallback and not asset.generated
+            ):
                 continue
             try:
                 quality = inspect_image_quality(Path(asset.path))
@@ -658,20 +1011,33 @@ Allowed leaf candidates:
                 continue
             try:
                 fallback_url = self._fallback_image(
-                    self._fallback_sources_for_asset(facts, asset.name),
+                    self._source_urls_for_use(
+                        self._fallback_source_urls(facts, asset_name=asset.name),
+                        use="fallback",
+                    ),
                     Path(asset.path),
                     downloads_dir,
                     canvas=(1200, 1500),
                     white_background=False,
+                    avoid_hashes=[difference_hash for _, difference_hash in seen],
                 )
             except PipelineError as exc:
                 self.logger.warning("重复详情图回退失败 %s: %s", asset.name, exc)
+                warning = f"{asset.name} 与 {duplicate_of} 近重复，未找到不同的安全源图"
+                if warning not in self.warnings:
+                    self.warnings.append(warning)
                 continue
             asset.source_url = fallback_url
             asset.model = "deterministic-source-fallback"
             asset.generated = False
             asset.fallback_reason = f"near-duplicate of {duplicate_of}"
             self.warnings.append(f"{asset.name} 与 {duplicate_of} 近重复，已回退到源图")
+            try:
+                replacement_quality = inspect_image_quality(Path(asset.path))
+            except MediaError:
+                replacement_quality = None
+            if replacement_quality is not None:
+                seen.append((asset.name, replacement_quality.difference_hash))
 
     def _fallback_sources_for_asset(
         self, facts: ProductFacts, asset_name: str
@@ -703,6 +1069,9 @@ Allowed leaf candidates:
             return
         source_review_urls = _unique(
             facts.product_image_urls[:3] + _even_sample(facts.sku_image_urls, 1)
+        )[:4]
+        source_review_urls = self._source_urls_for_use(
+            source_review_urls, use="reference"
         )[:4]
         try:
             review = self.client.review_generated_video(
@@ -798,6 +1167,7 @@ Allowed leaf candidates:
             "- 韩文按 ko-KR 自然购物语气编写，避免机械直译和未经证实的韩国尺码映射。",
             "- 葡萄牙文按 pt-BR 编写，避免欧洲葡语表达和未经证实的 P/M/G 映射。",
             "- 三份文案共享同一个不可变商品 ID、URL、叶子类目、属性和完整 SKU 表。",
+            "- 卖家提供的体重范围只按完全匹配的尺码标签写入对应 SKU，并同时展示 kg/lb，不推导地区尺码。",
             f"- 文案生成来源：{json.dumps(localization_sources, ensure_ascii=False)}",
             "",
             "## 5. 图片与视频生成策略",
@@ -805,16 +1175,17 @@ Allowed leaf candidates:
             f"- 视觉主题：{state.creative_plan.visual_theme}",
             f"- 创意计划来源：{plan_model}",
             f"- 模型配置：{json.dumps(model_summary, ensure_ascii=False)}",
-            "- 主图采用方形浅色棚拍构图，禁止促销文字、边框、水印及未经证实的视觉声明。",
+            "- 主图采用方形浅色棚拍构图；优先生成三个候选，再按身份、结构、颜色、完整度、干净背景、单品覆盖和瑕疵自动选优。",
+            "- 主图回退源图须优先满足无人物、无关道具、单一完整商品和干净中性背景；没有合格源图时明确记录质量降级。",
             "- 五张详情图依次覆盖整体展示、设计细节、已验证特征、真实变体和实际使用情境。",
-            "- 视频以最终主图或其源 URL 为首帧，使用慢速稳定镜头，禁止服装变形、换色、字幕和复杂手部交互。",
+            "- 视频以最终主图或其源 URL 为首帧，按上装、下装、连衣裙或童装使用不同结构保护镜头；默认移除未审核音轨。",
             f"- 本次模型直接生成并通过校验的素材数：{generated_count}。",
             "",
             "## 6. 合规与质检",
             "",
             "生成提示词统一禁止虚假功能、绝对化宣传、额外商标、价格折扣、认证和测量值。"
             "图片下载后统一解码为 RGB JPEG，并校验尺寸、文件大小、空白图和近重复图；模型生成图还会与"
-            "可信源图共同输入视觉质检，检查商品身份一致性、意外文字、水印和重大瑕疵。视频除容器和"
+            "可信源图共同输入视觉质检，检查商品身份与具体结构、分镜覆盖、意外文字、水印和重大瑕疵。视频除容器和"
             "200MB 上限外，还须完成全视频流解码，并通过源图对照的时序语义质检。"
             "所有输出在写入最终目录前进行一次完整交付质检，写入后再次复核。",
             "",
@@ -823,6 +1194,7 @@ Allowed leaf candidates:
             "API 请求对限流和暂时性错误执行指数退避；图片优先走同步多模态生成，视频异步任务保存 task_id 并轮询。"
             "图片模型失败或语义质检不通过时，回退到经规格归一化的商品源图；视频模型失败时，"
             "使用已验证主图生成可播放的 H.264 商品展示视频。所有回退都优先保证商品事实一致性和文件可用性。",
+            f"- 本次 API 调用记录数：{len(state.api_calls)}；每次调用均记录模型、耗时、状态及调用后的剩余时间。",
         ]
         if fallback_assets:
             lines.extend(["", "本次发生的素材回退：", ""])

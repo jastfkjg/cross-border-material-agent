@@ -54,7 +54,7 @@ class _ModelServiceHandler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def do_GET(self):  # noqa: N802
-        if self.path == "/source.jpg":
+        if self.path in {"/source.jpg", "/source-2.jpg"}:
             self._file(self.source_image, "image/jpeg")
         elif self.path == "/video.mp4":
             self._file(self.source_video, "video/mp4")
@@ -77,15 +77,17 @@ class _ModelServiceHandler(BaseHTTPRequestHandler):
         if self.path == "/openai/chat/completions":
             self._chat(body)
         elif self.path == "/dash/services/aigc/multimodal-generation/generation":
+            requested = max(1, int(body.get("parameters", {}).get("n", 1)))
+            image_urls = [self.root_url + "/source.jpg"]
+            if requested > 1:
+                image_urls.append(self.root_url + "/source-2.jpg")
             self._json(
                 {
                     "output": {
                         "choices": [
                             {
                                 "message": {
-                                    "content": [
-                                        {"image": self.root_url + "/source.jpg"}
-                                    ]
+                                    "content": [{"image": url} for url in image_urls]
                                 }
                             }
                         ]
@@ -119,6 +121,9 @@ class _ModelServiceHandler(BaseHTTPRequestHandler):
                 },
             }
         elif "visual inspector" in system:
+            image_count = sum(
+                1 for item in user_content if item.get("type") == "image_url"
+            )
             payload = {
                 "product_type": "shirt",
                 "visible_colors": ["purple"],
@@ -127,6 +132,53 @@ class _ModelServiceHandler(BaseHTTPRequestHandler):
                 "image_quality_notes": [],
                 "prohibited_or_risky_visuals": [],
                 "preservation_constraints": ["preserve shape"],
+                "images": [
+                    {
+                        "index": index,
+                        "role": "hero" if index == 0 else "detail",
+                        "dominant_color": "purple",
+                        "product_coverage": "high",
+                        "sharpness": "high",
+                        "has_text": False,
+                        "has_logo": False,
+                        "has_watermark": False,
+                        "has_contact_info": False,
+                        "has_qr_code": False,
+                        "has_price_or_discount": False,
+                        "has_review_graphic": False,
+                        "has_certification_seal": False,
+                        "has_platform_mark": False,
+                        "has_third_party_brand": False,
+                        "has_before_after": False,
+                        "adult_or_sensitive_visual": False,
+                        "product_obscured": False,
+                        "low_sharpness": False,
+                        "safe_for_generation_reference": True,
+                        "risk_reasons": [],
+                    }
+                    for index in range(image_count)
+                ],
+            }
+        elif "hero-image selector" in system:
+            payload = {
+                "selected_index": 1,
+                "candidates": [
+                    {
+                        "index": index,
+                        "usable": True,
+                        "identity_consistent": True,
+                        "construction_consistent": True,
+                        "correct_color": True,
+                        "single_product": True,
+                        "unwanted_text": False,
+                        "major_artifacts": False,
+                        "unexpected_collage": False,
+                        "product_coverage": "high",
+                        "score": 90 + index,
+                        "reason": "source-faithful",
+                    }
+                    for index in range(2)
+                ],
             }
         elif "image quality gate" in system:
             image_count = sum(
@@ -138,8 +190,11 @@ class _ModelServiceHandler(BaseHTTPRequestHandler):
                         "index": index,
                         "usable": True,
                         "identity_consistent": True,
+                        "construction_consistent": True,
+                        "slot_match": True,
                         "unwanted_text": False,
                         "major_artifacts": False,
+                        "product_coverage": "high",
                         "reason": "ok",
                     }
                     for index in range(image_count)

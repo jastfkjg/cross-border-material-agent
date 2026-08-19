@@ -288,6 +288,42 @@ def create_slideshow_video(
     inspect_video(destination)
 
 
+def strip_video_audio(source: Path, destination: Path) -> None:
+    """Copy the video stream into a fresh MP4 while removing unreviewed audio."""
+
+    ffmpeg = _ffmpeg_executable()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(source),
+        "-map",
+        "0:v:0",
+        "-c:v",
+        "copy",
+        "-an",
+        "-movflags",
+        "+faststart",
+        str(destination),
+    ]
+    try:
+        completed = subprocess.run(
+            command, capture_output=True, text=True, timeout=120, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        destination.unlink(missing_ok=True)
+        raise MediaError(f"视频静音处理失败: {exc}") from exc
+    if completed.returncode != 0:
+        destination.unlink(missing_ok=True)
+        raise MediaError(f"视频静音处理失败: {completed.stderr[-1200:]}")
+    inspect_video(destination)
+
+
 def inspect_video(path: Path) -> dict[str, Any]:
     if not path.is_file() or path.stat().st_size <= 0:
         raise MediaError(f"视频不存在或为空: {path}")
