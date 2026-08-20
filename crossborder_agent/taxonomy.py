@@ -88,6 +88,16 @@ _SOURCE_CATEGORY_IDS = {
 }
 
 
+# The supplied platform dump omits metadata rows for both child T-shirt leaves,
+# while the equivalent T-shirt attribute IDs and enums are stable in the same
+# taxonomy snapshot. Reuse that schema only for mapping fields; the selected
+# child leaf category itself is never changed.
+_METADATA_SCHEMA_FALLBACKS = {
+    "30843": "29069",  # boys' T-shirts -> generic T-shirt field schema
+    "29553": "29069",  # girls' T-shirts -> generic T-shirt field schema
+}
+
+
 def _source_values(facts: ProductFacts, name_fragment: str) -> list[str]:
     result: list[str] = []
     for item in facts.attributes:
@@ -423,6 +433,9 @@ def resolve_taxonomy(
         while ancestor_id and not selected_metadata:
             selected_metadata = _find_category(ancestor_id, metadata)
             ancestor_id = parents.get(ancestor_id, "")
+    if not selected_metadata:
+        fallback_metadata_id = _METADATA_SCHEMA_FALLBACKS.get(choice.category_id, "")
+        selected_metadata = _find_category(fallback_metadata_id, metadata)
     if not selected_metadata:
         return TaxonomyResult(category=choice)
 

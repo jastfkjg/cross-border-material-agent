@@ -1,5 +1,5 @@
 {
-  "version": "2026-08-v2",
+  "version": "2026-08-v3",
   "scope": "Generated listing copy, generated visual prompts, source-reference selection and delivery QA",
   "policy_layers": {
     "platform_explicit": [
@@ -98,10 +98,15 @@
     "has_platform_mark",
     "has_third_party_brand",
     "has_before_after",
-    "adult_or_sensitive_visual"
+    "adult_or_sensitive_visual",
+    "has_hate_or_extremism",
+    "has_violence_or_weapon",
+    "has_drugs_tobacco_or_alcohol"
   ],
   "source_visual_review_fields": [
     "has_text",
+    "has_overlay_text",
+    "has_intrinsic_product_text",
     "has_logo",
     "product_obscured",
     "low_sharpness",

@@ -389,6 +389,8 @@ Return a JSON object with keys:
   - product_coverage: one of high, medium, low, unknown
   - sharpness: one of high, medium, low, unknown
   - has_text: boolean
+  - has_overlay_text: boolean (marketing copy, captions or text placed over/background around the product)
+  - has_intrinsic_product_text: boolean (text physically printed, embroidered or sewn on the sellable product)
   - has_logo: boolean
   - has_watermark: boolean
   - has_contact_info: boolean
@@ -400,6 +402,9 @@ Return a JSON object with keys:
   - has_third_party_brand: boolean (true only when a third-party brand is visible or strongly suspected)
   - has_before_after: boolean
   - adult_or_sensitive_visual: boolean
+  - has_hate_or_extremism: boolean
+  - has_violence_or_weapon: boolean
+  - has_drugs_tobacco_or_alcohol: boolean
   - product_obscured: boolean
   - low_sharpness: boolean
   - has_person: boolean
@@ -411,7 +416,8 @@ Return a JSON object with keys:
   - risk_reasons: string[]
 
 Read all visible text as carefully as possible. A product's own sewn label or print still counts as
-has_text/has_logo. Contact details, QR codes, marketplace marks, watermarks, price/discount badges,
+has_text and has_intrinsic_product_text, but not has_overlay_text. Marketing captions around the garment
+count as has_overlay_text. Contact details, QR codes, marketplace marks, watermarks, price/discount badges,
 review graphics and suspected third-party branding make safe_for_generation_reference false.
 For a marketplace hero, a person, unrelated prop, multiple products, incomplete product or lifestyle
 background makes the source unsuitable even when it remains usable as a detail reference.
@@ -500,6 +506,46 @@ Verified facts:
             images=[*source_image_urls, *candidate_urls],
         )
 
+    def select_best_detail_image(
+        self,
+        facts_json: str,
+        source_image_urls: list[str],
+        candidate_urls: list[str],
+        *,
+        asset_name: str,
+        purpose: str,
+    ) -> dict[str, Any]:
+        system = (
+            "You are a strict e-commerce detail-image selector. Return JSON only. "
+            "The source images define product identity. Reject product drift, invented variants, "
+            "unwanted text, prohibited commerce elements, anatomy errors and storyboard mismatch."
+        )
+        prompt = f"""
+The first {len(source_image_urls)} images are trusted source references. The next
+{len(candidate_urls)} images are candidates for {asset_name}.
+
+Intended storyboard purpose:
+{purpose}
+
+Return JSON with:
+- selected_index: zero-based candidate index, or -1 if every candidate is unusable
+- candidates: exactly {len(candidate_urls)} objects, each containing index, usable,
+  identity_consistent, construction_consistent, color_consistent, pattern_consistent,
+  slot_match, anatomy_natural, unwanted_text, prohibited_visual, major_artifacts,
+  product_coverage (high/medium/low), score (0-100), and reason.
+
+For a variant lineup, every shown variant must be visibly supported by a source reference.
+For a wearer scene, reject malformed hands, limbs, faces, garment fit or body proportions.
+
+Verified facts:
+{facts_json}
+""".strip()
+        return self.chat_json(
+            system,
+            prompt,
+            images=[*source_image_urls, *candidate_urls],
+        )
+
     def review_generated_video(
         self,
         facts_json: str,
@@ -517,7 +563,11 @@ The supplied images are trusted source references. The supplied video is a gener
 Review the entire video and return a JSON object with exactly these keys:
 - usable: boolean
 - identity_consistent: boolean
+- construction_consistent: boolean
+- color_and_pattern_consistent: boolean
+- motion_stable: boolean (no morphing, severe flicker, sudden cut or camera shake)
 - unwanted_text: boolean
+- prohibited_visual: boolean
 - major_artifacts: boolean
 - reason: concise string
 

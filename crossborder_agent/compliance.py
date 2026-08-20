@@ -117,6 +117,13 @@ def normalize_source_image_observations(
         ):
             item[str(field)] = raw.get(str(field)) is True
         item["risk_reasons"] = source_visual_risk_reasons({**raw, **item})
+        item["has_overlay_text"] = bool(
+            item.get("has_overlay_text")
+            or (
+                item.get("has_text")
+                and not item.get("has_intrinsic_product_text")
+            )
+        )
         hard_safe = not item["risk_reasons"]
         model_safe = raw.get("safe_for_generation_reference")
         item["safe_for_generation_reference"] = bool(
@@ -125,7 +132,7 @@ def normalize_source_image_observations(
         item["safe_for_listing_fallback"] = bool(
             raw
             and hard_safe
-            and not item["has_text"]
+            and not item["has_overlay_text"]
             and not item["has_logo"]
             and not item["product_obscured"]
         )

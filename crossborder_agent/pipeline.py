@@ -336,8 +336,9 @@ Allowed leaf candidates:
             return {}
         self._ensure_time(10 * 60)
         preferred = facts.product_image_urls[:5]
-        description_sample = _even_sample(facts.description_image_urls, 5)
-        urls = _unique(preferred + facts.sku_image_urls[:2] + description_sample)
+        sku_sample = _even_sample(facts.sku_image_urls, 4)
+        description_sample = _even_sample(facts.description_image_urls, 3)
+        urls = _unique(preferred + sku_sample + description_sample)[:12]
         try:
             result = self.client.analyze_product_images(
                 json.dumps(facts.compact_dict(), ensure_ascii=False), urls
@@ -471,6 +472,9 @@ Allowed leaf candidates:
             "has_platform_mark",
             "has_before_after",
             "adult_or_sensitive_visual",
+            "has_hate_or_extremism",
+            "has_violence_or_weapon",
+            "has_drugs_tobacco_or_alcohol",
         }
         reasons = [
             str(reason).casefold()
@@ -491,6 +495,13 @@ Allowed leaf candidates:
             "platform mark",
             "before and after",
             "adult",
+            "hate",
+            "extrem",
+            "violence",
+            "weapon",
+            "drug",
+            "tobacco",
+            "alcohol",
         )
         return explicit + [reason for reason in reasons if any(key in reason for key in keywords)]
 
@@ -542,6 +553,9 @@ Allowed leaf candidates:
             for url in ranked_primary
             if self._source_image_observations.get(url, {}).get("role")
             not in {"size_chart", "packaging"}
+            and not self._source_image_observations.get(url, {}).get(
+                "has_overlay_text", False
+            )
             and not self._terminal_fallback_risks(
                 self._source_image_observations.get(url, {})
             )
@@ -558,6 +572,9 @@ Allowed leaf candidates:
             for url in ranked_description
             if self._source_image_observations.get(url, {}).get("role")
             not in {"size_chart", "packaging"}
+            and not self._source_image_observations.get(url, {}).get(
+                "has_overlay_text", False
+            )
             and not self._terminal_fallback_risks(
                 self._source_image_observations.get(url, {})
             )
@@ -728,10 +745,10 @@ Allowed leaf candidates:
                 and isinstance(item.get("index"), int)
                 and 0 <= item["index"] < len(candidate_urls)
                 and item.get("usable") is True
-                and item.get("identity_consistent") is not False
-                and item.get("construction_consistent") is not False
-                and item.get("correct_color") is not False
-                and item.get("single_product") is not False
+                and item.get("identity_consistent") is True
+                and item.get("construction_consistent") is True
+                and item.get("correct_color") is True
+                and item.get("single_product") is True
                 and item.get("product_complete") is True
                 and item.get("clean_neutral_background") is True
                 and item.get("has_person") is not True
@@ -776,11 +793,20 @@ Allowed leaf candidates:
         )
         if self.client is not None and reference_selection:
             try:
-                generated_url, model = self.client.generate_image(
+                candidate_count = 2 if index in {4, 5} else 1
+                candidate_urls, model = self.client.generate_image_candidates(
                     plan.detail_prompts[index - 1],
                     reference_selection[:3],
                     size="1200*1500",
                     negative_prompt=_IMAGE_NEGATIVE_PROMPT,
+                    count=candidate_count,
+                )
+                generated_url = self._select_detail_candidate(
+                    index,
+                    facts,
+                    reference_selection[:3],
+                    candidate_urls,
+                    plan.detail_prompts[index - 1],
                 )
                 self._download_and_normalize(
                     generated_url,
@@ -822,6 +848,55 @@ Allowed leaf candidates:
             description=f"Source-faithful detail image {index}",
         )
 
+    def _select_detail_candidate(
+        self,
+        index: int,
+        facts: ProductFacts,
+        source_urls: list[str],
+        candidate_urls: list[str],
+        purpose: str,
+    ) -> str:
+        if not candidate_urls:
+            raise ApiError(f"详情图 {index} 模型未返回候选")
+        if len(candidate_urls) == 1 or self.client is None:
+            return candidate_urls[0]
+        review = self.client.select_best_detail_image(
+            json.dumps(facts.compact_dict(), ensure_ascii=False),
+            source_urls,
+            candidate_urls,
+            asset_name=f"detail_image_{index}.jpeg",
+            purpose=purpose,
+        )
+        candidates = review.get("candidates")
+        selected = review.get("selected_index")
+        usable: set[int] = set()
+        if isinstance(candidates, list):
+            for item in candidates:
+                if not isinstance(item, dict) or not isinstance(item.get("index"), int):
+                    continue
+                candidate_index = item["index"]
+                if not 0 <= candidate_index < len(candidate_urls):
+                    continue
+                if (
+                    item.get("usable") is True
+                    and item.get("identity_consistent") is not False
+                    and item.get("construction_consistent") is not False
+                    and item.get("color_consistent") is not False
+                    and item.get("pattern_consistent") is not False
+                    and item.get("slot_match") is True
+                    and item.get("anatomy_natural") is not False
+                    and item.get("unwanted_text") is not True
+                    and item.get("prohibited_visual") is not True
+                    and item.get("major_artifacts") is not True
+                    and str(item.get("product_coverage") or "").lower() != "low"
+                ):
+                    usable.add(candidate_index)
+        if isinstance(selected, int) and selected in usable:
+            return candidate_urls[selected]
+        if usable:
+            return candidate_urls[min(usable)]
+        raise ApiError(f"详情图 {index} 候选均未通过语义质检")
+
     def _detail_reference_selection(
         self, index: int, facts: ProductFacts, main_reference_url: str
     ) -> list[str]:
@@ -829,8 +904,12 @@ Allowed leaf candidates:
         sku = facts.sku_image_urls
         description = facts.description_image_urls
         if index == 4 and sku:
+            inspected_variants = [
+                url for url in sku if url in self._source_image_observations
+            ]
+            variant_references = inspected_variants or _even_sample(sku, 3)
             return self._source_urls_for_use(
-                _unique(_even_sample(sku, 3) + product[:1]),
+                _unique(_even_sample(variant_references, 3) + product[:1]),
                 use="reference",
                 preferred_roles=("variant", "front", "hero"),
             )[:3]
@@ -974,8 +1053,8 @@ Allowed leaf candidates:
         self._replace_near_duplicate_details(
             facts, assets, downloads_dir, include_fallback=True
         )
-        self._enhance_fallback_video(assets, work_dir)
         self._review_generated_video(facts, assets, work_dir)
+        self._enhance_fallback_video(assets, work_dir)
 
     def _enhance_fallback_video(
         self, assets: list[AssetResult], work_dir: Path
@@ -1025,20 +1104,21 @@ Allowed leaf candidates:
                 continue
             asset = image_assets[index]
             rejected = (
-                item.get("usable") is False
-                or item.get("identity_consistent") is False
-                or item.get("construction_consistent") is False
-                or item.get("color_consistent") is False
-                or item.get("pattern_consistent") is False
-                or item.get("slot_match") is False
-                or item.get("unwanted_text") is True
-                or item.get("prohibited_visual") is True
-                or item.get("major_artifacts") is True
+                item.get("usable") is not True
+                or item.get("identity_consistent") is not True
+                or item.get("construction_consistent") is not True
+                or item.get("color_consistent") is not True
+                or item.get("pattern_consistent") is not True
+                or item.get("slot_match") is not True
+                or item.get("unwanted_text") is not False
+                or item.get("prohibited_visual") is not False
+                or item.get("major_artifacts") is not False
                 or (
                     item.get("unexpected_collage") is True
                     and asset.name != "detail_image_4.jpeg"
                 )
-                or str(item.get("product_coverage") or "").lower() == "low"
+                or str(item.get("product_coverage") or "").lower()
+                not in {"high", "medium"}
             )
             if not rejected:
                 continue
@@ -1159,7 +1239,13 @@ Allowed leaf candidates:
         if not video_asset or not video_asset.generated or not video_asset.source_url:
             return
         if self.deadline - time.monotonic() <= 2 * 60:
-            self.warnings.append("剩余时间不足，跳过生成视频语义质检")
+            replaced = self._fallback_video(
+                video_asset,
+                work_dir / "main_image.jpeg",
+                "insufficient time for generated-video semantic QA",
+            )
+            if replaced:
+                self.warnings.append("剩余时间不足，生成视频已安全回退")
             return
         source_review_urls = _unique(
             facts.product_image_urls[:3] + _even_sample(facts.sku_image_urls, 1)
@@ -1174,14 +1260,24 @@ Allowed leaf candidates:
                 video_asset.source_url,
             )
         except ApiError as exc:
-            self.logger.warning("生成视频语义质检失败，保留完整解码通过的视频: %s", exc)
-            self.warnings.append(f"生成视频语义质检不可用: {exc}")
+            self.logger.warning("生成视频语义质检失败，执行安全回退: %s", exc)
+            replaced = self._fallback_video(
+                video_asset,
+                work_dir / "main_image.jpeg",
+                f"generated-video semantic QA unavailable: {exc}",
+            )
+            if replaced:
+                self.warnings.append("生成视频语义质检不可用，已安全回退")
             return
         rejected = (
-            review.get("usable") is False
-            or review.get("identity_consistent") is False
-            or review.get("unwanted_text") is True
-            or review.get("major_artifacts") is True
+            review.get("usable") is not True
+            or review.get("identity_consistent") is not True
+            or review.get("construction_consistent") is not True
+            or review.get("color_and_pattern_consistent") is not True
+            or review.get("motion_stable") is not True
+            or review.get("unwanted_text") is not False
+            or review.get("prohibited_visual") is not False
+            or review.get("major_artifacts") is not False
         )
         if not rejected:
             return
@@ -1256,10 +1352,13 @@ Allowed leaf candidates:
             "",
             "类目采用“源类目同义词精确映射 → 性别/年龄/品类规则过滤 → 本地叶子节点排序”的确定性优先流程。"
             "属性值只从对应类目允许的枚举中映射；缺失的必填值会明确保留为空，不进行事实编造。",
+            "当童装 T 恤叶子在平台快照中缺失属性元数据时，只复用同快照中通用 T 恤的稳定属性 ID/枚举 schema；"
+            "男童/女童叶子类目 ID 保持不变，颜色与身高销售规格仍逐项来自源 SKU。",
             "",
             "## 4. 本地化策略",
             "",
             "- 英文按 en-US 电商语气编写，涉及体重时同时给出 lb。",
+            "- 英文中的厘米规格同时给出确定性英寸换算；韩文与巴西葡萄牙文保留当地常用公制。",
             "- 韩文按 ko-KR 自然购物语气编写，避免机械直译和未经证实的韩国尺码映射。",
             "- 葡萄牙文按 pt-BR 编写，避免欧洲葡语表达和未经证实的 P/M/G 映射。",
             "- 三份文案共享同一个不可变商品 ID、URL、叶子类目、属性和完整 SKU 表。",
@@ -1275,6 +1374,7 @@ Allowed leaf candidates:
             "- 主图回退源图须优先满足无人物、无关道具、单一完整商品和干净中性背景；没有合格源图时明确记录质量降级。",
             "- 五张详情图依次覆盖美区整体展示、韩区精细商品摄影、巴西区自然光细节、真实变体和跨市场使用情境；"
             "不使用国旗、地标、文化刻板印象或生成文字。",
+            "- 高风险的变体图与穿着场景各生成两个候选，并按商品身份、颜色、图案、结构、人体与分镜匹配自动选优。",
             "- 视频以最终主图或其源 URL 为首帧，按上装、下装、连衣裙或童装使用不同结构保护镜头；默认移除未审核音轨。",
             f"- 本次模型直接生成并通过校验的素材数：{generated_count}。",
             "",
@@ -1285,6 +1385,8 @@ Allowed leaf candidates:
             "可信源图共同输入视觉质检，检查商品身份与具体结构、分镜覆盖、意外文字、水印和重大瑕疵。视频除容器和"
             "200MB 上限外，还须完成全视频流解码，并通过源图对照的时序语义质检。"
             "所有输出在写入最终目录前进行一次完整交付质检，写入后再次复核。",
+            "源图检查区分商品本身的印花文字与背景营销叠字；后者以及价格、联系方式、二维码、水印、平台标识和"
+            "敏感视觉元素不会进入发布回退素材。视频语义质检缺失、超时或字段不完整时按失败处理。",
             "",
             "## 7. 降级与稳定性",
             "",

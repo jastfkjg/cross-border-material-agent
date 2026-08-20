@@ -54,6 +54,12 @@ def _product_family(taxonomy: TaxonomyResult) -> str:
 
 def _detail_slot_directives(taxonomy: TaxonomyResult) -> tuple[str, ...]:
     family = _product_family(taxonomy)
+    category_id = taxonomy.category.category_id
+    wearer = (
+        "one adult man"
+        if category_id in {"30341", "30335", "30408", "30471"}
+        else "one adult woman"
+    )
     slot_1 = _BASE_DETAIL_SLOT_DIRECTIVES[0]
     slot_4 = _BASE_DETAIL_SLOT_DIRECTIVES[3]
     if family == "bottom":
@@ -66,9 +72,9 @@ def _detail_slot_directives(taxonomy: TaxonomyResult) -> tuple[str, ...]:
             "while keeping enough of the product visible to identify it. Use warm natural daylight and a subtle "
             "contemporary Brazilian marketplace mood without flags, landmarks, stereotypes or written text.",
             slot_4,
-            "This is detail slot 5: show one wearer in a restrained everyday styling context, with the waistband, "
+            f"This is detail slot 5: show {wearer} in a restrained everyday styling context, with the waistband, "
             "both legs and hem visible and unobstructed. Use inclusive cross-market styling appropriate to the US, "
-            "South Korea and Brazil. Keep anatomy and garment length natural.",
+            "South Korea and Brazil. Keep anatomy, body proportions and garment length natural; do not reshape the body.",
         )
     if family == "children":
         return (
@@ -90,9 +96,12 @@ def _detail_slot_directives(taxonomy: TaxonomyResult) -> tuple[str, ...]:
             "of the dress visible to identify its silhouette and length. Use warm natural daylight and a subtle "
             "contemporary Brazilian marketplace mood without flags, landmarks, stereotypes or written text.",
             slot_4,
-            _BASE_DETAIL_SLOT_DIRECTIVES[4],
+            _BASE_DETAIL_SLOT_DIRECTIVES[4].replace("one adult wearer", wearer),
         )
-    return _BASE_DETAIL_SLOT_DIRECTIVES
+    return (
+        *_BASE_DETAIL_SLOT_DIRECTIVES[:4],
+        _BASE_DETAIL_SLOT_DIRECTIVES[4].replace("one adult wearer", wearer),
+    )
 
 
 def _video_guard(taxonomy: TaxonomyResult) -> str:

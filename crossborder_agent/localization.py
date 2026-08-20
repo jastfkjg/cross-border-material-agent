@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from .api import ApiError, QwenClient
@@ -520,11 +521,7 @@ def _static_localize_term(language: str, value: str) -> str:
         rendered = rendered.replace(source, target)
     rendered = re.sub(
         r"(?P<low>\d+(?:\.\d+)?)\s*[-~～至]\s*(?P<high>\d+(?:\.\d+)?)\s*斤",
-        lambda match: (
-            f"{match.group('low')}–{match.group('high')} jin"
-            if language in {"en", "pt"}
-            else f"{match.group('low')}–{match.group('high')} 중국 진"
-        ),
+        lambda match: _localized_jin_range(language, match),
         rendered,
     )
     if re.search(r"[\u4e00-\u9fff]", rendered):
@@ -534,6 +531,54 @@ def _static_localize_term(language: str, value: str) -> str:
             "pt": "Valor informado pelo vendedor",
         }[language]
     return rendered
+
+
+def _decimal_measurement(value: Decimal) -> str:
+    rounded = value.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    return format(rounded.normalize(), "f")
+
+
+def _localized_jin_range(language: str, match: re.Match[str]) -> str:
+    low_kg = Decimal(match.group("low")) / 2
+    high_kg = Decimal(match.group("high")) / 2
+    kilograms = f"{_decimal_measurement(low_kg)}–{_decimal_measurement(high_kg)} kg"
+    if language != "en":
+        return kilograms
+    low_lb = low_kg * Decimal("2.2046226218")
+    high_lb = high_kg * Decimal("2.2046226218")
+    return (
+        f"{kilograms} ({_decimal_measurement(low_lb)}–"
+        f"{_decimal_measurement(high_lb)} lb)"
+    )
+
+
+def _seller_weight_display(language: str, raw: str) -> str:
+    match = re.search(
+        r"(?P<low>\d+(?:\.\d+)?)\s*[-~～至]\s*(?P<high>\d+(?:\.\d+)?)\s*斤",
+        raw,
+    )
+    if not match:
+        return ""
+    prefix = raw[: match.start()].strip()
+    converted = _localized_jin_range(language, match)
+    return f"{prefix} {converted}".strip()
+
+
+def _append_us_length_conversion(raw: str, rendered: str) -> str:
+    centimeters = re.findall(r"(?<!\d)(\d+(?:\.\d+)?)\s*cm\b", raw, re.IGNORECASE)
+    if not centimeters:
+        return rendered
+    inches = [
+        _decimal_measurement(Decimal(value) / Decimal("2.54"))
+        for value in centimeters
+    ]
+    if len(inches) == 1:
+        conversion = f"{inches[0]} in"
+    else:
+        conversion = f"{'–'.join(inches)} in"
+    if conversion.casefold() in rendered.casefold():
+        return rendered
+    return f"{rendered} ({conversion})"
 
 
 def _fallback_term_map(
@@ -649,7 +694,7 @@ def _payload_validation_error(
     )
     if "\n" in str(payload.get("title") or "") or len(
         str(payload.get("title") or "").strip()
-    ) > 160:
+    ) > 128:
         return "localized-title-guard"
     if re.search(r"[\u4e00-\u9fff]", generated_text):
         return "source-script-contamination-guard"
@@ -775,7 +820,7 @@ def _fallback_payload(
         if len(selected_features) == 5:
             break
 
-    title_values = [value for _, value in selected_features[:4]]
+    title_values = [value for _, value in selected_features[:3]]
     payload["title"] = (
         f"{base_title} — {', '.join(title_values)}" if title_values else base_title
     )
@@ -869,7 +914,7 @@ The title, overview and highlights together must name at least three concrete ve
 attributes. Do not use process-oriented filler such as "source-grounded details" or describe the
 fact-checking workflow to the shopper.
 Use product-first phrasing natural to {locale["locale"]}; avoid translated syntax, keyword stuffing,
-generic filler and mixed-language fragments. Keep the title under 160 characters.
+generic filler and mixed-language fragments. Keep the title under 128 characters.
 For en-US, use US spelling and concise marketplace phrasing. For ko-KR, use natural Korean retail
 sentence endings and Korean option terminology. For pt-BR, use Brazilian vocabulary and forms such
 as produto, tamanho, camiseta and consulte; avoid European Portuguese vocabulary.
@@ -988,8 +1033,15 @@ def _localized_display(language: str, value: str, term_map: dict[str, Any]) -> s
     raw = str(value).strip()
     translated = term_map.get(raw)
     if isinstance(translated, str) and translated.strip():
-        return translated.strip()
-    return _static_localize_term(language, raw)
+        rendered = translated.strip()
+    else:
+        rendered = _static_localize_term(language, raw)
+    seller_weight = _seller_weight_display(language, raw)
+    if seller_weight:
+        rendered = seller_weight
+    if language == "en":
+        rendered = _append_us_length_conversion(raw, rendered)
+    return rendered
 
 
 def _canonical_section(
