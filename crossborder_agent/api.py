@@ -444,8 +444,11 @@ Return JSON with key assets, an array of exactly {len(generated_image_urls)} obj
 - usable: boolean
 - identity_consistent: boolean
 - construction_consistent: boolean (check visible collar, sleeves, pockets, buttons/fasteners, hem and pattern)
+- color_consistent: boolean
+- pattern_consistent: boolean
 - slot_match: boolean (whether this asset fulfills its intended storyboard purpose)
 - unwanted_text: boolean
+- prohibited_visual: boolean (price, discount, contact details, QR code, review badge, certification seal, platform mark or adult/sensitive content)
 - major_artifacts: boolean
 - unexpected_collage: boolean (true for montage, grid, split-screen or repeated panels; detail slot 4 may intentionally show a clean variant lineup)
 - product_coverage: one of high, medium, low

@@ -20,6 +20,7 @@ from .input_loader import discover_input_files, load_json, load_product_facts
 from .localization import generate_copy_payload, render_description
 from .media import (
     MediaError,
+    create_catalog_video,
     create_slideshow_video,
     hash_distance,
     inspect_image_quality,
@@ -143,6 +144,7 @@ class Pipeline:
             state.assets.append(main_asset)
 
             localization_sources: dict[str, str] = {}
+            localization_payloads: dict[str, dict[str, Any]] = {}
             detail_assets: dict[int, AssetResult] = {}
             video_result: AssetResult | None = None
 
@@ -195,10 +197,7 @@ class Pipeline:
                     except Exception as exc:
                         raise PipelineError(f"{language} 文案构建失败: {exc}") from exc
                     localization_sources[language] = source
-                    description = render_description(language, payload, facts, taxonomy)
-                    (work_dir / f"product_description_{language}.md").write_text(
-                        description, encoding="utf-8"
-                    )
+                    localization_payloads[language] = payload
                 try:
                     video_result = video_future.result()
                 except Exception as exc:
@@ -210,6 +209,9 @@ class Pipeline:
                 state.assets.append(video_result)
 
             self._review_generated_assets(facts, state.assets, work_dir, downloads_dir)
+            self._write_localized_descriptions(
+                facts, taxonomy, localization_payloads, state.assets, work_dir
+            )
             if self.client is not None:
                 state.api_calls = self.client.metrics
             self._write_strategy_document(
@@ -237,6 +239,53 @@ class Pipeline:
             return state
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
+
+    def _write_localized_descriptions(
+        self,
+        facts: ProductFacts,
+        taxonomy: TaxonomyResult,
+        payloads: dict[str, dict[str, Any]],
+        assets: list[AssetResult],
+        work_dir: Path,
+    ) -> None:
+        asset_by_name = {asset.name: asset for asset in assets}
+        fallback_templates = {
+            "en": {
+                "image": "Source-derived product view normalized to the required listing format to preserve visual facts.",
+                "video": "Eight-second multi-shot catalog video assembled from the final validated product images.",
+            },
+            "ko": {
+                "image": "상품의 시각적 사실을 유지하기 위해 원본 이미지를 필수 등록 규격에 맞춰 정리한 이미지입니다.",
+                "video": "최종 검수된 상품 이미지로 구성한 8초 멀티컷 카탈로그 영상입니다.",
+            },
+            "pt": {
+                "image": "Imagem derivada da fonte e ajustada ao formato exigido para preservar os dados visuais do produto.",
+                "video": "Vídeo de catálogo de 8 segundos, em vários planos, montado com as imagens finais validadas do produto.",
+            },
+        }
+        for language, payload in payloads.items():
+            media = payload.get("media_descriptions")
+            if not isinstance(media, dict):
+                media = {}
+                payload["media_descriptions"] = media
+            for name in (
+                "main_image.jpeg",
+                "detail_image_1.jpeg",
+                "detail_image_2.jpeg",
+                "detail_image_3.jpeg",
+                "detail_image_4.jpeg",
+                "detail_image_5.jpeg",
+                "product_video.mp4",
+            ):
+                asset = asset_by_name.get(name)
+                if asset is None or asset.generated:
+                    continue
+                kind = "video" if name == "product_video.mp4" else "image"
+                media[name] = fallback_templates[language][kind]
+            description = render_description(language, payload, facts, taxonomy)
+            (work_dir / f"product_description_{language}.md").write_text(
+                description, encoding="utf-8"
+            )
 
     def _adjudicate_taxonomy(
         self,
@@ -778,26 +827,39 @@ Allowed leaf candidates:
     ) -> list[str]:
         product = facts.product_image_urls
         sku = facts.sku_image_urls
+        description = facts.description_image_urls
         if index == 4 and sku:
             return self._source_urls_for_use(
                 _unique(_even_sample(sku, 3) + product[:1]),
                 use="reference",
                 preferred_roles=("variant", "front", "hero"),
-            )
-        product_index = min(max(0, index - 1), max(0, len(product) - 1))
-        selected_product = product[product_index : product_index + 1]
+            )[:3]
         role_preferences = {
             1: ("front", "hero", "lifestyle"),
             2: ("detail", "front", "side"),
             3: ("detail", "side", "back"),
             4: ("variant", "front", "hero"),
-            5: ("size_chart", "lifestyle", "front"),
+            5: ("lifestyle", "front", "hero"),
         }
-        return self._source_urls_for_use(
-            _unique(selected_product + product[:1] + [main_reference_url]),
+        # Search the whole inspected source set for the role needed by each slot.
+        # Description images are valuable for close-ups and lifestyle composition,
+        # but the safety rank below excludes charts, promotional overlays and marks.
+        candidate_pool = _unique(
+            [main_reference_url] + product + description + _even_sample(sku, 3)
+        )
+        ranked = self._source_urls_for_use(
+            candidate_pool,
             use="reference",
             preferred_roles=role_preferences.get(index, ()),
         )
+        excluded_roles = {"size_chart", "packaging", "unknown"}
+        role_safe = [
+            url
+            for url in ranked
+            if self._source_image_observations.get(url, {}).get("role")
+            not in excluded_roles
+        ]
+        return (role_safe or ranked)[:3]
 
     def _build_video(
         self,
@@ -909,9 +971,38 @@ Allowed leaf candidates:
                 if replaced:
                     self.warnings.append("主图语义质检回退后，视频同步回退为源图展示")
 
-        self._review_generated_video(facts, assets, work_dir)
         self._replace_near_duplicate_details(
             facts, assets, downloads_dir, include_fallback=True
+        )
+        self._enhance_fallback_video(assets, work_dir)
+        self._review_generated_video(facts, assets, work_dir)
+
+    def _enhance_fallback_video(
+        self, assets: list[AssetResult], work_dir: Path
+    ) -> None:
+        video_asset = next(
+            (asset for asset in assets if asset.name == "product_video.mp4"), None
+        )
+        if not video_asset or video_asset.generated:
+            return
+        image_paths = [work_dir / "main_image.jpeg"] + [
+            work_dir / f"detail_image_{index}.jpeg" for index in range(1, 6)
+        ]
+        candidate = work_dir / ".product_video_catalog.mp4"
+        try:
+            create_catalog_video(image_paths, candidate, duration=8)
+            os.replace(candidate, Path(video_asset.path))
+        except (MediaError, OSError) as exc:
+            candidate.unlink(missing_ok=True)
+            self.logger.warning("多镜头视频回退不可用，保留稳定单图视频: %s", exc)
+            self.warnings.append(f"多镜头视频回退不可用: {exc}")
+            return
+        video_asset.model = "ffmpeg-catalog-fallback"
+        video_asset.fallback_reason = (
+            (video_asset.fallback_reason + "; ") if video_asset.fallback_reason else ""
+        ) + "rebuilt from the final validated image set"
+        video_asset.description = (
+            "Eight-second multi-shot catalog video assembled from the final validated images"
         )
 
     def _apply_image_review(
@@ -937,8 +1028,11 @@ Allowed leaf candidates:
                 item.get("usable") is False
                 or item.get("identity_consistent") is False
                 or item.get("construction_consistent") is False
+                or item.get("color_consistent") is False
+                or item.get("pattern_consistent") is False
                 or item.get("slot_match") is False
                 or item.get("unwanted_text") is True
+                or item.get("prohibited_visual") is True
                 or item.get("major_artifacts") is True
                 or (
                     item.get("unexpected_collage") is True
@@ -1145,6 +1239,8 @@ Allowed leaf candidates:
             "Agent 首先把商品 JSON 归一化为事实账本。标题、属性、SKU、图片 URL、商品 ID 和来源均保留证据位置；"
             "只有源 JSON、源图片直接观察或确定性单位换算得到的信息可以进入文案和素材提示词。"
             "模型不得补全面料功能、洗护方法、认证、品牌授权、价格、库存或地区尺码映射。",
+            "三份文案均并列保留面向买家的本地化显示值与源数据原值；平台类目 ID、属性 ID/Value ID、"
+            "SKU ID/Spec ID 及 JSON Pointer 证据位置可直接机器解析，翻译不会覆盖标准答案字段。",
             "",
             f"本次共读取 {len(facts.attributes)} 条商品属性、{len(facts.skus)} 个 SKU、"
             f"{len(facts.all_image_urls())} 个不重复源图片 URL。",
@@ -1177,7 +1273,8 @@ Allowed leaf candidates:
             f"- 模型配置：{json.dumps(model_summary, ensure_ascii=False)}",
             "- 主图采用方形浅色棚拍构图；优先生成三个候选，再按身份、结构、颜色、完整度、干净背景、单品覆盖和瑕疵自动选优。",
             "- 主图回退源图须优先满足无人物、无关道具、单一完整商品和干净中性背景；没有合格源图时明确记录质量降级。",
-            "- 五张详情图依次覆盖整体展示、设计细节、已验证特征、真实变体和实际使用情境。",
+            "- 五张详情图依次覆盖美区整体展示、韩区精细商品摄影、巴西区自然光细节、真实变体和跨市场使用情境；"
+            "不使用国旗、地标、文化刻板印象或生成文字。",
             "- 视频以最终主图或其源 URL 为首帧，按上装、下装、连衣裙或童装使用不同结构保护镜头；默认移除未审核音轨。",
             f"- 本次模型直接生成并通过校验的素材数：{generated_count}。",
             "",
@@ -1193,7 +1290,7 @@ Allowed leaf candidates:
             "",
             "API 请求对限流和暂时性错误执行指数退避；图片优先走同步多模态生成，视频异步任务保存 task_id 并轮询。"
             "图片模型失败或语义质检不通过时，回退到经规格归一化的商品源图；视频模型失败时，"
-            "使用已验证主图生成可播放的 H.264 商品展示视频。所有回退都优先保证商品事实一致性和文件可用性。",
+            "使用最终质检后的主图与详情图生成多镜头 H.264 商品展示视频。所有回退都优先保证商品事实一致性和文件可用性。",
             f"- 本次 API 调用记录数：{len(state.api_calls)}；每次调用均记录模型、耗时、状态及调用后的剩余时间。",
         ]
         if fallback_assets:

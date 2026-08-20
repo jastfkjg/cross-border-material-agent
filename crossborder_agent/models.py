@@ -21,6 +21,7 @@ class SkuAttribute:
     name: str
     value: str
     image_url: str = ""
+    evidence_pointer: str = ""
 
 
 @dataclass(slots=True)
@@ -28,6 +29,7 @@ class Sku:
     sku_id: str
     spec_id: str
     attributes: list[SkuAttribute] = field(default_factory=list)
+    evidence_pointer: str = ""
 
 
 @dataclass(slots=True)

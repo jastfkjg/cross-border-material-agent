@@ -272,7 +272,7 @@ def load_product_facts(product_path: Path) -> ProductFacts:
         if not isinstance(sku_raw, dict):
             continue
         sku_attrs: list[SkuAttribute] = []
-        for item in sku_raw.get("skuAttributes") or []:
+        for attribute_index, item in enumerate(sku_raw.get("skuAttributes") or []):
             if not isinstance(item, dict):
                 continue
             image_url = _normalize_url(_safe_text(item.get("skuImageUrl")))
@@ -286,6 +286,10 @@ def load_product_facts(product_path: Path) -> ProductFacts:
                     ),
                     value=_safe_text(item.get("valueTrans") or item.get("value")),
                     image_url=image_url,
+                    evidence_pointer=(
+                        f"/ret/result/result/productSkuInfos/{sku_index}/"
+                        f"skuAttributes/{attribute_index}"
+                    ),
                 )
             )
         skus.append(
@@ -293,6 +297,7 @@ def load_product_facts(product_path: Path) -> ProductFacts:
                 sku_id=_safe_text(sku_raw.get("skuId")) or f"sku-{sku_index + 1}",
                 spec_id=_safe_text(sku_raw.get("specId")),
                 attributes=sku_attrs,
+                evidence_pointer=f"/ret/result/result/productSkuInfos/{sku_index}",
             )
         )
 

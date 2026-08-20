@@ -288,6 +288,82 @@ def create_slideshow_video(
     inspect_video(destination)
 
 
+def create_catalog_video(
+    image_paths: list[Path], destination: Path, *, duration: int = 8
+) -> None:
+    """Create a compact multi-shot catalog video from already validated images."""
+
+    usable: list[Path] = []
+    for path in image_paths:
+        if path in usable:
+            continue
+        inspect_image(path)
+        usable.append(path)
+    if len(usable) < 2:
+        if not usable:
+            raise MediaError("没有可用于视频回退的图片")
+        create_slideshow_video(usable[0], destination, duration=duration)
+        return
+
+    ffmpeg = _ffmpeg_executable()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fps = 25
+    frames_per_shot = max(25, round(duration * fps / len(usable)))
+    command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+    for path in usable:
+        command.extend(["-loop", "1", "-i", str(path)])
+
+    filters: list[str] = []
+    streams: list[str] = []
+    for index in range(len(usable)):
+        label = f"v{index}"
+        pan_direction = "zoom+0.00045" if index % 2 == 0 else "zoom+0.0003"
+        filters.append(
+            f"[{index}:v]scale=1280:720:force_original_aspect_ratio=decrease,"
+            "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=white,"
+            f"zoompan=z='min({pan_direction},1.045)':d={frames_per_shot}:"
+            f"s=1280x720:fps={fps},setsar=1,format=yuv420p[{label}]"
+        )
+        streams.append(f"[{label}]")
+    filters.append(
+        "".join(streams)
+        + f"concat=n={len(usable)}:v=1:a=0,format=yuv420p[outv]"
+    )
+    command.extend(
+        [
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            "[outv]",
+            "-t",
+            str(duration),
+            "-an",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high",
+            "-level",
+            "4.0",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ]
+    )
+    try:
+        completed = subprocess.run(
+            command, capture_output=True, text=True, timeout=150, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        destination.unlink(missing_ok=True)
+        raise MediaError(f"多镜头视频回退失败: {exc}") from exc
+    if completed.returncode != 0:
+        destination.unlink(missing_ok=True)
+        raise MediaError(f"多镜头视频回退失败: {completed.stderr[-1200:]}")
+    inspect_video(destination)
+
+
 def strip_video_audio(source: Path, destination: Path) -> None:
     """Copy the video stream into a fresh MP4 while removing unreviewed audio."""
 

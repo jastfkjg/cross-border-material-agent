@@ -60,6 +60,7 @@ LANGUAGES: dict[str, dict[str, str]] = {
 FIELD_LABELS: dict[str, dict[str, str]] = {
     "en": {
         "source_platform": "Source Platform",
+        "source_title": "Source Product Title",
         "product_id": "Product ID",
         "product_url": "Product URL",
         "source_category_id": "Source Category ID",
@@ -80,9 +81,13 @@ FIELD_LABELS: dict[str, dict[str, str]] = {
         "sku_metric": "Seller Guidance (Metric)",
         "sku_imperial": "Seller Guidance (Imperial)",
         "missing": "Required platform fields not present in the source were not fabricated",
+        "canonical_raw": "Canonical source value",
+        "localized_value": "Localized display value",
+        "sku_evidence": "Source evidence",
     },
     "ko": {
         "source_platform": "원본 플랫폼",
+        "source_title": "원본 상품명",
         "product_id": "상품 ID",
         "product_url": "상품 URL",
         "source_category_id": "원본 카테고리 ID",
@@ -103,9 +108,13 @@ FIELD_LABELS: dict[str, dict[str, str]] = {
         "sku_metric": "판매자 안내 (미터법)",
         "sku_imperial": "판매자 안내 (야드파운드법)",
         "missing": "원본에 없는 필수 플랫폼 필드는 임의로 생성하지 않았습니다",
+        "canonical_raw": "원본 표기값",
+        "localized_value": "현지화 표시값",
+        "sku_evidence": "원본 근거 위치",
     },
     "pt": {
         "source_platform": "Plataforma de origem",
+        "source_title": "Título do produto na origem",
         "product_id": "ID do produto",
         "product_url": "URL do produto",
         "source_category_id": "ID da categoria de origem",
@@ -126,6 +135,9 @@ FIELD_LABELS: dict[str, dict[str, str]] = {
         "sku_metric": "Orientação do vendedor (métrico)",
         "sku_imperial": "Orientação do vendedor (imperial)",
         "missing": "Campos obrigatórios ausentes na origem não foram inventados",
+        "canonical_raw": "Valor canônico da origem",
+        "localized_value": "Valor localizado",
+        "sku_evidence": "Evidência na origem",
     },
 }
 
@@ -988,15 +1000,42 @@ def _canonical_section(
 ) -> list[str]:
     category = taxonomy.category
     labels = FIELD_LABELS[language]
+    localized_platform = _localized_display(language, facts.platform, term_map)
+    localized_source_category = _localized_display(
+        language, facts.source_category_name, term_map
+    )
+    localized_leaf_name = _localized_display(language, category.name, term_map)
+    localized_leaf_path = _localized_display(language, category.path, term_map)
     return [
-        f"- **{labels['source_platform']}:** {_escape_table(_localized_display(language, facts.platform, term_map))}",
+        f"- **{labels['source_platform']}:** {_escape_table(facts.platform)}"
+        + (
+            f" ({_escape_table(localized_platform)})"
+            if localized_platform != facts.platform
+            else ""
+        ),
         f"- **{labels['product_id']}:** {_escape_table(facts.offer_id)}",
         f"- **{labels['product_url']}:** {facts.source_url}",
+        f"- **{labels['source_title']}:** {_escape_table(facts.source_title)}",
         f"- **{labels['source_category_id']}:** {_escape_table(facts.source_category_id)}",
-        f"- **{labels['source_category_name']}:** {_escape_table(_localized_display(language, facts.source_category_name, term_map))}",
+        f"- **{labels['source_category_name']}:** {_escape_table(facts.source_category_name)}"
+        + (
+            f" ({_escape_table(localized_source_category)})"
+            if localized_source_category != facts.source_category_name
+            else ""
+        ),
         f"- **{labels['leaf_category_id']}:** {_escape_table(category.category_id)}",
-        f"- **{labels['leaf_category_name']}:** {_escape_table(_localized_display(language, category.name, term_map))}",
-        f"- **{labels['leaf_category_path']}:** {_escape_table(_localized_display(language, category.path, term_map))}",
+        f"- **{labels['leaf_category_name']}:** {_escape_table(category.name)}"
+        + (
+            f" ({_escape_table(localized_leaf_name)})"
+            if localized_leaf_name != category.name
+            else ""
+        ),
+        f"- **{labels['leaf_category_path']}:** {_escape_table(category.path)}"
+        + (
+            f" ({_escape_table(localized_leaf_path)})"
+            if localized_leaf_path != category.path
+            else ""
+        ),
     ]
 
 
@@ -1046,13 +1085,14 @@ def render_description(
             "",
             labels["raw_note"],
             "",
-            f"| ID | {labels['source_attribute']} | {labels['source_value']} | {labels['evidence']} |",
-            "|---|---|---|---|",
+            f"| ID | {labels['source_attribute']} | {labels['canonical_raw']} | {labels['localized_value']} | {labels['evidence']} |",
+            "|---|---|---|---|---|",
         ]
     )
     for item in facts.attributes:
         lines.append(
-            f"| {_escape_table(item.attribute_id)} | {_escape_table(_localized_display(language, item.name, term_map))} | "
+            f"| {_escape_table(item.attribute_id)} | {_escape_table(item.name)} / "
+            f"{_escape_table(_localized_display(language, item.name, term_map))} | {_escape_table(item.value)} | "
             f"{_escape_table(_localized_display(language, item.value, term_map))} | `{_escape_table(item.evidence_pointer)}` |"
         )
 
@@ -1061,16 +1101,17 @@ def render_description(
             "",
             f"## {locale['platform_attributes']}",
             "",
-            f"| {labels['type']} | ID | {labels['platform_attribute']} | {labels['source_attribute']} | {labels['source_value']} | Value ID | {labels['platform_value']} |",
+            f"| {labels['type']} | ID | {labels['platform_attribute']} | {labels['source_attribute']} | {labels['canonical_raw']} | Value ID | {labels['platform_value']} |",
             "|---|---|---|---|---|---|---|",
         ]
     )
     for item in taxonomy.attributes:
         item_type = "sales" if item.sales_attribute else "product"
         lines.append(
-            f"| {item_type} | {_escape_table(item.attr_id)} | {_escape_table(_localized_display(language, item.name, term_map))} | "
-            f"{_escape_table(_localized_display(language, item.source_name, term_map))} | {_escape_table(_localized_display(language, item.source_value, term_map))} | "
-            f"{_escape_table(item.value_id)} | {_escape_table(_localized_display(language, item.platform_value, term_map))} |"
+            f"| {item_type} | {_escape_table(item.attr_id)} | {_escape_table(item.name)} / "
+            f"{_escape_table(_localized_display(language, item.name, term_map))} | {_escape_table(item.source_name)} | "
+            f"{_escape_table(item.source_value)} | {_escape_table(item.value_id)} | "
+            f"{_escape_table(item.platform_value)} / {_escape_table(_localized_display(language, item.platform_value, term_map))} |"
         )
     if taxonomy.missing_required:
         lines.append("")
@@ -1099,22 +1140,31 @@ def render_description(
             if facts.size_conversions
             else ""
         )
+        + f" | {labels['sku_evidence']}"
         + " |"
     )
     lines.append(
         "|---|---|"
         + "---|" * len(all_sku_names)
         + ("---|---|" if facts.size_conversions else "")
+        + "---|"
     )
     for sku in facts.skus:
         values = {item.name: item.value for item in sku.attributes}
         row = [sku.sku_id, sku.spec_id] + [
-            _localized_display(language, values.get(name, ""), term_map)
+            (
+                f"{values.get(name, '')} / {_localized_display(language, values.get(name, ''), term_map)}"
+                if values.get(name, "")
+                and _localized_display(language, values.get(name, ""), term_map)
+                != values.get(name, "")
+                else values.get(name, "")
+            )
             for name in all_sku_names
         ]
         if facts.size_conversions:
             metric, imperial = _sku_size_guidance(facts, values)
             row.extend([metric, imperial])
+        row.append(sku.evidence_pointer)
         lines.append("| " + " | ".join(_escape_table(value) for value in row) + " |")
 
     lines.extend(["", f"## {locale['sizes']}", ""])

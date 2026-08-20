@@ -74,7 +74,7 @@ def vendor_linux_dependencies() -> None:
 
 def validate_staging(skip_dependencies: bool) -> None:
     manifest = json.loads((STAGING / "agent.json").read_text(encoding="utf-8"))
-    if manifest != {"runtime": "python", "version": "1.2.0"}:
+    if manifest != {"runtime": "python", "version": "1.3.0"}:
         raise RuntimeError(f"Unexpected agent.json: {manifest}")
     if not skip_dependencies:
         pillow = STAGING / "vendor" / "PIL"

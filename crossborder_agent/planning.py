@@ -25,15 +25,19 @@ _MAIN_PRESENTATION = (
 
 _BASE_DETAIL_SLOT_DIRECTIVES = (
     "This is detail slot 1: show a complete front three-quarter product presentation on a hanger or invisible form "
-    "against a warm neutral editorial wall. It must be visibly different from the square white-background hero.",
+    "with the uncluttered, practical editorial styling familiar to US marketplace shoppers. Use a warm neutral wall "
+    "and soft daylight; it must be visibly different from the square white-background hero.",
     "This is detail slot 2: make a tight but readable upper-garment close-up centered on the verified collar, "
-    "front opening and visible fastening construction. Do not show an isolated generic fabric swatch.",
+    "front opening and visible fastening construction. Use restrained Korean commerce styling: pale neutral tones, "
+    "precise spacing and soft diffused light. Do not add Hangul or show an isolated generic fabric swatch.",
     "This is detail slot 3: make a distinct close-up of the verified sleeve, cuff, hem and natural drape while "
-    "keeping enough of the product visible to identify it.",
+    "keeping enough of the product visible to identify it. Use warm natural daylight and a subtle contemporary "
+    "Brazilian marketplace mood without flags, landmarks, stereotypes or written Portuguese.",
     "This is detail slot 4: create a clean catalog lineup using only color variants visibly present in the supplied "
     "references. Show two or three complete products with identical construction and no labels or swatches.",
     "This is detail slot 5: show one adult wearer in a restrained everyday styling context, with the product fully "
-    "visible and unobstructed from collar through hem. Keep anatomy natural and do not add accessories to the product.",
+    "visible and unobstructed from collar through hem. Use culturally neutral, inclusive styling that reads naturally "
+    "across the US, South Korea and Brazil. Keep anatomy natural and do not add accessories to the product.",
 )
 
 
@@ -56,12 +60,15 @@ def _detail_slot_directives(taxonomy: TaxonomyResult) -> tuple[str, ...]:
         return (
             slot_1,
             "This is detail slot 2: make a tight but readable close-up centered on the verified waistband, "
-            "front closure and pocket construction. Do not invent a fly, drawstring, belt loop or pocket.",
+            "front closure and pocket construction. Use restrained Korean commerce styling with pale neutral tones, "
+            "precise spacing and diffused light. Do not invent a fly, drawstring, belt loop or pocket.",
             "This is detail slot 3: make a distinct close-up of the verified leg shape, side seam and hem, "
-            "while keeping enough of the product visible to identify it.",
+            "while keeping enough of the product visible to identify it. Use warm natural daylight and a subtle "
+            "contemporary Brazilian marketplace mood without flags, landmarks, stereotypes or written text.",
             slot_4,
             "This is detail slot 5: show one wearer in a restrained everyday styling context, with the waistband, "
-            "both legs and hem visible and unobstructed. Keep anatomy and garment length natural.",
+            "both legs and hem visible and unobstructed. Use inclusive cross-market styling appropriate to the US, "
+            "South Korea and Brazil. Keep anatomy and garment length natural.",
         )
     if family == "children":
         return (
@@ -70,15 +77,18 @@ def _detail_slot_directives(taxonomy: TaxonomyResult) -> tuple[str, ...]:
             _BASE_DETAIL_SLOT_DIRECTIVES[2],
             slot_4,
             "This is detail slot 5: create a product-only, age-appropriate outfit flat lay. Keep the item complete "
-            "and unobstructed, use only neutral unbranded props, and do not depict a child or adult wearer.",
+            "and unobstructed, use only neutral unbranded props with inclusive cross-market styling, and do not depict "
+            "a child or adult wearer.",
         )
     if family == "dress":
         return (
             slot_1,
             "This is detail slot 2: make a tight but readable close-up centered on the verified neckline, bodice "
-            "and closure construction. Do not invent buttons, a zipper, belt or trim.",
+            "and closure construction. Use restrained Korean commerce styling with pale neutral tones, precise spacing "
+            "and diffused light. Do not invent buttons, a zipper, belt or trim.",
             "This is detail slot 3: show the verified waist transition, skirt drape and hem while keeping enough "
-            "of the dress visible to identify its silhouette and length.",
+            "of the dress visible to identify its silhouette and length. Use warm natural daylight and a subtle "
+            "contemporary Brazilian marketplace mood without flags, landmarks, stereotypes or written text.",
             slot_4,
             _BASE_DETAIL_SLOT_DIRECTIVES[4],
         )
@@ -101,11 +111,48 @@ def _video_guard(taxonomy: TaxonomyResult) -> str:
     )
 
 
+_VISUAL_ATTRIBUTE_MARKERS = (
+    "产品类别",
+    "类别",
+    "款式",
+    "图案",
+    "版型",
+    "领型",
+    "袖长",
+    "袖型",
+    "衣长",
+    "门襟",
+    "裤型",
+    "裤长",
+    "腰型",
+    "裙型",
+    "裙长",
+    "颜色",
+)
+
+
+def _visual_fact_summary(facts: ProductFacts) -> str:
+    """Keep visual prompts focused on appearance rather than invisible claims."""
+
+    selected: list[str] = []
+    for item in facts.attributes:
+        if any(marker in item.name for marker in _VISUAL_ATTRIBUTE_MARKERS):
+            fact = f"{item.name}: {item.value}"
+            if fact not in selected:
+                selected.append(fact)
+        if len(selected) == 12:
+            break
+    return ", ".join(selected)
+
+
 def fallback_creative_plan(
     facts: ProductFacts, taxonomy: TaxonomyResult
 ) -> CreativePlan:
-    verified = ", ".join(f"{item.name}: {item.value}" for item in facts.attributes[:10])
-    identity = f"Product type: {facts.source_category_name}. Verified source attributes: {verified}."
+    verified = _visual_fact_summary(facts)
+    identity = f"Product type: {facts.source_category_name}."
+    if verified:
+        identity += f" Verified visible source attributes: {verified}."
+    identity += " When text facts and reference pixels appear to conflict, preserve the reference product pixels."
     slot_directives = _detail_slot_directives(taxonomy)
     return CreativePlan(
         visual_theme="Clean international marketplace editorial with neutral, culturally inclusive styling",
