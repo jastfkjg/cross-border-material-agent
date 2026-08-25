@@ -41,6 +41,16 @@ class SizeConversion:
 
 
 @dataclass(slots=True)
+class SizeChartRow:
+    size_label: str
+    bust_cm: str = ""
+    length_cm: str = ""
+    weight_kg: str = ""
+    weight_lb: str = ""
+    evidence_pointer: str = ""
+
+
+@dataclass(slots=True)
 class ProductFacts:
     platform: str
     source_url: str
@@ -56,6 +66,7 @@ class ProductFacts:
     size_conversions: list[SizeConversion]
     input_file: str
     fingerprint: str
+    size_chart_rows: list[SizeChartRow] = field(default_factory=list)
 
     def all_image_urls(self) -> list[str]:
         seen: set[str] = set()
@@ -90,6 +101,17 @@ class ProductFacts:
                 }
                 for sku in self.skus
             ],
+            "size_chart": [
+                {
+                    "size": item.size_label,
+                    "bust_cm": item.bust_cm,
+                    "length_cm": item.length_cm,
+                    "weight_kg": item.weight_kg,
+                    "weight_lb": item.weight_lb,
+                    "evidence": item.evidence_pointer,
+                }
+                for item in self.size_chart_rows
+            ],
             "image_urls": self.all_image_urls()[:12],
         }
 
@@ -110,6 +132,7 @@ class MappedAttribute:
     name: str
     source_name: str
     source_value: str
+    source_evidence_pointer: str = ""
     value_id: str = ""
     platform_value: str = ""
     required: bool = False
@@ -121,6 +144,7 @@ class TaxonomyResult:
     category: CategoryChoice
     attributes: list[MappedAttribute] = field(default_factory=list)
     missing_required: list[str] = field(default_factory=list)
+    attribute_schema_category_id: str = ""
 
 
 @dataclass(slots=True)

@@ -56,6 +56,7 @@ def _validate_description(
         facts.platform,
         facts.source_url,
         taxonomy.category.category_id,
+        taxonomy.category.name,
         "main_image.jpeg",
         "detail_image_1.jpeg",
         "detail_image_2.jpeg",
@@ -67,10 +68,63 @@ def _validate_description(
     for value in required_values:
         if value and value not in text:
             report.errors.append(f"{path.name} 缺少必需内容: {value}")
+    for item in facts.attributes:
+        for value in (
+            item.attribute_id,
+            item.name,
+            item.value,
+            item.evidence_pointer,
+        ):
+            if value and value not in text:
+                report.errors.append(
+                    f"{path.name} 缺少商品属性证据: {item.attribute_id}/{item.name}"
+                )
+                break
+    for item in taxonomy.attributes:
+        for value in (
+            item.attr_id,
+            item.name,
+            item.source_value,
+            item.platform_value,
+            item.source_evidence_pointer,
+        ):
+            if value and value not in text:
+                report.errors.append(
+                    f"{path.name} 缺少平台属性映射: {item.attr_id}/{item.name}"
+                )
+                break
+    detailed_sku_evidence = sum(len(sku.attributes) for sku in facts.skus) <= 1500
     for sku in facts.skus:
         if sku.sku_id not in text:
             report.errors.append(f"{path.name} 缺少 SKU: {sku.sku_id}")
-            break
+            continue
+        if sku.evidence_pointer not in text:
+            report.errors.append(f"{path.name} 缺少 SKU 证据: {sku.sku_id}")
+        for item in sku.attributes:
+            required_component_values = [item.value]
+            if detailed_sku_evidence:
+                required_component_values.extend(
+                    [item.attribute_id, item.evidence_pointer]
+                )
+            if any(
+                value and value not in text for value in required_component_values
+            ):
+                report.errors.append(
+                    f"{path.name} 缺少 SKU 分解项: {sku.sku_id}/{item.attribute_id}"
+                )
+                break
+    for item in facts.size_chart_rows:
+        for value in (
+            item.size_label,
+            item.bust_cm,
+            item.length_cm,
+            item.evidence_pointer,
+        ):
+            if value and value not in text:
+                report.errors.append(
+                    f"{path.name} 缺少详情图尺码证据: {item.size_label}/{value}"
+                )
+                break
 
 
 def validate_delivery(
@@ -104,6 +158,8 @@ def validate_delivery(
             report.errors.append(f"主图格式不合规: {main.format}")
         if main.width < 800 or main.height < 800:
             report.errors.append(f"主图尺寸不足: {main.width}x{main.height}")
+        if main.size_bytes > 5 * 1024 * 1024:
+            report.errors.append("主图超过 5MB")
         main_quality = inspect_image_quality(output_dir / "main_image.jpeg")
         if main_quality is not None:
             if main_quality.luminance_stddev < 2 or main_quality.entropy < 0.8:
@@ -138,12 +194,11 @@ def validate_delivery(
         except MediaError as exc:
             report.errors.append(str(exc))
 
-    detail_hashes = [item for item in image_hashes if item[0].startswith("detail_")]
-    for left_index, (left_name, left_hash) in enumerate(detail_hashes):
-        for right_name, right_hash in detail_hashes[left_index + 1 :]:
+    for left_index, (left_name, left_hash) in enumerate(image_hashes):
+        for right_name, right_hash in image_hashes[left_index + 1 :]:
             if hash_distance(left_hash, right_hash) <= 2:
                 report.warnings.append(
-                    f"详情图视觉内容可能重复: {left_name}, {right_name}"
+                    f"商品图片视觉内容可能重复: {left_name}, {right_name}"
                 )
 
     try:

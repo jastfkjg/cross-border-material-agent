@@ -5,3 +5,8 @@ __pycache__/
 .venv/
 dist/
 test-output/
+output/
+tmp/
+
+# Local runner contains private API credentials and must never be submitted.
+run_agent_local.sh

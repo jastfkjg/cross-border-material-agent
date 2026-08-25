@@ -12,12 +12,14 @@ from typing import Any
 
 
 try:
-    from PIL import Image, ImageFilter, ImageOps, ImageStat
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
 except (
     ImportError
 ):  # pragma: no cover - exercised in a deliberately dependency-free environment
     Image = None  # type: ignore[assignment]
+    ImageDraw = None  # type: ignore[assignment]
     ImageFilter = None  # type: ignore[assignment]
+    ImageFont = None  # type: ignore[assignment]
     ImageOps = None  # type: ignore[assignment]
     ImageStat = None  # type: ignore[assignment]
 
@@ -178,11 +180,15 @@ def normalize_image(
     try:
         with Image.open(source) as opened:
             image = ImageOps.exif_transpose(opened).convert("RGB")
-            background_color = (
-                (255, 255, 255) if white_background else _edge_background(image)
-            )
             contained = ImageOps.contain(image, canvas, method=Image.Resampling.LANCZOS)
-            canvas_image = Image.new("RGB", canvas, background_color)
+            if white_background:
+                canvas_image = Image.new("RGB", canvas, (255, 255, 255))
+            else:
+                background = ImageOps.fit(
+                    image, canvas, method=Image.Resampling.LANCZOS
+                ).filter(ImageFilter.GaussianBlur(radius=36))
+                veil = Image.new("RGB", canvas, (255, 255, 255))
+                canvas_image = Image.blend(background, veil, 0.42)
             left = (canvas[0] - contained.width) // 2
             top = (canvas[1] - contained.height) // 2
             canvas_image.paste(contained, (left, top))
@@ -207,6 +213,102 @@ def normalize_image(
     if info.size_bytes > max_bytes:
         raise MediaError(f"归一化图片仍超过 {max_bytes} 字节")
     return info
+
+
+def create_size_chart_image(rows: list[Any], destination: Path) -> None:
+    """Render a clean, source-derived cross-market garment measurement chart."""
+
+    if Image is None or ImageDraw is None or ImageFont is None:
+        raise MediaError("Pillow 不可用，无法生成尺码表详情图")
+    if len(rows) < 2:
+        raise MediaError("尺码表有效行不足")
+
+    width, height = 1200, 1500
+    canvas = Image.new("RGB", (width, height), (248, 246, 242))
+    draw = ImageDraw.Draw(canvas)
+
+    def font(size: int, *, bold: bool = False) -> Any:
+        names = (
+            ("DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+            if bold
+            else ("DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+        )
+        for name in names:
+            try:
+                return ImageFont.truetype(name, size=size)
+            except OSError:
+                continue
+        return ImageFont.load_default()
+
+    title_font = font(54, bold=True)
+    subtitle_font = font(25)
+    header_font = font(25, bold=True)
+    row_font = font(27)
+    note_font = font(22)
+    ink = (41, 39, 45)
+    accent = (112, 88, 132)
+    muted = (105, 100, 110)
+
+    draw.rounded_rectangle((70, 70, 1130, 1430), radius=30, fill=(255, 255, 255))
+    draw.text((120, 125), "SIZE GUIDE", font=title_font, fill=ink)
+    draw.text(
+        (120, 200),
+        "GARMENT MEASUREMENTS • SELLER-PROVIDED DATA",
+        font=subtitle_font,
+        fill=muted,
+    )
+    draw.line((120, 270, 1080, 270), fill=accent, width=5)
+
+    columns = (120, 300, 515, 745)
+    for x, label in zip(columns, ("SIZE", "BUST", "LENGTH", "WEIGHT GUIDE")):
+        draw.text((x, 320), label, font=header_font, fill=accent)
+
+    row_height = min(125, 850 // max(1, len(rows)))
+    y = 405
+    for index, item in enumerate(rows):
+        if index % 2 == 0:
+            draw.rounded_rectangle(
+                (105, y - 22, 1095, y + row_height - 22),
+                radius=14,
+                fill=(248, 246, 250),
+            )
+        values = (
+            str(item.size_label),
+            f"{item.bust_cm} cm" if item.bust_cm else "—",
+            f"{item.length_cm} cm" if item.length_cm else "—",
+            (
+                f"{item.weight_kg} / {item.weight_lb}"
+                if item.weight_kg and item.weight_lb
+                else item.weight_kg or "—"
+            ),
+        )
+        for x, value in zip(columns, values):
+            draw.text((x, y), value, font=row_font, fill=ink)
+        y += row_height
+
+    note_y = max(1220, y + 45)
+    draw.line((120, note_y, 1080, note_y), fill=(221, 216, 225), width=2)
+    draw.text(
+        (120, note_y + 36),
+        "Measurements are transcribed from the seller's source size chart.",
+        font=note_font,
+        fill=muted,
+    )
+    draw.text(
+        (120, note_y + 78),
+        "Check garment measurements; regional size equivalence is not assumed.",
+        font=note_font,
+        fill=muted,
+    )
+    canvas.save(
+        destination,
+        format="JPEG",
+        quality=92,
+        optimize=True,
+        progressive=True,
+        subsampling=0,
+    )
+    inspect_image(destination)
 
 
 def _edge_background(image: Any) -> tuple[int, int, int]:
@@ -294,11 +396,19 @@ def create_catalog_video(
     """Create a compact multi-shot catalog video from already validated images."""
 
     usable: list[Path] = []
+    seen_hashes: list[int] = []
     for path in image_paths:
         if path in usable:
             continue
         inspect_image(path)
+        quality = inspect_image_quality(path)
+        if quality is not None and any(
+            hash_distance(quality.difference_hash, seen) <= 2 for seen in seen_hashes
+        ):
+            continue
         usable.append(path)
+        if quality is not None:
+            seen_hashes.append(quality.difference_hash)
     if len(usable) < 2:
         if not usable:
             raise MediaError("没有可用于视频回退的图片")
@@ -310,8 +420,11 @@ def create_catalog_video(
     fps = 25
     frames_per_shot = max(25, round(duration * fps / len(usable)))
     command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+    shot_duration = frames_per_shot / fps
     for path in usable:
-        command.extend(["-loop", "1", "-i", str(path)])
+        command.extend(
+            ["-loop", "1", "-framerate", str(fps), "-t", f"{shot_duration:.3f}", "-i", str(path)]
+        )
 
     filters: list[str] = []
     streams: list[str] = []
@@ -321,8 +434,9 @@ def create_catalog_video(
         filters.append(
             f"[{index}:v]scale=1280:720:force_original_aspect_ratio=decrease,"
             "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=white,"
-            f"zoompan=z='min({pan_direction},1.045)':d={frames_per_shot}:"
-            f"s=1280x720:fps={fps},setsar=1,format=yuv420p[{label}]"
+            f"zoompan=z='min({pan_direction},1.045)':d=1:"
+            f"s=1280x720:fps={fps},trim=end_frame={frames_per_shot},"
+            f"setpts=PTS-STARTPTS,setsar=1,format=yuv420p[{label}]"
         )
         streams.append(f"[{label}]")
     filters.append(

@@ -6,6 +6,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -21,6 +22,7 @@ from .localization import generate_copy_payload, render_description
 from .media import (
     MediaError,
     create_catalog_video,
+    create_size_chart_image,
     create_slideshow_video,
     hash_distance,
     inspect_image_quality,
@@ -28,7 +30,14 @@ from .media import (
     normalize_image,
     strip_video_audio,
 )
-from .models import AssetResult, CreativePlan, ProductFacts, RunState, TaxonomyResult
+from .models import (
+    AssetResult,
+    CreativePlan,
+    ProductFacts,
+    RunState,
+    SizeChartRow,
+    TaxonomyResult,
+)
 from .planning import create_creative_plan
 from .qa import EXPECTED_FILES, validate_delivery
 from .taxonomy import resolve_taxonomy
@@ -122,6 +131,7 @@ class Pipeline:
             )
 
             vision = self._analyze_source_images(facts)
+            self._apply_size_chart_observations(facts, vision)
             creative_plan, plan_model = create_creative_plan(
                 facts, taxonomy, vision, self.client
             )
@@ -252,15 +262,21 @@ class Pipeline:
         fallback_templates = {
             "en": {
                 "image": "Source-derived product view normalized to the required listing format to preserve visual facts.",
-                "video": "Eight-second multi-shot catalog video assembled from the final validated product images.",
+                "video": "Eight-second catalog video assembled from perceptually distinct validated product images.",
+                "single_video": "Eight-second single-image product presentation with restrained camera motion.",
+                "size_chart": "Clean chart rendered from verified seller-provided garment measurements and weight guidance.",
             },
             "ko": {
                 "image": "상품의 시각적 사실을 유지하기 위해 원본 이미지를 필수 등록 규격에 맞춰 정리한 이미지입니다.",
-                "video": "최종 검수된 상품 이미지로 구성한 8초 멀티컷 카탈로그 영상입니다.",
+                "video": "서로 다른 최종 검수 상품 이미지로 구성한 8초 카탈로그 영상입니다.",
+                "single_video": "절제된 카메라 움직임을 적용한 8초 단일 이미지 상품 영상입니다.",
+                "size_chart": "판매자 원본의 의류 실측과 권장 체중을 검증해 다시 구성한 사이즈표입니다.",
             },
             "pt": {
                 "image": "Imagem derivada da fonte e ajustada ao formato exigido para preservar os dados visuais do produto.",
-                "video": "Vídeo de catálogo de 8 segundos, em vários planos, montado com as imagens finais validadas do produto.",
+                "video": "Vídeo de catálogo de 8 segundos montado com imagens finais distintas e validadas do produto.",
+                "single_video": "Apresentação de 8 segundos com uma única imagem e movimento de câmera discreto.",
+                "size_chart": "Tabela limpa recriada a partir das medidas da peça e do peso indicados pelo vendedor.",
             },
         }
         for language, payload in payloads.items():
@@ -280,7 +296,16 @@ class Pipeline:
                 asset = asset_by_name.get(name)
                 if asset is None or asset.generated:
                     continue
-                kind = "video" if name == "product_video.mp4" else "image"
+                if asset.model == "deterministic-size-chart":
+                    kind = "size_chart"
+                elif name == "product_video.mp4":
+                    kind = (
+                        "video"
+                        if asset.model == "ffmpeg-catalog-fallback"
+                        else "single_video"
+                    )
+                else:
+                    kind = "image"
                 media[name] = fallback_templates[language][kind]
             description = render_description(language, payload, facts, taxonomy)
             (work_dir / f"product_description_{language}.md").write_text(
@@ -374,6 +399,90 @@ Allowed leaf candidates:
             self.logger.warning("源图片视觉理解失败，使用结构化事实继续: %s", exc)
             self.warnings.append(f"源图片视觉理解失败: {exc}")
             return {}
+
+    def _apply_size_chart_observations(
+        self, facts: ProductFacts, vision: dict[str, Any]
+    ) -> None:
+        """Promote only clearly structured, SKU-aligned visual measurements to facts."""
+
+        raw_rows = vision.get("size_chart_rows") if isinstance(vision, dict) else None
+        source_images = vision.get("source_images") if isinstance(vision, dict) else None
+        if not isinstance(raw_rows, list) or not isinstance(source_images, list):
+            return
+
+        known_codes: list[str] = []
+        for sku in facts.skus:
+            for item in sku.attributes:
+                if "尺码" not in item.name and "size" not in item.name.casefold():
+                    continue
+                match = re.match(r"\s*([A-Za-z0-9]+)", item.value)
+                if match and match.group(1).upper() not in known_codes:
+                    known_codes.append(match.group(1).upper())
+        if not known_codes:
+            return
+
+        aliases = {
+            "XXL": "2XL",
+            "XXXL": "3XL",
+            "XXXXL": "4XL",
+        }
+        image_by_index = {
+            item.get("index"): item
+            for item in source_images
+            if isinstance(item, dict) and isinstance(item.get("index"), int)
+        }
+
+        def measurement(value: Any) -> str:
+            match = re.fullmatch(
+                r"\s*(\d{1,3}(?:\.\d+)?)\s*(?:cm)?\s*", str(value or ""), re.I
+            )
+            if not match:
+                return ""
+            numeric = float(match.group(1))
+            return match.group(1) if 20 <= numeric <= 300 else ""
+
+        conversions: dict[str, tuple[str, str]] = {}
+        for item in facts.size_conversions:
+            match = re.match(r"\s*([A-Za-z0-9]+)", item.source_label)
+            if match:
+                conversions[match.group(1).upper()] = (item.kilograms, item.pounds)
+
+        rows: list[SizeChartRow] = []
+        seen: set[str] = set()
+        for raw in raw_rows:
+            if not isinstance(raw, dict):
+                continue
+            raw_code = str(raw.get("size_label") or "").strip().upper()
+            code = aliases.get(raw_code, raw_code)
+            bust = measurement(raw.get("bust_cm"))
+            length = measurement(raw.get("length_cm"))
+            source_index = raw.get("source_image_index")
+            source_item = image_by_index.get(source_index)
+            if (
+                code not in known_codes
+                or code in seen
+                or not source_item
+                or str(source_item.get("role") or "") != "size_chart"
+                or not (bust or length)
+            ):
+                continue
+            kilograms, pounds = conversions.get(code, ("", ""))
+            rows.append(
+                SizeChartRow(
+                    size_label=code,
+                    bust_cm=bust,
+                    length_cm=length,
+                    weight_kg=kilograms,
+                    weight_lb=pounds,
+                    evidence_pointer=f"source-image:{source_index}",
+                )
+            )
+            seen.add(code)
+        rows.sort(key=lambda item: known_codes.index(item.size_label))
+        if len(rows) < 2:
+            return
+        facts.size_chart_rows = rows
+        self.logger.info("从源详情图提取并核验 %d 行尺码表", len(rows))
 
     def _ordered_source_urls(
         self, facts: ProductFacts, vision: dict[str, Any]
@@ -661,6 +770,7 @@ Allowed leaf candidates:
     ) -> tuple[AssetResult, str]:
         destination = work_dir / "main_image.jpeg"
         source_urls = self._ordered_source_urls(facts, vision)
+        generation_failure = "image model configuration unavailable"
         if self.client is not None and source_urls:
             try:
                 candidate_urls, model = self.client.generate_image_candidates(
@@ -692,6 +802,7 @@ Allowed leaf candidates:
                     generated_url,
                 )
             except (ApiError, MediaError) as exc:
+                generation_failure = str(exc)
                 self.logger.warning("主图生成失败，使用源图回退: %s", exc)
                 self.warnings.append(f"主图生成回退: {exc}")
         fallback_url = self._fallback_image(
@@ -708,7 +819,7 @@ Allowed leaf candidates:
                 source_url=fallback_url,
                 model="deterministic-source-fallback",
                 generated=False,
-                fallback_reason="image generation unavailable or rejected",
+                fallback_reason=generation_failure,
                 description="Source-faithful square hero image",
             ),
             fallback_url,
@@ -779,6 +890,16 @@ Allowed leaf candidates:
         downloads_dir: Path,
     ) -> AssetResult:
         destination = work_dir / f"detail_image_{index}.jpeg"
+        if index == 5 and facts.size_chart_rows:
+            create_size_chart_image(facts.size_chart_rows, destination)
+            return AssetResult(
+                name=destination.name,
+                path=str(destination),
+                model="deterministic-size-chart",
+                generated=False,
+                fallback_reason="source size chart transcribed and deterministically rendered",
+                description="Verified seller garment measurements and weight guidance",
+            )
         source_urls = _unique(
             [main_reference_url]
             + facts.product_image_urls
@@ -791,6 +912,7 @@ Allowed leaf candidates:
         reference_selection = self._detail_reference_selection(
             index, facts, main_reference_url
         )
+        generation_failure = "image model configuration or safe reference unavailable"
         if self.client is not None and reference_selection:
             try:
                 candidate_count = 2 if index in {4, 5} else 1
@@ -827,6 +949,7 @@ Allowed leaf candidates:
                     ),
                 )
             except (ApiError, MediaError) as exc:
+                generation_failure = str(exc)
                 self.logger.warning("详情图 %d 生成失败，使用源图回退: %s", index, exc)
                 self.warnings.append(f"详情图 {index} 生成回退: {exc}")
 
@@ -844,7 +967,7 @@ Allowed leaf candidates:
             source_url=fallback_url,
             model="deterministic-source-fallback",
             generated=False,
-            fallback_reason="image generation unavailable or rejected",
+            fallback_reason=generation_failure,
             description=f"Source-faithful detail image {index}",
         )
 
@@ -951,6 +1074,7 @@ Allowed leaf candidates:
         allow_generation: bool,
     ) -> AssetResult:
         destination = work_dir / "product_video.mp4"
+        generation_failure = "video model configuration or safe first frame unavailable"
         if self.client is not None and allow_generation:
             try:
                 video_url, model = self.client.generate_video(
@@ -976,6 +1100,7 @@ Allowed leaf candidates:
                     description="Short source-guided product video",
                 )
             except (ApiError, MediaError, OSError) as exc:
+                generation_failure = str(exc)
                 self.logger.warning("视频模型失败，创建确定性视频回退: %s", exc)
                 self.warnings.append(f"视频生成回退: {exc}")
         elif self.client is not None:
@@ -986,7 +1111,7 @@ Allowed leaf candidates:
             path=str(destination),
             model="ffmpeg-slideshow-fallback",
             generated=False,
-            fallback_reason="video generation unavailable or invalid",
+            fallback_reason=generation_failure,
             description="Playable H.264 product presentation fallback",
         )
 
@@ -997,8 +1122,6 @@ Allowed leaf candidates:
         work_dir: Path,
         downloads_dir: Path,
     ) -> None:
-        if self.client is None:
-            return
         self._replace_near_duplicate_details(facts, assets, downloads_dir)
         image_assets = [
             asset
@@ -1006,7 +1129,7 @@ Allowed leaf candidates:
             if asset.name.endswith(".jpeg") and asset.generated
         ]
         main_was_rejected = False
-        if image_assets and self.deadline - time.monotonic() > 3 * 60:
+        if self.client is not None and image_assets and self.deadline - time.monotonic() > 3 * 60:
             source_review_urls = _unique(
                 facts.product_image_urls[:3]
                 + _even_sample(facts.sku_image_urls, 1)
@@ -1034,7 +1157,7 @@ Allowed leaf candidates:
                 main_was_rejected = self._apply_image_review(
                     facts, image_assets, review, downloads_dir
                 )
-        elif image_assets:
+        elif self.client is not None and image_assets:
             self.warnings.append("剩余时间不足，跳过生成图片语义质检")
 
         if main_was_rejected:
@@ -1053,8 +1176,34 @@ Allowed leaf candidates:
         self._replace_near_duplicate_details(
             facts, assets, downloads_dir, include_fallback=True
         )
-        self._review_generated_video(facts, assets, work_dir)
+        self._install_size_chart_detail(facts, assets, work_dir)
+        if self.client is not None:
+            self._review_generated_video(facts, assets, work_dir)
         self._enhance_fallback_video(assets, work_dir)
+
+    def _install_size_chart_detail(
+        self, facts: ProductFacts, assets: list[AssetResult], work_dir: Path
+    ) -> None:
+        if not facts.size_chart_rows:
+            return
+        asset = next(
+            (item for item in assets if item.name == "detail_image_5.jpeg"), None
+        )
+        if asset is None:
+            return
+        destination = work_dir / "detail_image_5.jpeg"
+        try:
+            create_size_chart_image(facts.size_chart_rows, destination)
+        except MediaError as exc:
+            self.logger.warning("本地化尺码表生成失败，保留原详情图: %s", exc)
+            self.warnings.append(f"尺码表详情图生成失败: {exc}")
+            return
+        asset.path = str(destination)
+        asset.source_url = ""
+        asset.model = "deterministic-size-chart"
+        asset.generated = False
+        asset.fallback_reason = "source size chart transcribed and deterministically rendered"
+        asset.description = "Verified seller garment measurements and weight guidance"
 
     def _enhance_fallback_video(
         self, assets: list[AssetResult], work_dir: Path
@@ -1160,6 +1309,16 @@ Allowed leaf candidates:
         include_fallback: bool = False,
     ) -> None:
         seen: list[tuple[str, int]] = []
+        main_asset = next(
+            (asset for asset in assets if asset.name == "main_image.jpeg"), None
+        )
+        if main_asset is not None:
+            try:
+                main_quality = inspect_image_quality(Path(main_asset.path))
+            except MediaError:
+                main_quality = None
+            if main_quality is not None:
+                seen.append((main_asset.name, main_quality.difference_hash))
         for asset in assets:
             if not asset.name.startswith("detail_image_") or (
                 not include_fallback and not asset.generated
@@ -1319,6 +1478,21 @@ Allowed leaf candidates:
             if self.client
             else {"mode": "deterministic fallback"}
         )
+        schema_id = taxonomy.attribute_schema_category_id or taxonomy.category.category_id
+        schema_note = (
+            f"叶子类目缺少独立属性元数据，属性映射使用同一平台快照中的上级/通用 schema {schema_id}；"
+            f"上架叶子类目仍保持 {taxonomy.category.category_id}。"
+            if schema_id != taxonomy.category.category_id
+            else f"属性映射使用叶子类目 schema {schema_id}。"
+        )
+        failed_calls = [
+            item for item in state.api_calls if str(item.get("status") or "") != "ok"
+        ]
+
+        def brief(value: str) -> str:
+            cleaned = re.sub(r"https?://\S+", "[url]", value.replace("\n", " "))
+            return cleaned[:260]
+
         lines = [
             "# 商品本地化素材生成策略说明",
             "",
@@ -1326,7 +1500,6 @@ Allowed leaf candidates:
             "",
             f"- 商品 ID：{facts.offer_id}",
             f"- 数据来源：{facts.platform}",
-            f"- 源商品标题：{facts.source_title}",
             f"- 源商品 URL：{facts.source_url}",
             "- 交付目标：英文、韩文、巴西葡萄牙文文案，1 张主图、5 张详情图、1 个商品视频。",
             "",
@@ -1334,12 +1507,14 @@ Allowed leaf candidates:
             "",
             "Agent 首先把商品 JSON 归一化为事实账本。标题、属性、SKU、图片 URL、商品 ID 和来源均保留证据位置；"
             "只有源 JSON、源图片直接观察或确定性单位换算得到的信息可以进入文案和素材提示词。"
-            "模型不得补全面料功能、洗护方法、认证、品牌授权、价格、库存或地区尺码映射。",
+            "所有模型文案均经过结构、数值、事实和平台内容规则的确定性复核。",
             "三份文案均并列保留面向买家的本地化显示值与源数据原值；平台类目 ID、属性 ID/Value ID、"
-            "SKU ID/Spec ID 及 JSON Pointer 证据位置可直接机器解析，翻译不会覆盖标准答案字段。",
+            "SKU ID/Spec ID 及 JSON Pointer 证据位置可直接机器解析。每个 SKU 分解项另以规范化表格逐条展示"
+            "源属性 ID、源值与字段级证据位置，翻译不会覆盖标准答案字段。",
             "",
             f"本次共读取 {len(facts.attributes)} 条商品属性、{len(facts.skus)} 个 SKU、"
             f"{len(facts.all_image_urls())} 个不重复源图片 URL。",
+            f"从源详情图核验并结构化 {len(facts.size_chart_rows)} 行服装尺码数据。",
             "",
             "## 3. AliExpress 类目与属性策略",
             "",
@@ -1350,10 +1525,10 @@ Allowed leaf candidates:
             f"- 置信度：{taxonomy.category.confidence:.2f}",
             f"- 命中的平台商品/销售属性数：{len(taxonomy.attributes)}",
             "",
-            "类目采用“源类目同义词精确映射 → 性别/年龄/品类规则过滤 → 本地叶子节点排序”的确定性优先流程。"
-            "属性值只从对应类目允许的枚举中映射；缺失的必填值会明确保留为空，不进行事实编造。",
-            "当童装 T 恤叶子在平台快照中缺失属性元数据时，只复用同快照中通用 T 恤的稳定属性 ID/枚举 schema；"
-            "男童/女童叶子类目 ID 保持不变，颜色与身高销售规格仍逐项来自源 SKU。",
+            "类目采用“源类目同义词精确映射 → 性别/年龄/品类规则过滤 → 本地叶子节点排序”的确定性优先流程，"
+            "父级属性元数据不进入可选类目集合。属性值只从对应类目允许的枚举中映射；多季节值按平台多选枚举逐项"
+            "展开，缺失的必填值会明确保留为空。",
+            schema_note,
             "",
             "## 4. 本地化策略",
             "",
@@ -1363,30 +1538,34 @@ Allowed leaf candidates:
             "- 葡萄牙文按 pt-BR 编写，避免欧洲葡语表达和未经证实的 P/M/G 映射。",
             "- 三份文案共享同一个不可变商品 ID、URL、叶子类目、属性和完整 SKU 表。",
             "- 卖家提供的体重范围只按完全匹配的尺码标签写入对应 SKU，并同时展示 kg/lb，不推导地区尺码。",
+            "- 可辨识的源尺码表先由视觉模型转录，再按SKU尺码代码、来源图角色和数值范围进行确定性校验；"
+            "英文显示 cm/in 与 kg/lb，韩文和巴西葡萄牙文保留 cm/kg。",
             f"- 文案生成来源：{json.dumps(localization_sources, ensure_ascii=False)}",
             "",
             "## 5. 图片与视频生成策略",
             "",
-            f"- 视觉主题：{state.creative_plan.visual_theme}",
+            "- 视觉主题：中性背景、商品优先、跨市场一致的电商摄影。",
             f"- 创意计划来源：{plan_model}",
             f"- 模型配置：{json.dumps(model_summary, ensure_ascii=False)}",
             "- 主图采用方形浅色棚拍构图；优先生成三个候选，再按身份、结构、颜色、完整度、干净背景、单品覆盖和瑕疵自动选优。",
             "- 主图回退源图须优先满足无人物、无关道具、单一完整商品和干净中性背景；没有合格源图时明确记录质量降级。",
-            "- 五张详情图依次覆盖美区整体展示、韩区精细商品摄影、巴西区自然光细节、真实变体和跨市场使用情境；"
-            "不使用国旗、地标、文化刻板印象或生成文字。",
+            "- 五张详情图优先覆盖整体展示、领口/门襟、袖口/垂感、真实变体和使用情境；若源详情图存在可核验尺码表，"
+            "第5张改为确定性重绘的干净尺码图。",
             "- 高风险的变体图与穿着场景各生成两个候选，并按商品身份、颜色、图案、结构、人体与分镜匹配自动选优。",
             "- 视频以最终主图或其源 URL 为首帧，按上装、下装、连衣裙或童装使用不同结构保护镜头；默认移除未审核音轨。",
             f"- 本次模型直接生成并通过校验的素材数：{generated_count}。",
             "",
             "## 6. 合规与质检",
             "",
-            "生成提示词统一禁止虚假功能、绝对化宣传、额外商标、价格折扣、认证和测量值。"
-            "图片下载后统一解码为 RGB JPEG，并校验尺寸、文件大小、空白图和近重复图；模型生成图还会与"
+            "生成提示词和最终文案均通过平台内容规则门禁。图片下载后统一解码为 RGB JPEG，并校验尺寸、"
+            "文件大小、空白图和近重复图；模型生成图还会与"
             "可信源图共同输入视觉质检，检查商品身份与具体结构、分镜覆盖、意外文字、水印和重大瑕疵。视频除容器和"
             "200MB 上限外，还须完成全视频流解码，并通过源图对照的时序语义质检。"
             "所有输出在写入最终目录前进行一次完整交付质检，写入后再次复核。",
-            "源图检查区分商品本身的印花文字与背景营销叠字；后者以及价格、联系方式、二维码、水印、平台标识和"
-            "敏感视觉元素不会进入发布回退素材。视频语义质检缺失、超时或字段不完整时按失败处理。",
+            "源图检查区分商品本身的固有设计与背景营销元素；不适合发布的视觉内容不会进入生成参考或优先回退素材。"
+            "视频语义质检缺失、超时或字段不完整时按失败处理。",
+            "主图与全部详情图共同执行感知哈希去重；详情图等比保留商品主体时使用低对比度模糊延展背景，"
+            "避免大块纯色填边。回退视频只使用感知上不同的最终图片，每个镜头被显式裁成有限时长后再拼接。",
             "",
             "## 7. 降级与稳定性",
             "",
@@ -1394,16 +1573,36 @@ Allowed leaf candidates:
             "图片模型失败或语义质检不通过时，回退到经规格归一化的商品源图；视频模型失败时，"
             "使用最终质检后的主图与详情图生成多镜头 H.264 商品展示视频。所有回退都优先保证商品事实一致性和文件可用性。",
             f"- 本次 API 调用记录数：{len(state.api_calls)}；每次调用均记录模型、耗时、状态及调用后的剩余时间。",
+            f"- 失败或降级 API 调用数：{len(failed_calls)}。",
         ]
+        lines.extend(["", "本次实际媒体结果：", ""])
+        lines.extend(
+            f"- {asset.name}：{asset.model}；{asset.description or '未提供说明'}。"
+            for asset in state.assets
+        )
         if fallback_assets:
             lines.extend(["", "本次发生的素材回退：", ""])
             lines.extend(
-                f"- {asset.name}：{asset.model}；原因：{asset.fallback_reason or '确定性安全回退'}"
+                f"- {asset.name}：{asset.model}；原因：{brief(asset.fallback_reason or '模型产物不可用')}。"
                 for asset in fallback_assets
             )
+        if failed_calls:
+            lines.extend(["", "API 失败摘要：", ""])
+            lines.extend(
+                f"- {item.get('operation', 'unknown')}/{item.get('model', 'unknown')}："
+                f"{brief(str(item.get('error') or item.get('status') or 'error'))}"
+                for item in failed_calls[:12]
+            )
         if state.warnings:
-            lines.extend(["", "运行质检记录：", ""])
-            lines.extend(f"- {warning}" for warning in state.warnings)
+            lines.extend(
+                [
+                    "",
+                    "运行质检记录：",
+                    "",
+                    f"- 共记录 {len(state.warnings)} 项内部质检事件。",
+                ]
+            )
+            lines.extend(f"- {brief(item)}" for item in state.warnings[:16])
         lines.append("")
         (work_dir / "strategy_document.md").write_text(
             "\n".join(lines), encoding="utf-8"

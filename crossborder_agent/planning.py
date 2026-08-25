@@ -190,8 +190,8 @@ def fallback_creative_plan(
                 + _PRESERVATION
             ),
             (
-                f"Create a vertical 4:5 premium product feature composition. {identity} Use clean visual hierarchy and "
-                "subtle graphic dividers but no generated words, numbers, icons with claims, or labels. "
+                f"Create a vertical 4:5 premium product feature photograph. {identity} Use one coherent full-frame "
+                "composition with no dividers, inset panels, split screen, generated words, numbers, icons or labels. "
                 + slot_directives[2]
                 + " "
                 + _PRESERVATION

@@ -344,7 +344,10 @@ class QwenClient:
                 {"role": "user", "content": user_content},
             ],
             "response_format": {"type": "json_object"},
-            "temperature": 0.2,
+            # Classification, factual copy, and semantic QA should be as stable
+            # as the provider allows; creative variation is delegated to the
+            # dedicated image/video models instead of these JSON decisions.
+            "temperature": 0.0,
             "enable_thinking": False,
         }
         with self._chat_slots:
@@ -381,6 +384,12 @@ Return a JSON object with keys:
 - image_quality_notes: string[]
 - prohibited_or_risky_visuals: string[]
 - preservation_constraints: string[]
+- size_chart_rows: an array containing only rows directly readable from supplied size-chart images. Each object must contain:
+  - size_label: exact size code such as S, M, XL or 2XL
+  - bust_cm: numeric string in centimeters, or empty string when not shown
+  - length_cm: numeric string in centimeters, or empty string when not shown
+  - weight_guidance: exact visible seller guidance including its unit, or empty string
+  - source_image_index: zero-based index of the supplied image containing the row
 - images: an array of exactly {len(image_urls[:12])} objects, one for every supplied image in input order.
   Every object must contain:
   - index: zero-based integer
@@ -419,6 +428,8 @@ Read all visible text as carefully as possible. A product's own sewn label or pr
 has_text and has_intrinsic_product_text, but not has_overlay_text. Marketing captions around the garment
 count as has_overlay_text. Contact details, QR codes, marketplace marks, watermarks, price/discount badges,
 review graphics and suspected third-party branding make safe_for_generation_reference false.
+For size_chart_rows, transcribe only complete, clearly legible rows. Do not estimate obscured digits, convert
+units, rename size codes, or infer measurements from the garment. Return an empty array when no table is legible.
 For a marketplace hero, a person, unrelated prop, multiple products, incomplete product or lifestyle
 background makes the source unsuitable even when it remains usable as a detail reference.
 

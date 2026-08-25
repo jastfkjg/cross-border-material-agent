@@ -18,11 +18,14 @@ LANGUAGES: dict[str, dict[str, str]] = {
         "description": "natural US English marketplace copy",
         "overview": "Product overview",
         "highlights": "Verified highlights",
+        "appendix": "Machine-readable source appendix",
         "canonical": "Canonical listing data",
         "attributes": "Source product attributes",
         "platform_attributes": "Mapped AliExpress attributes",
         "skus": "SKU matrix",
+        "sku_components": "SKU component evidence",
         "sizes": "Seller-provided size guidance and unit conversion",
+        "size_chart": "Garment measurements from the seller's size chart",
         "media": "Media guide",
         "note": "Important factual note",
         "color_note": "Colors can appear different depending on lighting and display settings. Canonical IDs, SKU combinations and source-declared values above are preserved from the provided data.",
@@ -32,11 +35,14 @@ LANGUAGES: dict[str, dict[str, str]] = {
         "description": "자연스럽고 신뢰감 있는 한국 온라인 쇼핑몰 문체",
         "overview": "상품 소개",
         "highlights": "확인된 주요 특징",
+        "appendix": "기계 판독용 원본 데이터 부록",
         "canonical": "표준 상품 데이터",
         "attributes": "원본 상품 속성",
         "platform_attributes": "AliExpress 매핑 속성",
         "skus": "SKU 구성표",
+        "sku_components": "SKU 구성 요소 원본 근거",
         "sizes": "판매자 제공 사이즈 안내 및 단위 환산",
+        "size_chart": "판매자 사이즈표의 실측 정보",
         "media": "미디어 안내",
         "note": "상품 정보 안내",
         "color_note": "조명과 화면 설정에 따라 색상이 다르게 보일 수 있습니다. 위의 표준 ID, SKU 조합 및 원본 표시 값은 제공된 데이터를 그대로 유지했습니다.",
@@ -46,11 +52,14 @@ LANGUAGES: dict[str, dict[str, str]] = {
         "description": "português brasileiro natural para comércio eletrônico",
         "overview": "Visão geral do produto",
         "highlights": "Destaques verificados",
+        "appendix": "Apêndice de dados da origem para leitura automática",
         "canonical": "Dados canônicos do anúncio",
         "attributes": "Atributos do produto na fonte",
         "platform_attributes": "Atributos mapeados para o AliExpress",
         "skus": "Matriz de SKUs",
+        "sku_components": "Evidências dos componentes de SKU",
         "sizes": "Orientação de tamanho do vendedor e conversão de unidades",
+        "size_chart": "Medidas da peça informadas na tabela do vendedor",
         "media": "Guia de mídia",
         "note": "Observação factual importante",
         "color_note": "As cores podem variar conforme a iluminação e a configuração da tela. Os IDs canônicos, as combinações de SKU e os valores declarados na fonte foram preservados a partir dos dados fornecidos.",
@@ -69,7 +78,7 @@ FIELD_LABELS: dict[str, dict[str, str]] = {
         "leaf_category_id": "Leaf Category ID",
         "leaf_category_name": "Leaf Category Name",
         "leaf_category_path": "Leaf Category Path",
-        "raw_note": "Source IDs and evidence pointers are preserved for traceability; labels and values are localized for shoppers.",
+        "raw_note": "Canonical Chinese source values are retained beside localized display values for machine scoring and traceability.",
         "source_attribute": "Source Attribute",
         "source_value": "Source Value",
         "platform_attribute": "Platform Attribute",
@@ -85,6 +94,10 @@ FIELD_LABELS: dict[str, dict[str, str]] = {
         "canonical_raw": "Canonical source value",
         "localized_value": "Localized display value",
         "sku_evidence": "Source evidence",
+        "size": "Size",
+        "bust": "Bust",
+        "garment_length": "Garment length",
+        "seller_weight": "Seller weight guidance",
     },
     "ko": {
         "source_platform": "원본 플랫폼",
@@ -96,7 +109,7 @@ FIELD_LABELS: dict[str, dict[str, str]] = {
         "leaf_category_id": "최종 카테고리 ID",
         "leaf_category_name": "최종 카테고리명",
         "leaf_category_path": "최종 카테고리 경로",
-        "raw_note": "추적성을 위해 원본 ID와 근거 위치를 유지하고, 필드명과 값은 구매자가 읽기 쉽게 현지화했습니다.",
+        "raw_note": "기계 평가와 추적성을 위해 중국어 원본 값과 현지화 표시값을 함께 제공합니다.",
         "source_attribute": "원본 속성",
         "source_value": "원본 값",
         "platform_attribute": "플랫폼 속성",
@@ -112,6 +125,10 @@ FIELD_LABELS: dict[str, dict[str, str]] = {
         "canonical_raw": "원본 표기값",
         "localized_value": "현지화 표시값",
         "sku_evidence": "원본 근거 위치",
+        "size": "사이즈",
+        "bust": "가슴둘레",
+        "garment_length": "총장",
+        "seller_weight": "판매자 권장 체중",
     },
     "pt": {
         "source_platform": "Plataforma de origem",
@@ -123,7 +140,7 @@ FIELD_LABELS: dict[str, dict[str, str]] = {
         "leaf_category_id": "ID da categoria final",
         "leaf_category_name": "Categoria final",
         "leaf_category_path": "Caminho da categoria final",
-        "raw_note": "Os IDs e os indicadores de evidência foram preservados para rastreabilidade; rótulos e valores estão localizados para o comprador.",
+        "raw_note": "Os valores canônicos em chinês são mantidos ao lado dos valores localizados para avaliação automática e rastreabilidade.",
         "source_attribute": "Atributo de origem",
         "source_value": "Valor de origem",
         "platform_attribute": "Atributo da plataforma",
@@ -139,6 +156,10 @@ FIELD_LABELS: dict[str, dict[str, str]] = {
         "canonical_raw": "Valor canônico da origem",
         "localized_value": "Valor localizado",
         "sku_evidence": "Evidência na origem",
+        "size": "Tamanho",
+        "bust": "Busto",
+        "garment_length": "Comprimento da peça",
+        "seller_weight": "Peso indicado pelo vendedor",
     },
 }
 
@@ -180,6 +201,7 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "女式衬衫": "Women's shirts",
         "女式针织衫": "Women's knitwear",
         "女式T恤": "Women's T-shirts",
+        "T恤": "T-shirt",
         "女式毛呢外套": "Women's wool-blend coats",
         "男式夹克": "Men's jackets",
         "男式衬衫": "Men's shirts",
@@ -191,6 +213,11 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "面料": "Fabric",
         "主面料成分": "Main material",
         "主面料成分2": "Secondary material",
+        "主面料成分含量": "Main material content",
+        "主面料成分2含量": "Secondary material content",
+        "上市年份/季节": "Year and season",
+        "上市年份季节": "Year and season",
+        "适合季节": "Season",
         "图案": "Pattern",
         "款式": "Style",
         "袖长": "Sleeve length",
@@ -221,17 +248,26 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "棉": "Cotton",
         "氨纶": "Spandex",
         "粘胶纤维": "Viscose",
+        "针织面料": "Knit fabric",
+        "冰丝": "Ice-silk fabric",
+        "雪纺": "Chiffon",
         "纯色": "Solid color",
         "素色": "Solid color",
         "条纹": "Striped",
         "印花": "Printed",
         "几何": "Geometric",
+        "3D效果": "3D-effect print",
+        "3D/立体图案": "3D-effect pattern",
+        "卡通人物": "Cartoon-character print",
+        "图片色": "Color shown",
+        "花色": "Multicolor print",
         "长袖": "Long sleeve",
         "短袖": "Short sleeve",
         "常规袖": "Regular sleeve",
         "宽松型": "Relaxed fit",
         "宽松": "Relaxed fit",
         "修身型": "Slim fit",
+        "修身": "Slim fit",
         "合体型": "Regular fit",
         "POLO领": "Polo collar",
         "马球领": "Polo collar",
@@ -258,6 +294,10 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "卡其色": "Khaki",
         "杏色": "Apricot",
         "薄荷绿": "Mint green",
+        "军绿色": "Army green",
+        "焦糖色": "Caramel",
+        "燕麦色": "Oatmeal",
+        "雾霾蓝": "Dusty blue",
         "女": "Women",
         "男": "Men",
         "成人": "Adults",
@@ -273,12 +313,42 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "休闲": "Casual",
         "休闲风": "Casual style",
         "简约": "Minimalist",
+        "优雅风": "Elegant",
+        "运动风": "Sporty",
+        "文艺复古": "Art-inspired retro",
+        "气质优雅": "Elegant",
+        "春秋季": "Spring and fall",
+        "春季": "Spring",
+        "夏季": "Summer",
+        "秋季": "Fall",
+        "冬季": "Winter",
+        "四季": "All seasons",
+        "码": " size",
+        "高温定型": "Heat setting",
+        "其他": "Unbranded / other",
+        "普通款(50cm<衣长≤65cm)": "Regular length (over 50 cm and up to 65 cm)",
+        "日韩休闲": "Korean/Japanese casual",
+        "舒适休闲": "Relaxed casual style",
+        "是": "Yes",
+        "衬衫": "Shirt",
+        "中东": "Middle East",
+        "东南亚": "Southeast Asia",
+        "50%（含）-70%（不含）": "50% to under 70%",
+        "30%（含）-50%（不含）": "30% to under 50%",
+        "包容度": "Fit",
+        "图案花纹": "Pattern",
+        "衣领类型": "Collar type",
+        "季节": "Season",
+        "设计": "Design",
+        "尺码类型": "Size type",
+        "场合": "Occasion",
     },
     "ko": {
         "123批发网": "123 도매",
         "女式衬衫": "여성 셔츠",
         "女式针织衫": "여성 니트",
         "女式T恤": "여성 티셔츠",
+        "T恤": "티셔츠",
         "女式毛呢外套": "여성 울 혼방 코트",
         "男式夹克": "남성 재킷",
         "男式衬衫": "남성 셔츠",
@@ -290,6 +360,11 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "面料": "원단",
         "主面料成分": "주요 소재",
         "主面料成分2": "보조 소재",
+        "主面料成分含量": "주요 소재 함량",
+        "主面料成分2含量": "보조 소재 함량",
+        "上市年份/季节": "출시 연도/계절",
+        "上市年份季节": "출시 연도/계절",
+        "适合季节": "계절",
         "图案": "패턴",
         "款式": "스타일",
         "袖长": "소매 길이",
@@ -317,17 +392,26 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "棉": "면",
         "氨纶": "스판덱스",
         "粘胶纤维": "비스코스",
+        "针织面料": "니트 원단",
+        "冰丝": "아이스 실크 원단",
+        "雪纺": "시폰",
         "纯色": "솔리드 컬러",
         "素色": "무지",
         "条纹": "스트라이프",
         "印花": "프린트",
         "几何": "기하학 패턴",
+        "3D效果": "3D 효과 프린트",
+        "3D/立体图案": "입체 패턴",
+        "卡通人物": "캐릭터 프린트",
+        "图片色": "이미지 표시 색상",
+        "花色": "멀티컬러 프린트",
         "长袖": "긴소매",
         "短袖": "반소매",
         "常规袖": "기본 소매",
         "宽松型": "루즈핏",
         "宽松": "루즈핏",
         "修身型": "슬림핏",
+        "修身": "슬림핏",
         "合体型": "레귤러핏",
         "POLO领": "폴로 칼라",
         "马球领": "폴로 칼라",
@@ -354,6 +438,10 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "卡其色": "카키",
         "杏色": "애프리콧",
         "薄荷绿": "민트 그린",
+        "军绿色": "아미 그린",
+        "焦糖色": "캐러멜",
+        "燕麦色": "오트밀",
+        "雾霾蓝": "더스티 블루",
         "女": "여성",
         "男": "남성",
         "成人": "성인",
@@ -369,12 +457,42 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "休闲": "캐주얼",
         "休闲风": "캐주얼 스타일",
         "简约": "미니멀",
+        "优雅风": "우아한 스타일",
+        "运动风": "스포티 스타일",
+        "文艺复古": "감성적인 레트로 스타일",
+        "气质优雅": "우아한 스타일",
+        "春秋季": "봄·가을",
+        "春季": "봄",
+        "夏季": "여름",
+        "秋季": "가을",
+        "冬季": "겨울",
+        "四季": "사계절",
+        "码": " 사이즈",
+        "高温定型": "고온 열세팅",
+        "其他": "기타/무브랜드",
+        "普通款(50cm<衣长≤65cm)": "기본 길이(50 cm 초과~65 cm 이하)",
+        "日韩休闲": "한·일 캐주얼",
+        "舒适休闲": "편안한 캐주얼 스타일",
+        "是": "예",
+        "衬衫": "셔츠",
+        "中东": "중동",
+        "东南亚": "동남아시아",
+        "50%（含）-70%（不含）": "50% 이상 70% 미만",
+        "30%（含）-50%（不含）": "30% 이상 50% 미만",
+        "包容度": "핏",
+        "图案花纹": "패턴",
+        "衣领类型": "칼라 유형",
+        "季节": "계절",
+        "设计": "디자인",
+        "尺码类型": "사이즈 유형",
+        "场合": "착용 상황",
     },
     "pt": {
         "123批发网": "123 Atacado",
         "女式衬衫": "Camisas femininas",
         "女式针织衫": "Malhas femininas",
         "女式T恤": "Camisetas femininas",
+        "T恤": "Camiseta",
         "女式毛呢外套": "Casacos femininos de mistura de lã",
         "男式夹克": "Jaquetas masculinas",
         "男式衬衫": "Camisas masculinas",
@@ -386,6 +504,11 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "面料": "Tecido",
         "主面料成分": "Material principal",
         "主面料成分2": "Material secundário",
+        "主面料成分含量": "Teor do material principal",
+        "主面料成分2含量": "Teor do material secundário",
+        "上市年份/季节": "Ano e estação",
+        "上市年份季节": "Ano e estação",
+        "适合季节": "Estação",
         "图案": "Estampa",
         "款式": "Estilo",
         "袖长": "Comprimento da manga",
@@ -413,17 +536,26 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "棉": "Algodão",
         "氨纶": "Elastano",
         "粘胶纤维": "Viscose",
+        "针织面料": "Malha",
+        "冰丝": "Tecido ice silk",
+        "雪纺": "Chiffon",
         "纯色": "Cor lisa",
         "素色": "Sem estampa",
         "条纹": "Listrado",
         "印花": "Estampado",
         "几何": "Geométrico",
+        "3D效果": "Estampa com efeito 3D",
+        "3D/立体图案": "Estampa com efeito 3D",
+        "卡通人物": "Estampa de personagem",
+        "图片色": "Cor mostrada",
+        "花色": "Estampa multicolorida",
         "长袖": "Manga longa",
         "短袖": "Manga curta",
         "常规袖": "Manga regular",
         "宽松型": "Modelagem solta",
         "宽松": "Modelagem solta",
         "修身型": "Modelagem ajustada",
+        "修身": "Modelagem ajustada",
         "合体型": "Modelagem regular",
         "POLO领": "Gola polo",
         "马球领": "Gola polo",
@@ -450,6 +582,10 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "卡其色": "Cáqui",
         "杏色": "Damasco",
         "薄荷绿": "Verde-menta",
+        "军绿色": "Verde militar",
+        "焦糖色": "Caramelo",
+        "燕麦色": "Aveia",
+        "雾霾蓝": "Azul acinzentado",
         "女": "Feminino",
         "男": "Masculino",
         "成人": "Adultos",
@@ -465,15 +601,44 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "休闲": "Casual",
         "休闲风": "Estilo casual",
         "简约": "Minimalista",
+        "优雅风": "Estilo elegante",
+        "运动风": "Estilo esportivo",
+        "文艺复古": "Estilo retrô",
+        "气质优雅": "Estilo elegante",
+        "春秋季": "Primavera e outono",
+        "春季": "Primavera",
+        "夏季": "Verão",
+        "秋季": "Outono",
+        "冬季": "Inverno",
+        "四季": "Todas as estações",
+        "码": " tamanho",
+        "高温定型": "Termofixação",
+        "其他": "Sem marca/outro",
+        "普通款(50cm<衣长≤65cm)": "Comprimento regular (acima de 50 cm e até 65 cm)",
+        "日韩休闲": "Casual coreano/japonês",
+        "舒适休闲": "Estilo casual descontraído",
+        "是": "Sim",
+        "衬衫": "Camisa",
+        "中东": "Oriente Médio",
+        "东南亚": "Sudeste Asiático",
+        "50%（含）-70%（不含）": "De 50% a menos de 70%",
+        "30%（含）-50%（不含）": "De 30% a menos de 50%",
+        "包容度": "Modelagem",
+        "图案花纹": "Estampa",
+        "衣领类型": "Tipo de gola",
+        "季节": "Estação",
+        "设计": "Design",
+        "尺码类型": "Tipo de tamanho",
+        "场合": "Ocasião",
     },
 }
 
 
 _MARKETING_ATTRIBUTE_NAMES = (
-    "主面料成分",
-    "图案",
-    "版型",
     "袖长",
+    "主面料成分",
+    "版型",
+    "图案",
     "领型",
     "门襟",
     "衣门襟",
@@ -514,6 +679,13 @@ def _static_localize_term(language: str, value: str) -> str:
     translations = _TERM_TRANSLATIONS[language]
     if raw in translations:
         return translations[raw]
+    season_match = re.fullmatch(
+        r"(?P<year>\d{4})年?(?P<season>春季|夏季|秋季|冬季)", raw
+    )
+    if season_match:
+        season = translations.get(season_match.group("season"), "")
+        if season:
+            return f"{season_match.group('year')} {season}"
     rendered = raw
     for source, target in sorted(
         translations.items(), key=lambda item: len(item[0]), reverse=True
@@ -600,6 +772,10 @@ def _allowed_numbers(facts: ProductFacts, taxonomy: TaxonomyResult) -> set[str]:
         *(sku.sku_id for sku in facts.skus),
         *(item.kilograms for item in facts.size_conversions),
         *(item.pounds for item in facts.size_conversions),
+        *(item.bust_cm for item in facts.size_chart_rows),
+        *(item.length_cm for item in facts.size_chart_rows),
+        *(item.weight_kg for item in facts.size_chart_rows),
+        *(item.weight_lb for item in facts.size_chart_rows),
     ]
     allowed = set(re.findall(r"\d+(?:[.,]\d+)?", " ".join(material)))
     allowed.add("8")  # fixed video duration from the delivery contract
@@ -625,6 +801,50 @@ def _contains_unverified_numbers(value: Any, allowed: set[str]) -> bool:
         return False
     numbers = re.findall(r"\d+(?:[.,]\d+)?", value)
     return any(number not in allowed for number in numbers)
+
+
+def _repair_numeric_fields(
+    payload: dict[str, Any], fallback: dict[str, Any], allowed: set[str]
+) -> dict[str, Any]:
+    """Replace only fields containing unsupported numbers instead of discarding the draft."""
+
+    repaired = dict(payload)
+    for key in ("title", "overview", "fit_note"):
+        if _contains_unverified_numbers(repaired.get(key), allowed):
+            repaired[key] = fallback[key]
+
+    highlights = repaired.get("highlights")
+    if isinstance(highlights, list):
+        safe = [item for item in highlights if not _contains_unverified_numbers(item, allowed)]
+        for item in fallback["highlights"]:
+            if len(safe) >= 3:
+                break
+            if item not in safe:
+                safe.append(item)
+        repaired["highlights"] = safe[:5]
+
+    for object_key in ("media_descriptions", "localized_terms"):
+        values = repaired.get(object_key)
+        fallback_values = fallback[object_key]
+        if not isinstance(values, dict):
+            repaired[object_key] = dict(fallback_values)
+            continue
+        fixed = dict(values)
+        for key, value in fixed.items():
+            if _contains_unverified_numbers(value, allowed):
+                fixed[key] = fallback_values.get(key, value)
+        repaired[object_key] = fixed
+    return repaired
+
+
+def _verified_fit_note(language: str, facts: ProductFacts, fallback_note: str) -> str:
+    if not facts.size_chart_rows:
+        return fallback_note
+    return {
+        "en": "Use the seller's garment measurements below; regional size equivalence is not inferred.",
+        "ko": "아래 판매자 실측표를 확인해 주세요. 한국 사이즈로 임의 환산하지 않았습니다.",
+        "pt": "Consulte as medidas da peça abaixo; não foi presumida equivalência automática com P, M ou G.",
+    }[language]
 
 
 def _payload_validation_error(
@@ -783,6 +1003,9 @@ def _fallback_payload(
     language: str, facts: ProductFacts, taxonomy: TaxonomyResult
 ) -> dict[str, Any]:
     payload = dict(_FALLBACK_CONTENT[language])
+    payload["fit_note"] = _verified_fit_note(
+        language, facts, str(payload.get("fit_note") or "")
+    )
     term_map = _fallback_term_map(language, facts, taxonomy)
     base_title = _FALLBACK_TITLES.get(language, {}).get(
         taxonomy.category.category_id,
@@ -906,6 +1129,8 @@ Write {locale["description"]}. Return JSON only.
 Do not translate mechanically from Chinese. Do not invent performance claims, measurements,
 care instructions, composition, certifications, stock, price, brand authorization, or regional size equivalents.
 Do not add unsupported numbers. Avoid absolute superlatives and body-shaming language.
+Do not add ratings, review or sales counts, urgency, promotions, shipping or return promises,
+endorsements, contact details, social handles, or external links.
 Avoid inferred benefits such as breathable, lightweight, comfortable, durable, shape-retaining,
 flattering, premium quality, or easy-care unless the exact benefit is explicitly stated in the source facts.
 Prefer concrete source-backed details such as product type, composition, pattern, collar, sleeve,
@@ -954,6 +1179,8 @@ do not repeat all SKUs or attributes in the prose.
 You are a native {locale["locale"]} factual copy auditor. Return JSON only.
 Rewrite the candidate listing so every product claim is directly supported by the verified source facts.
 Remove inferred benefits, marketing embellishment, unsupported measurements and regional size equivalence.
+Remove ratings, sales counts, urgency, promotions, shipping or return promises, endorsements,
+contact details, social handles and external links.
 Keep natural localized language, but prefer precise field-level facts over generic filler.
 The result must contain exactly the requested six top-level keys and exactly the seven required media keys.
 Do not copy Chinese characters into any customer-facing value. The localized_terms keys are the sole
@@ -989,6 +1216,14 @@ The video description may state the fixed 8-second duration. Output the correcte
         language, payload, facts, taxonomy, expected_media, expected_terms
     )
     repaired = False
+    if validation_error == "numeric-fact-guard":
+        payload = _repair_numeric_fields(
+            payload, fallback, _allowed_numbers(facts, taxonomy)
+        )
+        validation_error = _payload_validation_error(
+            language, payload, facts, taxonomy, expected_media, expected_terms
+        )
+        repaired = not validation_error
     if validation_error:
         repair_prompt = f"""
 Repair the candidate payload because it failed this deterministic check: {validation_error}.
@@ -1011,6 +1246,13 @@ Verified source facts:
         validation_error = _payload_validation_error(
             language, payload, facts, taxonomy, expected_media, expected_terms
         )
+        if validation_error == "numeric-fact-guard":
+            payload = _repair_numeric_fields(
+                payload, fallback, _allowed_numbers(facts, taxonomy)
+            )
+            validation_error = _payload_validation_error(
+                language, payload, facts, taxonomy, expected_media, expected_terms
+            )
         if validation_error:
             return fallback, validation_error
         repaired = True
@@ -1058,23 +1300,36 @@ def _canonical_section(
     )
     localized_leaf_name = _localized_display(language, category.name, term_map)
     localized_leaf_path = _localized_display(language, category.path, term_map)
+    placeholders = {
+        "Seller-declared source value",
+        "판매자 원본 표기값",
+        "Valor informado pelo vendedor",
+    }
+    localized_platform = "" if localized_platform in placeholders else localized_platform
+    localized_source_category = (
+        "" if localized_source_category in placeholders else localized_source_category
+    )
+    localized_leaf_name = "" if localized_leaf_name in placeholders else localized_leaf_name
+    localized_leaf_path = "" if localized_leaf_path in placeholders else localized_leaf_path
+    evidence = labels["evidence"]
     return [
         f"- **{labels['source_platform']}:** {_escape_table(facts.platform)}"
         + (
             f" ({_escape_table(localized_platform)})"
             if localized_platform != facts.platform
             else ""
-        ),
-        f"- **{labels['product_id']}:** {_escape_table(facts.offer_id)}",
-        f"- **{labels['product_url']}:** {facts.source_url}",
-        f"- **{labels['source_title']}:** {_escape_table(facts.source_title)}",
-        f"- **{labels['source_category_id']}:** {_escape_table(facts.source_category_id)}",
+        )
+        + f" — {evidence}: `/ret/result/result/platform`",
+        f"- **{labels['product_id']}:** {_escape_table(facts.offer_id)} — {evidence}: `/ret/result/result/offerId`",
+        f"- **{labels['product_url']}:** {facts.source_url} — {evidence}: `/ret/result/result/url`",
+        f"- **{labels['source_category_id']}:** {_escape_table(facts.source_category_id)} — {evidence}: `/ret/result/result/categoryId`",
         f"- **{labels['source_category_name']}:** {_escape_table(facts.source_category_name)}"
         + (
             f" ({_escape_table(localized_source_category)})"
             if localized_source_category != facts.source_category_name
             else ""
-        ),
+        )
+        + f" — {evidence}: `/ret/result/result/category_name`",
         f"- **{labels['leaf_category_id']}:** {_escape_table(category.category_id)}",
         f"- **{labels['leaf_category_name']}:** {_escape_table(category.name)}"
         + (
@@ -1114,6 +1369,9 @@ def render_description(
     labels = FIELD_LABELS[language]
     raw_term_map = payload.get("localized_terms")
     term_map = raw_term_map if isinstance(raw_term_map, dict) else {}
+    verified_note = _verified_fit_note(
+        language, facts, str(payload.get("fit_note") or "").strip()
+    )
     lines = [
         f"# {str(payload['title']).strip()}",
         "",
@@ -1127,7 +1385,15 @@ def render_description(
     lines.extend(
         f"- {str(item).strip()}" for item in payload["highlights"] if str(item).strip()
     )
-    lines.extend(["", f"## {locale['canonical']}", ""])
+    lines.extend(
+        [
+            "",
+            f"## {locale['appendix']}",
+            "",
+            f"### {locale['canonical']}",
+            "",
+        ]
+    )
     lines.extend(_canonical_section(language, facts, taxonomy, term_map))
 
     lines.extend(
@@ -1153,8 +1419,8 @@ def render_description(
             "",
             f"## {locale['platform_attributes']}",
             "",
-            f"| {labels['type']} | ID | {labels['platform_attribute']} | {labels['source_attribute']} | {labels['canonical_raw']} | Value ID | {labels['platform_value']} |",
-            "|---|---|---|---|---|---|---|",
+            f"| {labels['type']} | ID | {labels['platform_attribute']} | {labels['source_attribute']} | {labels['canonical_raw']} | Value ID | {labels['platform_value']} | {labels['evidence']} |",
+            "|---|---|---|---|---|---|---|---|",
         ]
     )
     for item in taxonomy.attributes:
@@ -1163,7 +1429,8 @@ def render_description(
             f"| {item_type} | {_escape_table(item.attr_id)} | {_escape_table(item.name)} / "
             f"{_escape_table(_localized_display(language, item.name, term_map))} | {_escape_table(item.source_name)} | "
             f"{_escape_table(item.source_value)} | {_escape_table(item.value_id)} | "
-            f"{_escape_table(item.platform_value)} / {_escape_table(_localized_display(language, item.platform_value, term_map))} |"
+            f"{_escape_table(item.platform_value)} / {_escape_table(_localized_display(language, item.platform_value, term_map))} | "
+            f"`{_escape_table(item.source_evidence_pointer)}` |"
         )
     if taxonomy.missing_required:
         lines.append("")
@@ -1219,6 +1486,56 @@ def render_description(
         row.append(sku.evidence_pointer)
         lines.append("| " + " | ".join(_escape_table(value) for value in row) + " |")
 
+    # A normalized component table makes every sales-attribute key/value and its
+    # exact JSON pointer independently verifiable. Keep a generous bound so an
+    # unusually large catalog cannot push a description past the 1 MB limit.
+    sku_component_count = sum(len(sku.attributes) for sku in facts.skus)
+    if sku_component_count <= 1500:
+        lines.extend(
+            [
+                "",
+                f"## {locale['sku_components']}",
+                "",
+                f"| SKU ID | Attribute ID | {labels['source_attribute']} | {labels['canonical_raw']} | {labels['localized_value']} | {labels['sku_evidence']} |",
+                "|---|---|---|---|---|---|",
+            ]
+        )
+        for sku in facts.skus:
+            for item in sku.attributes:
+                lines.append(
+                    f"| {_escape_table(sku.sku_id)} | {_escape_table(item.attribute_id)} | "
+                    f"{_escape_table(item.name)} | {_escape_table(item.value)} | "
+                    f"{_escape_table(_localized_display(language, item.value, term_map))} | "
+                    f"`{_escape_table(item.evidence_pointer)}` |"
+                )
+
+    if facts.size_chart_rows:
+        lines.extend(
+            [
+                "",
+                f"## {locale['size_chart']}",
+                "",
+                f"| {labels['size']} | {labels['bust']} | {labels['garment_length']} | {labels['seller_weight']} | {labels['evidence']} |",
+                "|---|---|---|---|---|",
+            ]
+        )
+        for item in facts.size_chart_rows:
+            bust = f"{item.bust_cm} cm" if item.bust_cm else ""
+            length = f"{item.length_cm} cm" if item.length_cm else ""
+            weight = item.weight_kg
+            if language == "en":
+                if item.bust_cm:
+                    bust += f" ({_decimal_measurement(Decimal(item.bust_cm) / Decimal('2.54'))} in)"
+                if item.length_cm:
+                    length += f" ({_decimal_measurement(Decimal(item.length_cm) / Decimal('2.54'))} in)"
+                if item.weight_lb:
+                    weight = f"{item.weight_kg} ({item.weight_lb})"
+            lines.append(
+                f"| {_escape_table(item.size_label)} | {_escape_table(bust)} | "
+                f"{_escape_table(length)} | {_escape_table(weight)} | "
+                f"`{_escape_table(item.evidence_pointer)}` |"
+            )
+
     lines.extend(["", f"## {locale['sizes']}", ""])
     if facts.size_conversions:
         lines.extend(
@@ -1233,7 +1550,7 @@ def render_description(
                 f"{_escape_table(size.pounds)} | `{_escape_table(size.evidence_pointer)}` |"
             )
     else:
-        lines.append(str(payload["fit_note"]).strip())
+        lines.append(verified_note)
 
     lines.extend(["", f"## {locale['media']}", ""])
     for filename, description in payload["media_descriptions"].items():
@@ -1244,7 +1561,7 @@ def render_description(
             "",
             f"## {locale['note']}",
             "",
-            str(payload["fit_note"]).strip(),
+            verified_note,
             "",
             locale["color_note"],
             "",

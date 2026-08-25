@@ -1,5 +1,5 @@
 {
-  "version": "2026-08-v3",
+  "version": "2026-08-v4",
   "scope": "Generated listing copy, generated visual prompts, source-reference selection and delivery QA",
   "policy_layers": {
     "platform_explicit": [
@@ -19,8 +19,8 @@
       "url": "https://terms.alicdn.com/legal-agreement/terms/suit_bu1_aliexpress/suit_bu1_aliexpress202204182115_66077.html"
     },
     {
-      "title": "AliExpress marketing campaign seller rules",
-      "url": "https://terms.alicdn.com/legal-agreement/terms/product/20221027172120871/20221027172120871.html"
+      "title": "AliExpress overseas affiliate network marketing service agreement",
+      "url": "https://terms.alicdn.com/legal-agreement/terms/suit_bu1_aliexpress/suit_bu1_aliexpress202202191746_57536.html"
     }
   ],
   "prohibited_claims": {
@@ -36,7 +36,22 @@
       "officially certified",
       "celebrity endorsed",
       "limited stock",
-      "lowest price"
+      "lowest price",
+      "best seller",
+      "bestseller",
+      "top rated",
+      "five-star",
+      "risk-free",
+      "money-back guarantee",
+      "free shipping",
+      "authentic guaranteed",
+      "official product",
+      "no returns",
+      "hide belly",
+      "hide fat",
+      "look thinner",
+      "slimming effect",
+      "perfect body"
     ],
     "ko": [
       "100% 보장",
@@ -49,7 +64,22 @@
       "공식 인증",
       "연예인 추천",
       "재고 한정",
-      "최저가"
+      "최저가",
+      "베스트셀러",
+      "판매 1위",
+      "최고 평점",
+      "별점 5점",
+      "위험 부담 없음",
+      "환불 보장",
+      "무료 배송",
+      "정품 보장",
+      "공식 상품",
+      "반품 불가",
+      "뱃살 커버",
+      "군살 커버",
+      "날씬해 보이는",
+      "슬리밍 효과",
+      "완벽한 몸매"
     ],
     "pt": [
       "100% garantido",
@@ -63,7 +93,22 @@
       "oficialmente certificado",
       "recomendado por celebridade",
       "estoque limitado",
-      "menor preço"
+      "menor preço",
+      "mais vendido",
+      "campeão de vendas",
+      "melhor avaliado",
+      "cinco estrelas",
+      "sem risco",
+      "garantia de reembolso",
+      "frete grátis",
+      "autenticidade garantida",
+      "produto oficial",
+      "sem devolução",
+      "disfarça a barriga",
+      "esconde gordura",
+      "parece mais magra",
+      "efeito emagrecedor",
+      "corpo perfeito"
     ]
   },
   "generated_text_regex": [
@@ -71,7 +116,11 @@
     "(?i)\\b[\\w.+-]+@[\\w.-]+\\.[a-z]{2,}\\b",
     "(?i)(?:whats?app|wechat|telegram|line|kakao(?:talk)?|instagram|facebook|tiktok)\\s*[:@]?\\s*[\\w+.-]+",
     "(?i)(?:call|text|contact|message|dm)\\s+(?:us|me|seller)\\s*(?:at|on|:)\\s*[^\\n,;]+",
-    "(?i)(?:us\\$|r\\$|krw|usd|brl|₩|\\$)\\s*\\d+(?:[.,]\\d+)?"
+    "(?i)(?:us\\$|r\\$|krw|usd|brl|₩|\\$)\\s*\\d+(?:[.,]\\d+)?",
+    "(?i)\\b(?:rated|rating|reviews?|orders?|sold)\\s*[:：]?\\s*\\d+(?:[.,]\\d+)?\\b",
+    "(?i)\\b\\d+(?:[.,]\\d+)?\\s*(?:stars?|reviews?|orders?|sold)\\b",
+    "(?i)\\b(?:buy\\s*\\d+\\s*get\\s*\\d+|flash\\s*sale|today\\s*only|last\\s*chance|hurry)\\b",
+    "(?i)\\b(?:compre\\s*\\d+\\s*leve\\s*\\d+|oferta\\s*relâmpago|só\\s*hoje|última\\s*chance|corra)\\b"
   ],
   "visual_prompt_forbidden": [
     "price tag",

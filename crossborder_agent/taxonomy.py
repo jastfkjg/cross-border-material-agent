@@ -6,7 +6,13 @@ import re
 from difflib import SequenceMatcher
 from typing import Any, Iterable
 
-from .models import CategoryChoice, MappedAttribute, ProductFacts, TaxonomyResult
+from .models import (
+    CategoryChoice,
+    MappedAttribute,
+    ProductAttribute,
+    ProductFacts,
+    TaxonomyResult,
+)
 
 
 _SPACE_PUNCT_RE = re.compile(r"[\s、，。,/&（）()\-_]+")
@@ -220,7 +226,9 @@ _ATTRIBUTE_NAME_SYNONYMS = {
     "衣长": {"衣长"},
     "风格": {"风格", "风格类型", "跨境风格类型"},
     "季节": {"适合季节", "上市年份季节", "上市年份/季节", "季节"},
-    "场合": {"适用场景", "场合"},
+    "场合": {"适用场景", "场合", "风格", "跨境风格类型"},
+    "设计": {"设计", "流行元素"},
+    "尺码类型": {"尺码类型"},
     "颜色": {"颜色"},
     "尺码": {"尺码", "适合身高"},
 }
@@ -256,10 +264,17 @@ _VALUE_EQUIVALENTS = (
     {"夏", "夏季"},
     {"秋", "秋季"},
     {"冬", "冬季"},
+    {"日韩休闲", "韩语", "韩式"},
+    {"休闲风", "舒适休闲", "休闲"},
+    {"普通款", "中"},
 )
 
 
 def _equivalent_value(left: str, right: str) -> bool:
+    if right == normalize_label("中") and (
+        "普通款" in left or ("50cm" in left and "65cm" in left)
+    ):
+        return True
     for group in _VALUE_EQUIVALENTS:
         normalized = {normalize_label(item) for item in group}
         if left in normalized and right in normalized:
@@ -300,6 +315,32 @@ def _value_match(source_value: str, values: list[dict[str, Any]]) -> tuple[str, 
     return "", source_value
 
 
+def _season_value_matches(
+    source_value: str, values: list[dict[str, Any]]
+) -> list[tuple[str, str]]:
+    """Resolve a seller-declared multi-season value without choosing one arbitrarily."""
+
+    source = normalize_label(source_value)
+    if "四季" in source:
+        value_id, platform_value = _value_match("四季", values)
+        return [(value_id, platform_value)] if value_id else []
+    markers = (
+        ("春", "春"),
+        ("夏", "夏"),
+        ("秋", "秋"),
+        ("冬", "冬季"),
+    )
+    result: list[tuple[str, str]] = []
+    for marker, platform_label in markers:
+        if marker not in source:
+            continue
+        value_id, platform_value = _value_match(platform_label, values)
+        pair = (value_id, platform_value)
+        if value_id and pair not in result:
+            result.append(pair)
+    return result
+
+
 def _map_attribute_group(
     facts: ProductFacts,
     definitions: list[dict[str, Any]],
@@ -315,8 +356,18 @@ def _map_attribute_group(
             definition.get("attributeNameAlias") or definition.get("name") or ""
         )
         required = bool(definition.get("isMandatory"))
+        source_attributes = list(facts.attributes)
+        if "尺码类型" in alias and "大码" in facts.source_title:
+            source_attributes.append(
+                ProductAttribute(
+                    attribute_id="",
+                    name="尺码类型",
+                    value="大码",
+                    evidence_pointer="/ret/result/result/subject",
+                )
+            )
         matches = sorted(
-            ((_name_match_score(item.name, alias), item) for item in facts.attributes),
+            ((_name_match_score(item.name, alias), item) for item in source_attributes),
             key=lambda pair: pair[0],
             reverse=True,
         )
@@ -324,16 +375,24 @@ def _map_attribute_group(
 
         mapped_before = len(mapped)
         if sales and ("颜色" in alias or "尺码" in alias):
-            sku_values: list[tuple[str, str]] = []
+            sku_values: list[tuple[str, str, str]] = []
+            seen_sku_values: set[tuple[str, str]] = set()
             for sku in facts.skus:
                 for sku_attr in sku.attributes:
                     if _name_match_score(sku_attr.name, alias) >= 0.72:
-                        pair = (sku_attr.name, sku_attr.value)
-                        if pair not in sku_values:
-                            sku_values.append(pair)
+                        key = (sku_attr.name, sku_attr.value)
+                        if key not in seen_sku_values:
+                            seen_sku_values.add(key)
+                            sku_values.append(
+                                (
+                                    sku_attr.name,
+                                    sku_attr.value,
+                                    sku_attr.evidence_pointer,
+                                )
+                            )
             if sku_values:
                 accepted = []
-                for source_name, source_value in sku_values:
+                for source_name, source_value, evidence_pointer in sku_values:
                     value_id, platform_value = _value_match(
                         source_value, definition.get("values") or []
                     )
@@ -343,6 +402,7 @@ def _map_attribute_group(
                             name=alias,
                             source_name=source_name,
                             source_value=source_value,
+                            source_evidence_pointer=evidence_pointer,
                             value_id=value_id,
                             platform_value=platform_value,
                             required=required,
@@ -356,24 +416,31 @@ def _map_attribute_group(
                 missing.append(alias)
             continue
         multiple = bool(definition.get("isMultipleSelected"))
-        for item in accepted if multiple else accepted[:1]:
-            value_id, platform_value = _value_match(
-                item.value, definition.get("values") or []
+        for item in accepted:
+            values = definition.get("values") or []
+            resolved_values = (
+                _season_value_matches(item.value, values)
+                if multiple and "季节" in alias and values
+                else [_value_match(item.value, values)]
             )
-            if definition.get("values") and not value_id:
-                continue
-            mapped.append(
-                MappedAttribute(
-                    attr_id=str(definition.get("attrId") or ""),
-                    name=alias,
-                    source_name=item.name,
-                    source_value=item.value,
-                    value_id=value_id,
-                    platform_value=platform_value,
-                    required=required,
-                    sales_attribute=sales,
+            for value_id, platform_value in resolved_values:
+                if values and not value_id:
+                    continue
+                mapped.append(
+                    MappedAttribute(
+                        attr_id=str(definition.get("attrId") or ""),
+                        name=alias,
+                        source_name=item.name,
+                        source_value=item.value,
+                        source_evidence_pointer=item.evidence_pointer,
+                        value_id=value_id,
+                        platform_value=platform_value,
+                        required=required,
+                        sales_attribute=sales,
+                    )
                 )
-            )
+            if not multiple and len(mapped) > mapped_before:
+                break
         if required and len(mapped) == mapped_before and alias not in missing:
             missing.append(alias)
     return mapped, missing
@@ -388,12 +455,13 @@ def resolve_taxonomy(
 ) -> TaxonomyResult:
     leaves = _flatten_category_tree(category_tree)
     metadata = _metadata_categories(attribute_data)
-    candidates = _best_candidates(facts, metadata + leaves)
+    # Category accuracy is scored against leaf answers. Metadata rows often
+    # describe parent schemas, so they may inform attribute mapping below but
+    # must never enter the selectable category candidate set.
+    candidates = _best_candidates(facts, leaves)
 
     explicit_id = preferred_category_id or _explicit_category_id(facts)
-    selected = _find_category(explicit_id, metadata) or _find_category(
-        explicit_id, leaves
-    )
+    selected = _find_category(explicit_id, leaves)
     if selected:
         choice = CategoryChoice(
             category_id=selected["category_id"],
@@ -463,4 +531,5 @@ def resolve_taxonomy(
         category=choice,
         attributes=unique_mapped,
         missing_required=product_missing + sale_missing,
+        attribute_schema_category_id=str(selected_metadata.get("category_id") or ""),
     )
