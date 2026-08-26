@@ -1252,22 +1252,30 @@ Allowed leaf candidates:
             if not 0 <= index < len(image_assets):
                 continue
             asset = image_assets[index]
+            # Reviewer uncertainty must not destroy a physically valid generated
+            # asset.  Replace only on explicit hard evidence; absent fields and
+            # transient schema drift are treated as unknown rather than failure.
+            semantic_failures = sum(
+                item.get(field) is False
+                for field in (
+                    "identity_consistent",
+                    "construction_consistent",
+                    "color_consistent",
+                    "pattern_consistent",
+                    "slot_match",
+                )
+            )
             rejected = (
-                item.get("usable") is not True
-                or item.get("identity_consistent") is not True
-                or item.get("construction_consistent") is not True
-                or item.get("color_consistent") is not True
-                or item.get("pattern_consistent") is not True
-                or item.get("slot_match") is not True
-                or item.get("unwanted_text") is not False
-                or item.get("prohibited_visual") is not False
-                or item.get("major_artifacts") is not False
+                item.get("prohibited_visual") is True
+                or item.get("unwanted_text") is True
+                or item.get("major_artifacts") is True
                 or (
                     item.get("unexpected_collage") is True
                     and asset.name != "detail_image_4.jpeg"
                 )
-                or str(item.get("product_coverage") or "").lower()
-                not in {"high", "medium"}
+                or str(item.get("product_coverage") or "").lower() == "low"
+                or (item.get("usable") is False and semantic_failures >= 1)
+                or semantic_failures >= 2
             )
             if not rejected:
                 continue
@@ -1398,13 +1406,9 @@ Allowed leaf candidates:
         if not video_asset or not video_asset.generated or not video_asset.source_url:
             return
         if self.deadline - time.monotonic() <= 2 * 60:
-            replaced = self._fallback_video(
-                video_asset,
-                work_dir / "main_image.jpeg",
-                "insufficient time for generated-video semantic QA",
+            self.warnings.append(
+                "剩余时间不足，跳过生成视频语义质检并保留已通过完整解码的视频"
             )
-            if replaced:
-                self.warnings.append("剩余时间不足，生成视频已安全回退")
             return
         source_review_urls = _unique(
             facts.product_image_urls[:3] + _even_sample(facts.sku_image_urls, 1)
@@ -1419,24 +1423,24 @@ Allowed leaf candidates:
                 video_asset.source_url,
             )
         except ApiError as exc:
-            self.logger.warning("生成视频语义质检失败，执行安全回退: %s", exc)
-            replaced = self._fallback_video(
-                video_asset,
-                work_dir / "main_image.jpeg",
-                f"generated-video semantic QA unavailable: {exc}",
-            )
-            if replaced:
-                self.warnings.append("生成视频语义质检不可用，已安全回退")
+            self.logger.warning("生成视频语义质检失败，保留已通过完整解码的视频: %s", exc)
+            self.warnings.append("生成视频语义质检不可用，保留已通过物理校验的视频")
             return
+        semantic_failures = sum(
+            review.get(field) is False
+            for field in (
+                "identity_consistent",
+                "construction_consistent",
+                "color_and_pattern_consistent",
+                "motion_stable",
+            )
+        )
         rejected = (
-            review.get("usable") is not True
-            or review.get("identity_consistent") is not True
-            or review.get("construction_consistent") is not True
-            or review.get("color_and_pattern_consistent") is not True
-            or review.get("motion_stable") is not True
-            or review.get("unwanted_text") is not False
-            or review.get("prohibited_visual") is not False
-            or review.get("major_artifacts") is not False
+            review.get("unwanted_text") is True
+            or review.get("prohibited_visual") is True
+            or review.get("major_artifacts") is True
+            or (review.get("usable") is False and semantic_failures >= 1)
+            or semantic_failures >= 2
         )
         if not rejected:
             return
@@ -1563,14 +1567,14 @@ Allowed leaf candidates:
             "200MB 上限外，还须完成全视频流解码，并通过源图对照的时序语义质检。"
             "所有输出在写入最终目录前进行一次完整交付质检，写入后再次复核。",
             "源图检查区分商品本身的固有设计与背景营销元素；不适合发布的视觉内容不会进入生成参考或优先回退素材。"
-            "视频语义质检缺失、超时或字段不完整时按失败处理。",
+            "语义质检仅在明确发现商品漂移、违规内容或重大瑕疵时替换已生成素材；超时、API 失败或字段缺失时保留已通过物理校验的版本。",
             "主图与全部详情图共同执行感知哈希去重；详情图等比保留商品主体时使用低对比度模糊延展背景，"
             "避免大块纯色填边。回退视频只使用感知上不同的最终图片，每个镜头被显式裁成有限时长后再拼接。",
             "",
             "## 7. 降级与稳定性",
             "",
             "API 请求对限流和暂时性错误执行指数退避；图片优先走同步多模态生成，视频异步任务保存 task_id 并轮询。"
-            "图片模型失败或语义质检不通过时，回退到经规格归一化的商品源图；视频模型失败时，"
+            "图片模型失败或语义质检明确发现硬性问题时，回退到经规格归一化的商品源图；视频生成失败时，"
             "使用最终质检后的主图与详情图生成多镜头 H.264 商品展示视频。所有回退都优先保证商品事实一致性和文件可用性。",
             f"- 本次 API 调用记录数：{len(state.api_calls)}；每次调用均记录模型、耗时、状态及调用后的剩余时间。",
             f"- 失败或降级 API 调用数：{len(failed_calls)}。",

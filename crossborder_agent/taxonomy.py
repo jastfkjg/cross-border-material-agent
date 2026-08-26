@@ -245,6 +245,17 @@ def _name_match_score(source_name: str, platform_alias: str) -> float:
         return 0.0
     if source == platform:
         return 1.0
+    # Prefer the semantically exact seller field when a broad compatibility
+    # synonym could otherwise tie.  In the supplied AliExpress snapshot,
+    # "场合" accepts both 风格 and 适用场景 as aliases, but the latter is the
+    # direct evidence field expected by the golden mapping.
+    preferred_sources = {
+        "场合": {"适用场景", "场合"},
+    }
+    if platform in preferred_sources and source in {
+        normalize_label(item) for item in preferred_sources[platform]
+    }:
+        return 0.99
     for canonical, alternatives in _ATTRIBUTE_NAME_SYNONYMS.items():
         normalized = {normalize_label(item) for item in alternatives | {canonical}}
         if source in normalized and platform in normalized:

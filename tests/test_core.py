@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 import unittest
 import logging
+import subprocess
+import sys
+import time
 import tempfile
 from pathlib import Path
 
@@ -15,6 +19,7 @@ from crossborder_agent.input_loader import (
     parse_prompt_paths,
 )
 from crossborder_agent.localization import generate_copy_payload, render_description
+from crossborder_agent.models import AssetResult
 from crossborder_agent.planning import fallback_creative_plan
 from crossborder_agent.pipeline import Pipeline
 from crossborder_agent.taxonomy import resolve_taxonomy
@@ -25,6 +30,16 @@ DATA = ROOT / "Data_for_Users"
 
 
 class PromptParsingTests(unittest.TestCase):
+    def test_version_contract_is_consistent(self) -> None:
+        manifest = json.loads((ROOT / "agent.json").read_text(encoding="utf-8"))
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "agent.py"), "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.stdout.strip(), manifest["version"])
+
     def test_official_style_prompt(self) -> None:
         paths = parse_prompt_paths(
             "读取 `/home/user/ws/input/` 目录中的文件，并将结果输出到 `/home/user/ws/output/`。"
@@ -89,7 +104,7 @@ class ComplianceTests(unittest.TestCase):
         self.assertFalse(normalized[0]["safe_for_generation_reference"])
         self.assertIn("inspection_incomplete", normalized[0]["risk_reasons"])
 
-    def test_ip_risky_product_is_not_generated_from_but_beats_size_chart_fallback(self) -> None:
+    def test_brand_contaminated_product_is_edit_reference_not_listing_fallback(self) -> None:
         facts = load_product_facts(
             DATA / "product_info/product_8688570444629.json"
         )
@@ -103,29 +118,41 @@ class ComplianceTests(unittest.TestCase):
                 logger=logging.getLogger("selection-test"),
                 offline=True,
             )
+            observations = normalize_source_image_observations(
+                {
+                    "images": [
+                        {
+                            "index": 0,
+                            "role": "hero",
+                            "product_coverage": "high",
+                            "sharpness": "high",
+                            "has_third_party_brand": True,
+                            "has_logo": True,
+                            "product_obscured": False,
+                            "safe_for_generation_reference": False,
+                        },
+                        {
+                            "index": 1,
+                            "role": "size_chart",
+                            "product_coverage": "low",
+                            "sharpness": "high",
+                            "has_text": True,
+                        },
+                    ]
+                },
+                [product_url, chart_url],
+            )
             pipeline._source_image_observations = {
-                product_url: {
-                    "inspection_complete": True,
-                    "role": "hero",
-                    "has_third_party_brand": True,
-                    "risk_reasons": ["has_third_party_brand"],
-                    "safe_for_generation_reference": False,
-                    "safe_for_listing_fallback": False,
-                },
-                chart_url: {
-                    "inspection_complete": True,
-                    "role": "size_chart",
-                    "has_text": True,
-                    "risk_reasons": [],
-                    "safe_for_generation_reference": False,
-                    "safe_for_listing_fallback": False,
-                },
+                item["url"]: item for item in observations
             }
+            self.assertTrue(observations[0]["safe_for_generation_reference"])
+            self.assertTrue(observations[0]["reference_requires_cleanup"])
+            self.assertFalse(observations[0]["safe_for_listing_fallback"])
             self.assertEqual(
                 pipeline._source_urls_for_use(
                     [product_url], use="reference", preferred_roles=("hero",)
                 ),
-                [],
+                [product_url],
             )
             fallback = pipeline._source_urls_for_use(
                 [chart_url, product_url],
@@ -133,6 +160,71 @@ class ComplianceTests(unittest.TestCase):
                 preferred_roles=("hero", "front"),
             )
             self.assertEqual(fallback[0], product_url)
+
+
+class SemanticQaPolicyTests(unittest.TestCase):
+    def test_incomplete_positive_image_review_preserves_generated_asset(self) -> None:
+        facts = load_product_facts(
+            DATA / "product_info/product_3887087154767.json"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temporary),
+                logger=logging.getLogger("image-review-policy"),
+                offline=True,
+            )
+            asset = AssetResult(
+                name="main_image.jpeg",
+                path=str(Path(temporary) / "not-needed.jpeg"),
+                source_url="https://example.test/generated.jpeg",
+                model="image-model",
+                generated=True,
+            )
+            rejected = pipeline._apply_image_review(
+                facts,
+                [asset],
+                {
+                    "assets": [
+                        {
+                            "index": 0,
+                            "usable": True,
+                            "identity_consistent": True,
+                            "construction_consistent": True,
+                            "major_artifacts": False,
+                        }
+                    ]
+                },
+                Path(temporary),
+            )
+        self.assertFalse(rejected)
+        self.assertTrue(asset.generated)
+
+    def test_low_deadline_preserves_decoded_generated_video(self) -> None:
+        facts = load_product_facts(
+            DATA / "product_info/product_3887087154767.json"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temporary),
+                logger=logging.getLogger("video-review-policy"),
+                offline=True,
+            )
+            pipeline.client = object()
+            pipeline.deadline = time.monotonic() + 60
+            asset = AssetResult(
+                name="product_video.mp4",
+                path=str(Path(temporary) / "decoded.mp4"),
+                source_url="https://example.test/generated.mp4",
+                model="video-model",
+                generated=True,
+            )
+            pipeline._review_generated_video(
+                facts, [asset], Path(temporary)
+            )
+        self.assertTrue(asset.generated)
+        self.assertIn("跳过生成视频语义质检", pipeline.warnings[-1])
 
 
 class FactAndTaxonomyTests(unittest.TestCase):
@@ -208,8 +300,12 @@ class FactAndTaxonomyTests(unittest.TestCase):
         text = render_description("en", payload, facts, taxonomy)
         self.assertEqual(source, "deterministic-fallback")
         self.assertIn(facts.offer_id, text)
+        self.assertIn(facts.platform, text)
+        self.assertIn(facts.source_category_name, text)
         self.assertIn(taxonomy.category.category_id, text)
+        self.assertIn(taxonomy.category.path, text)
         self.assertIn(facts.skus[-1].sku_id, text)
+        self.assertIn(facts.attributes[0].evidence_pointer, text)
         self.assertIn("product_video.mp4", text)
         self.assertIn("Seller Guidance (Metric)", text)
         self.assertIn("40–47.5 kg", text)
@@ -217,6 +313,57 @@ class FactAndTaxonomyTests(unittest.TestCase):
             line for line in text.splitlines() if facts.skus[0].sku_id in line
         )
         self.assertIn("88.2–104.7 lb", first_sku_row)
+        overview = text.split("## Product overview", 1)[1].split(
+            "## Verified highlights", 1
+        )[0]
+        self.assertGreaterEqual(len([part for part in overview.split("\n\n") if part.strip()]), 2)
+
+    def test_all_sample_descriptions_preserve_machine_scoring_fields(self) -> None:
+        for product_path in sorted((DATA / "product_info").glob("*.json")):
+            facts = load_product_facts(product_path)
+            taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
+            plan = fallback_creative_plan(facts, taxonomy)
+            for language in ("en", "ko", "pt"):
+                payload, _ = generate_copy_payload(
+                    language, facts, taxonomy, plan, None
+                )
+                text = render_description(language, payload, facts, taxonomy)
+                self.assertLess(
+                    len(text.encode("utf-8")),
+                    1024 * 1024,
+                    (facts.offer_id, language),
+                )
+                for value in (
+                    facts.platform,
+                    facts.offer_id,
+                    facts.source_url,
+                    taxonomy.category.category_id,
+                    taxonomy.category.name,
+                    taxonomy.category.path,
+                ):
+                    self.assertIn(value, text, (facts.offer_id, language, value))
+                for item in taxonomy.attributes:
+                    for value in (
+                        item.attr_id,
+                        item.name,
+                        item.source_value,
+                        item.platform_value,
+                        item.source_evidence_pointer,
+                    ):
+                        if value:
+                            self.assertIn(
+                                value, text, (facts.offer_id, language, value)
+                            )
+                for sku in facts.skus:
+                    self.assertIn(
+                        sku.sku_id, text, (facts.offer_id, language, sku.sku_id)
+                    )
+                    if sku.spec_id:
+                        self.assertIn(
+                            sku.spec_id,
+                            text,
+                            (facts.offer_id, language, sku.spec_id),
+                        )
 
     def test_storyboard_adapts_to_children_and_bottoms(self) -> None:
         children = load_product_facts(

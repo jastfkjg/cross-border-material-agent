@@ -7,6 +7,7 @@ import argparse
 import compileall
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -74,8 +75,22 @@ def vendor_linux_dependencies() -> None:
 
 def validate_staging(skip_dependencies: bool) -> None:
     manifest = json.loads((STAGING / "agent.json").read_text(encoding="utf-8"))
-    if manifest != {"runtime": "python", "version": "1.8.0"}:
+    if manifest.get("runtime") != "python" or not re.fullmatch(
+        r"\d+\.\d+\.\d+", str(manifest.get("version") or "")
+    ):
         raise RuntimeError(f"Unexpected agent.json: {manifest}")
+    version_source = (STAGING / "crossborder_agent" / "__init__.py").read_text(
+        encoding="utf-8"
+    )
+    version_match = re.search(
+        r'^VERSION\s*=\s*["\']([^"\']+)["\']\s*$', version_source, re.MULTILINE
+    )
+    code_version = version_match.group(1) if version_match else ""
+    if code_version != manifest["version"]:
+        raise RuntimeError(
+            "Version mismatch: "
+            f"agent.json={manifest['version']} code={code_version or 'missing'}"
+        )
     if not skip_dependencies:
         pillow = STAGING / "vendor" / "PIL"
         imageio = STAGING / "vendor" / "imageio_ffmpeg"

@@ -170,7 +170,12 @@ class _ModelServiceHandler(BaseHTTPRequestHandler):
                         "construction_consistent": True,
                         "correct_color": True,
                         "single_product": True,
+                        "product_complete": True,
+                        "clean_neutral_background": True,
+                        "has_person": False,
+                        "has_unrelated_props": False,
                         "unwanted_text": False,
+                        "unwanted_brand_or_logo": False,
                         "major_artifacts": False,
                         "unexpected_collage": False,
                         "product_coverage": "high",
@@ -191,9 +196,13 @@ class _ModelServiceHandler(BaseHTTPRequestHandler):
                         "usable": True,
                         "identity_consistent": True,
                         "construction_consistent": True,
+                        "color_consistent": True,
+                        "pattern_consistent": True,
                         "slot_match": True,
                         "unwanted_text": False,
+                        "prohibited_visual": False,
                         "major_artifacts": False,
+                        "unexpected_collage": False,
                         "product_coverage": "high",
                         "reason": "ok",
                     }
@@ -204,7 +213,11 @@ class _ModelServiceHandler(BaseHTTPRequestHandler):
             payload = {
                 "usable": True,
                 "identity_consistent": True,
+                "construction_consistent": True,
+                "color_and_pattern_consistent": True,
+                "motion_stable": True,
                 "unwanted_text": False,
+                "prohibited_visual": False,
                 "major_artifacts": False,
                 "reason": "ok",
             }
@@ -327,7 +340,7 @@ class ModelPipelineTests(unittest.TestCase):
                 generated_names = {
                     asset.name for asset in state.assets if asset.generated
                 }
-                self.assertIn("main_image.jpeg", generated_names)
+                self.assertIn("main_image.jpeg", generated_names, state.warnings)
                 self.assertIn("product_video.mp4", generated_names)
                 self.assertTrue(
                     any("近重复" in warning for warning in state.warnings),

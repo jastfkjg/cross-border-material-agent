@@ -1054,23 +1054,39 @@ def _fallback_payload(
     if language == "en":
         payload["overview"] = (
             f"{base_title} with source-verified details including {feature_summary}. "
-            "Choose the color and size combination from the SKU matrix below."
+            "The exact source attributes and platform mappings are retained below for listing accuracy.\n\n"
+            "Choose from the seller-declared color and size combinations in the SKU table. "
+            "Review the converted guidance before ordering; regional size equivalence is not assumed."
             if feature_summary
-            else f"{base_title} offered in the seller-declared options shown below."
+            else (
+                f"{base_title} offered in the seller-declared options shown below.\n\n"
+                "Use the SKU table and seller size guidance to select an option; regional size "
+                "equivalence is not assumed."
+            )
         )
     elif language == "ko":
         payload["overview"] = (
             f"{feature_summary} 사양이 원본 데이터에서 확인된 {base_title}입니다. "
-            "아래 SKU 구성표에서 색상과 사이즈 조합을 확인해 주세요."
+            "정확한 원본 속성과 플랫폼 매핑은 아래 표에 함께 보존했습니다.\n\n"
+            "SKU 구성표에서 판매자가 제공한 색상과 사이즈 조합을 확인하고, "
+            "구매 전 판매자 사이즈 안내를 참고해 주세요."
             if feature_summary
-            else f"판매자 원본 옵션으로 구성된 {base_title}입니다."
+            else (
+                f"판매자 원본 옵션으로 구성된 {base_title}입니다.\n\n"
+                "SKU 구성표와 판매자 사이즈 안내를 확인해 옵션을 선택해 주세요."
+            )
         )
     else:
         payload["overview"] = (
             f"{base_title} com características confirmadas na fonte: {feature_summary}. "
-            "Consulte a matriz de SKUs para escolher a combinação de cor e tamanho."
+            "Os atributos originais e os mapeamentos da plataforma são preservados abaixo.\n\n"
+            "Consulte a matriz de SKUs para escolher a combinação informada pelo vendedor e "
+            "verifique a orientação de tamanho antes da compra, sem presumir equivalência regional."
             if feature_summary
-            else f"{base_title} disponível nas opções declaradas pelo vendedor."
+            else (
+                f"{base_title} disponível nas opções declaradas pelo vendedor.\n\n"
+                "Consulte a matriz de SKUs e a orientação de tamanho do vendedor antes da compra."
+            )
         )
     payload["highlights"] = [
         f"{name}: {value}" for name, value in selected_features

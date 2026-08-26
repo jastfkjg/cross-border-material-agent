@@ -124,17 +124,49 @@ def normalize_source_image_observations(
                 and not item.get("has_intrinsic_product_text")
             )
         )
-        hard_safe = not item["risk_reasons"]
-        model_safe = raw.get("safe_for_generation_reference")
+        hard_risk_fields = tuple(
+            str(field) for field in rules.get("source_visual_hard_risk_fields", [])
+        )
+        hard_safe = not any(item.get(field) is True for field in hard_risk_fields)
+        reference_product_clear = bool(
+            role
+            in {"hero", "front", "back", "side", "detail", "variant", "lifestyle"}
+            and not item.get("product_obscured")
+            and not item.get("low_sharpness")
+            and item["sharpness"] != "low"
+            and item["product_coverage"] != "low"
+        )
+        # Generation/edit references may contain removable scene contamination.
+        # Direct-listing fallbacks must satisfy the stricter gate below.
         item["safe_for_generation_reference"] = bool(
-            raw and hard_safe and model_safe is not False and not item["has_text"]
+            raw and hard_safe and reference_product_clear
+        )
+        item["reference_requires_cleanup"] = bool(
+            item["safe_for_generation_reference"]
+            and any(
+                item.get(field) is True
+                for field in (
+                    "has_text",
+                    "has_overlay_text",
+                    "has_logo",
+                    "has_third_party_brand",
+                    "has_person",
+                    "has_unrelated_props",
+                    "multiple_products",
+                )
+            )
         )
         item["safe_for_listing_fallback"] = bool(
             raw
             and hard_safe
             and not item["has_overlay_text"]
             and not item["has_logo"]
+            and not item["has_third_party_brand"]
             and not item["product_obscured"]
+            and not item["low_sharpness"]
+            and item["sharpness"] != "low"
+            and not item["has_unrelated_props"]
+            and not item["multiple_products"]
         )
         item["safe_for_main_image"] = bool(
             item["safe_for_listing_fallback"]
