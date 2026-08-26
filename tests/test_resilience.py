@@ -10,8 +10,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
+from PIL import Image
+
 from crossborder_agent.api import ApiConfig, ApiError, HttpJsonClient, QwenClient
-from crossborder_agent.media import MediaError, normalize_image
+from crossborder_agent.media import MediaError, inspect_image_quality, normalize_image
 
 
 class _FaultHandler(BaseHTTPRequestHandler):
@@ -115,6 +117,34 @@ class ResilienceTests(unittest.TestCase):
             source.write_bytes(b"this is not an image")
             with self.assertRaises(MediaError):
                 normalize_image(source, root / "out.jpeg", canvas=(800, 800))
+
+    def test_focus_crop_is_bounded_and_visually_distinct(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agent-focus-crop-") as temporary:
+            root = Path(temporary)
+            source = root / "source.png"
+            image = Image.new("RGB", (900, 1200), (245, 245, 245))
+            for y in range(image.height):
+                color = (30, 80 + y // 10, 220 - y // 8)
+                for x in range(image.width):
+                    if x < image.width // 2:
+                        image.putpixel((x, y), color)
+            image.save(source)
+
+            full = root / "full.jpeg"
+            upper = root / "upper.jpeg"
+            normalize_image(source, full, canvas=(600, 750))
+            normalize_image(source, upper, canvas=(600, 750), focus_crop="upper")
+
+            with Image.open(upper) as rendered:
+                self.assertEqual(rendered.size, (600, 750))
+            full_quality = inspect_image_quality(full)
+            upper_quality = inspect_image_quality(upper)
+            self.assertIsNotNone(full_quality)
+            self.assertIsNotNone(upper_quality)
+            self.assertGreater(
+                (full_quality.difference_hash ^ upper_quality.difference_hash).bit_count(),
+                0,
+            )
 
     def test_failed_async_task_is_terminal(self) -> None:
         config = ApiConfig(

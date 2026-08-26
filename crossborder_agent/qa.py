@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,10 +54,8 @@ def _validate_description(
         return
     required_values = [
         facts.offer_id,
-        facts.platform,
         facts.source_url,
         taxonomy.category.category_id,
-        taxonomy.category.name,
         "main_image.jpeg",
         "detail_image_1.jpeg",
         "detail_image_2.jpeg",
@@ -68,61 +67,72 @@ def _validate_description(
     for value in required_values:
         if value and value not in text:
             report.errors.append(f"{path.name} 缺少必需内容: {value}")
-    for item in facts.attributes:
-        for value in (
-            item.attribute_id,
-            item.name,
-            item.value,
-            item.evidence_pointer,
+
+    if re.search(r"[\u4e00-\u9fff]", text):
+        report.errors.append(f"{path.name} 含未本地化的中文字符")
+    forbidden_internal_markers = (
+        "/ret/result/result",
+        "Source evidence",
+        "Canonical source",
+        "Machine-readable source",
+        "원본 근거",
+        "기계 판독",
+        "Evidência na origem",
+        "dados canônicos",
+    )
+    for marker in forbidden_internal_markers:
+        if marker.casefold() in text.casefold():
+            report.errors.append(f"{path.name} 暴露内部证据字段: {marker}")
+
+    sections = re.split(r"(?m)^## ", text)
+    if len(sections) < 3:
+        report.errors.append(f"{path.name} 缺少商品描述或卖点章节")
+    else:
+        overview_body = sections[1].split("\n", 1)[-1].strip()
+        paragraphs = [
+            item.strip()
+            for item in re.split(r"\n\s*\n", overview_body)
+            if item.strip()
+        ]
+        language = path.stem.removeprefix("product_description_")
+        minimum_paragraph_chars = {"en": 45, "ko": 20, "pt": 45}.get(
+            language, 45
+        )
+        if len(paragraphs) != 2:
+            report.errors.append(f"{path.name} 商品描述须包含两个段落")
+        elif any(
+            len(re.sub(r"\s+", "", paragraph)) < minimum_paragraph_chars
+            for paragraph in paragraphs
         ):
-            if value and value not in text:
-                report.errors.append(
-                    f"{path.name} 缺少商品属性证据: {item.attribute_id}/{item.name}"
-                )
-                break
+            report.errors.append(f"{path.name} 商品描述段落内容过短")
+
     for item in taxonomy.attributes:
-        for value in (
-            item.attr_id,
-            item.name,
-            item.source_value,
-            item.platform_value,
-            item.source_evidence_pointer,
-        ):
+        for value in (item.attr_id, item.value_id):
             if value and value not in text:
                 report.errors.append(
-                    f"{path.name} 缺少平台属性映射: {item.attr_id}/{item.name}"
+                    f"{path.name} 缺少平台上架属性: {item.attr_id}/{item.value_id}"
                 )
                 break
-    detailed_sku_evidence = sum(len(sku.attributes) for sku in facts.skus) <= 1500
     for sku in facts.skus:
         if sku.sku_id not in text:
             report.errors.append(f"{path.name} 缺少 SKU: {sku.sku_id}")
             continue
-        if sku.evidence_pointer not in text:
-            report.errors.append(f"{path.name} 缺少 SKU 证据: {sku.sku_id}")
+        if sku.spec_id and sku.spec_id not in text:
+            report.errors.append(f"{path.name} 缺少 Spec ID: {sku.sku_id}")
         for item in sku.attributes:
-            required_component_values = [item.value]
-            if detailed_sku_evidence:
-                required_component_values.extend(
-                    [item.attribute_id, item.evidence_pointer]
-                )
-            if any(
-                value and value not in text for value in required_component_values
-            ):
+            if item.attribute_id and item.attribute_id not in text:
                 report.errors.append(
                     f"{path.name} 缺少 SKU 分解项: {sku.sku_id}/{item.attribute_id}"
                 )
                 break
     for item in facts.size_chart_rows:
         for value in (
-            item.size_label,
             item.bust_cm,
             item.length_cm,
-            item.evidence_pointer,
         ):
             if value and value not in text:
                 report.errors.append(
-                    f"{path.name} 缺少详情图尺码证据: {item.size_label}/{value}"
+                    f"{path.name} 缺少卖家尺码数据: {item.size_label}/{value}"
                 )
                 break
 
@@ -194,12 +204,25 @@ def validate_delivery(
         except MediaError as exc:
             report.errors.append(str(exc))
 
+    duplicate_threshold = 10
     for left_index, (left_name, left_hash) in enumerate(image_hashes):
         for right_name, right_hash in image_hashes[left_index + 1 :]:
-            if hash_distance(left_hash, right_hash) <= 2:
+            if hash_distance(left_hash, right_hash) <= duplicate_threshold:
                 report.warnings.append(
                     f"商品图片视觉内容可能重复: {left_name}, {right_name}"
                 )
+
+    distinct_hashes: list[int] = []
+    for _, image_hash in image_hashes:
+        if all(
+            hash_distance(image_hash, seen) > duplicate_threshold
+            for seen in distinct_hashes
+        ):
+            distinct_hashes.append(image_hash)
+    if image_hashes and len(distinct_hashes) / len(image_hashes) < 0.8:
+        report.warnings.append(
+            "商品图片的感知差异率低于 A6 的 80% 可用率参考线"
+        )
 
     try:
         inspect_video(output_dir / "product_video.mp4")

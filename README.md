@@ -10,11 +10,15 @@ The evaluator invokes:
 python agent.py --prompt "...input path...output path..."
 ```
 
-The agent discovers the product, category and attribute JSON files by schema; builds an evidence-backed fact ledger; resolves the AliExpress leaf category and enumerated attributes; creates English, Korean and Brazilian Portuguese descriptions; produces one main image, five deliberately distinct detail images and one video; then validates the complete delivery before exiting.
+The agent discovers the product, category and attribute JSON files by schema; builds an evidence-backed fact ledger; resolves the AliExpress leaf category and enumerated attributes; creates English, Korean and Brazilian Portuguese descriptions; produces one main image, five deliberately distinct detail images and one video; then evaluates and validates the complete delivery before exiting.
 
-Localized copy uses a writer pass followed by a factual-auditor pass and locale guards for en-US, ko-KR and pt-BR. Every description separates concise shopper-facing copy from a machine-readable appendix containing exact category, product-attribute and SKU facts. A normalized SKU-component table exposes each source attribute ID, value and JSON pointer independently. Legible source-image size charts are transcribed conservatively, checked against SKU labels, and deterministically converted into localized measurement tables and a clean detail image. Unsupported numeric fields are repaired independently so one bad number no longer discards an otherwise valid localized draft.
+The runtime is a bounded agent rather than an unconstrained shell agent. An LLM manager first plans creative emphasis, locale priorities, rubric risks, acceptance score and a one- or two-round repair budget. After initial production, an independent multimodal evaluator scores A1-A7 and may invoke only four typed, target-restricted tools: regenerate the hero, regenerate one detail slot, revise one locale, or regenerate the video. Every repair is staged and atomically installed only after candidate selection plus physical/schema validation; failed repair attempts preserve the previous artifact and never trigger a reviewer-driven source fallback.
 
-Every inspected source image receives a role and risk record covering intrinsic product print versus marketing overlays, watermarks, contact details, QR codes, prices, platform marks and sensitive visuals. Unsafe references are excluded from derivative generation. The hero uses three generated candidates when safe references exist, then selects by product identity, construction, color, completeness, clean background and usability. Source-image hero fallback separately rejects people, unrelated props, multiple products, cropping and lifestyle backgrounds whenever an inspected listing-ready source exists. Detail references are selected across evenly sampled product, SKU-variant and description images by storyboard role; risky variant and wearer slots use two candidates and semantic selection. The feature slot is constrained to one photographic frame rather than divider or inset layouts, reducing unusable collage artifacts. Generated video uses category-aware motion constraints, is fully decoded and semantically reviewed, and is silent by default; missing or failed semantic review triggers a final validated multi-shot H.264 fallback.
+Localized copy uses a writer pass followed by a factual-auditor pass and locale guards for en-US, ko-KR and pt-BR. Every description leads with two substantive shopper-facing paragraphs and natural feature highlights, followed by compact localized listing tables. Category IDs, platform attribute/value IDs, SKU IDs and Spec IDs remain parseable; localized source labels distinguish seller facts from platform mappings, while raw Chinese values and JSON pointers stay in the private fact ledger. Legible source-image size charts are transcribed conservatively, checked against SKU labels, and deterministically converted into localized measurement tables and a clean detail image. Unsupported numeric fields are repaired independently so one bad number no longer discards an otherwise valid localized draft.
+
+Every inspected source image receives a role and risk record covering intrinsic product print versus marketing overlays, watermarks, contact details, QR codes, prices, platform marks and sensitive visuals. Unsafe references are excluded from derivative generation. The hero uses three generated candidates when safe references exist, then selects by product identity, construction, color, completeness, clean background and usability. Source-image hero fallback separately rejects people, unrelated props, multiple products, cropping and lifestyle backgrounds whenever an inspected listing-ready source exists. Detail references are selected across evenly sampled product, SKU-variant and description images by storyboard role; every generative slot uses two candidates and LLM semantic selection. Generated video uses category-aware motion constraints, is fully decoded, and is silent by default. A deterministic source image or multi-shot catalog video is used only when initial generation is unavailable or yields no acceptable candidate, not as a response to later evaluator feedback.
+
+Task-specific skills are shipped under `crossborder_agent/skills/` and progressively loaded into the relevant model calls: delivery planning, product grounding, AliExpress taxonomy, AliExpress content compliance, marketplace localization, commerce visuals, commerce video, and the A1-A7 rubric evaluator. They are local prompt-policy packages and do not rely on MCP, retrieval, model-built-in tools, or external network access.
 
 Required environment variables:
 
@@ -22,6 +26,8 @@ Required environment variables:
 - `DASHSCOPE_BASE_URL`
 - `OPENAI_BASE_URL`
 - `AGENT_LOG_DIR`
+
+A normal run fails fast when any model endpoint variable is absent, instead of silently producing a model-free submission. `--offline` is the explicit development-only escape hatch.
 
 Optional model overrides:
 
@@ -48,7 +54,7 @@ python agent.py \
   --offline
 ```
 
-`--offline` skips model calls but still downloads supplied source URLs, produces localized fallback copy, normalizes images, creates a playable video, and executes all delivery gates.
+`--offline` skips model calls but still downloads supplied source URLs, produces localized fallback copy, normalizes images, creates a playable video, and executes all delivery gates. Distinct seller views are exhausted first; if too few remain, bounded neckline/hem crops are generated and rechecked against all accepted image hashes before the delivery is installed.
 
 ## Build the submission
 

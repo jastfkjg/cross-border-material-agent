@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import unittest
 import logging
+import os
 import tempfile
+import unittest
 from pathlib import Path
+from unittest import mock
 
 from crossborder_agent.compliance import (
     generated_copy_violations,
@@ -16,7 +18,7 @@ from crossborder_agent.input_loader import (
 )
 from crossborder_agent.localization import generate_copy_payload, render_description
 from crossborder_agent.planning import fallback_creative_plan
-from crossborder_agent.pipeline import Pipeline
+from crossborder_agent.pipeline import Pipeline, PipelineError
 from crossborder_agent.taxonomy import resolve_taxonomy
 
 
@@ -89,12 +91,39 @@ class ComplianceTests(unittest.TestCase):
         self.assertFalse(normalized[0]["safe_for_generation_reference"])
         self.assertIn("inspection_incomplete", normalized[0]["risk_reasons"])
 
-    def test_ip_risky_product_is_not_generated_from_but_beats_size_chart_fallback(self) -> None:
+    def test_brand_contaminated_product_is_edit_reference_not_listing_fallback(self) -> None:
         facts = load_product_facts(
             DATA / "product_info/product_8688570444629.json"
         )
         product_url = facts.product_image_urls[0]
         chart_url = facts.description_image_urls[0]
+        observations = normalize_source_image_observations(
+            {
+                "images": [
+                    {
+                        "index": 0,
+                        "role": "hero",
+                        "product_coverage": "high",
+                        "sharpness": "high",
+                        "has_third_party_brand": True,
+                        "has_logo": True,
+                        "product_obscured": False,
+                        "safe_for_generation_reference": False,
+                    },
+                    {
+                        "index": 1,
+                        "role": "size_chart",
+                        "product_coverage": "low",
+                        "sharpness": "high",
+                        "has_text": True,
+                    },
+                ]
+            },
+            [product_url, chart_url],
+        )
+        self.assertTrue(observations[0]["safe_for_generation_reference"])
+        self.assertTrue(observations[0]["reference_requires_cleanup"])
+        self.assertFalse(observations[0]["safe_for_listing_fallback"])
         with tempfile.TemporaryDirectory(prefix="agent-selection-") as temporary:
             root = Path(temporary)
             pipeline = Pipeline(
@@ -104,28 +133,13 @@ class ComplianceTests(unittest.TestCase):
                 offline=True,
             )
             pipeline._source_image_observations = {
-                product_url: {
-                    "inspection_complete": True,
-                    "role": "hero",
-                    "has_third_party_brand": True,
-                    "risk_reasons": ["has_third_party_brand"],
-                    "safe_for_generation_reference": False,
-                    "safe_for_listing_fallback": False,
-                },
-                chart_url: {
-                    "inspection_complete": True,
-                    "role": "size_chart",
-                    "has_text": True,
-                    "risk_reasons": [],
-                    "safe_for_generation_reference": False,
-                    "safe_for_listing_fallback": False,
-                },
+                item["url"]: item for item in observations
             }
             self.assertEqual(
                 pipeline._source_urls_for_use(
                     [product_url], use="reference", preferred_roles=("hero",)
                 ),
-                [],
+                [product_url],
             )
             fallback = pipeline._source_urls_for_use(
                 [chart_url, product_url],
@@ -133,6 +147,93 @@ class ComplianceTests(unittest.TestCase):
                 preferred_roles=("hero", "front"),
             )
             self.assertEqual(fallback[0], product_url)
+
+
+class VisualSelectionTests(unittest.TestCase):
+    def test_non_offline_pipeline_requires_complete_model_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(
+                    PipelineError,
+                    "DASHSCOPE_API_KEY.*DASHSCOPE_BASE_URL.*OPENAI_BASE_URL",
+                ):
+                    Pipeline(
+                        input_dir=DATA,
+                        output_dir=Path(temp_dir),
+                        logger=logging.getLogger("configuration-test"),
+                    )
+
+    def test_detail_fallback_plan_exhausts_distinct_views_before_crop(self) -> None:
+        facts = load_product_facts(
+            DATA / "product_info/product_5758364264251.json"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temp_dir),
+                logger=logging.getLogger("fallback-plan-test"),
+                offline=True,
+            )
+            main_reference = facts.product_image_urls[0]
+            planned = [
+                pipeline._detail_fallback_plan(
+                    facts, index=index, main_reference_url=main_reference
+                )
+                for index in range(1, 6)
+            ]
+
+        first_four_urls = [urls[0] for urls, _ in planned[:4]]
+        self.assertEqual(len(set(first_four_urls)), 4)
+        self.assertNotEqual(first_four_urls[0], main_reference)
+        self.assertEqual(first_four_urls[-1], main_reference)
+        self.assertEqual(planned[4][0][0], main_reference)
+        self.assertEqual(planned[4][1], "upper")
+
+    def test_detail_selector_rejects_hidden_critical_structure(self) -> None:
+        class SelectorClient:
+            @staticmethod
+            def select_best_detail_image(*args, **kwargs):
+                return {
+                    "selected_index": 0,
+                    "candidates": [
+                        {
+                            "index": 0,
+                            "usable": True,
+                            "identity_consistent": True,
+                            "construction_consistent": True,
+                            "color_consistent": True,
+                            "pattern_consistent": True,
+                            "slot_match": True,
+                            "critical_structure_unambiguous": False,
+                            "anatomy_natural": True,
+                            "unwanted_text": False,
+                            "unwanted_brand_or_logo": False,
+                            "prohibited_visual": False,
+                            "major_artifacts": False,
+                            "product_coverage": "high",
+                        }
+                    ],
+                }
+
+        facts = load_product_facts(
+            DATA / "product_info/product_5681480836479.json"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temp_dir),
+                logger=logging.getLogger("visual-selection-test"),
+                offline=True,
+            )
+            pipeline.client = SelectorClient()
+            with self.assertRaisesRegex(Exception, "候选均未通过语义质检"):
+                pipeline._select_detail_candidate(
+                    4,
+                    facts,
+                    ["https://example.test/source.jpg"],
+                    ["https://example.test/candidate.jpg"],
+                    "four-color variant lineup",
+                )
 
 
 class FactAndTaxonomyTests(unittest.TestCase):
@@ -211,12 +312,44 @@ class FactAndTaxonomyTests(unittest.TestCase):
         self.assertIn(taxonomy.category.category_id, text)
         self.assertIn(facts.skus[-1].sku_id, text)
         self.assertIn("product_video.mp4", text)
-        self.assertIn("Seller Guidance (Metric)", text)
+        self.assertIn("Seller Label", text)
         self.assertIn("40–47.5 kg", text)
+        self.assertNotRegex(text, r"[\u4e00-\u9fff]")
+        self.assertNotIn("/ret/result/result", text)
+        self.assertNotIn("Source evidence", text)
         first_sku_row = next(
             line for line in text.splitlines() if facts.skus[0].sku_id in line
         )
         self.assertIn("88.2–104.7 lb", first_sku_row)
+
+    def test_568_localization_keeps_locale_units_and_complete_one_size_label(self) -> None:
+        facts = load_product_facts(DATA / "product_info/product_5681480836479.json")
+        taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
+        plan = fallback_creative_plan(facts, taxonomy)
+
+        rendered: dict[str, str] = {}
+        for language in ("en", "ko", "pt"):
+            payload, _ = generate_copy_payload(language, facts, taxonomy, plan, None)
+            rendered[language] = render_description(
+                language, payload, facts, taxonomy
+            )
+
+        self.assertIn("Halter neck", rendered["en"].splitlines()[0])
+        self.assertIn("Cold-shoulder", rendered["en"].splitlines()[0])
+        self.assertIn("| Product | 100157 | Material | 1001111 | Viscose |", rendered["en"])
+        self.assertIn("Listed material", rendered["en"])
+        self.assertNotIn("| Main material | Viscose |", rendered["en"])
+        self.assertIn(
+            "One Size — 40–60 kg (88.2–132.3 lb)", rendered["en"]
+        )
+        self.assertNotIn("Seller-declared source value", rendered["en"])
+        self.assertNotIn("()", rendered["en"])
+        self.assertIn("프리사이즈 — 40–60 kg", rendered["ko"])
+        self.assertNotIn("88.2–132.3 lb", rendered["ko"])
+        self.assertNotIn("야드파운드법", rendered["ko"])
+        self.assertIn("Tamanho único — 40–60 kg", rendered["pt"])
+        self.assertNotIn("88.2–132.3 lb", rendered["pt"])
+        self.assertNotIn("Imperial", rendered["pt"])
 
     def test_storyboard_adapts_to_children_and_bottoms(self) -> None:
         children = load_product_facts(

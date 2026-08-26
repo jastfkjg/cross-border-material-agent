@@ -367,12 +367,17 @@ class QwenClient:
         return parsed
 
     def analyze_product_images(
-        self, facts_json: str, image_urls: list[str]
+        self,
+        facts_json: str,
+        image_urls: list[str],
+        *,
+        skill_instructions: str = "",
     ) -> dict[str, Any]:
         system = (
             "You are a conservative e-commerce visual inspector. Return JSON only. "
             "Never infer fabric composition, performance, measurements, brand authorization, or care instructions "
             "from appearance. Separate direct observations from uncertain impressions."
+            + ("\n\n" + skill_instructions if skill_instructions else "")
         )
         prompt = f"""
 Inspect the supplied source product images and the verified source facts below.
@@ -427,7 +432,10 @@ Return a JSON object with keys:
 Read all visible text as carefully as possible. A product's own sewn label or print still counts as
 has_text and has_intrinsic_product_text, but not has_overlay_text. Marketing captions around the garment
 count as has_overlay_text. Contact details, QR codes, marketplace marks, watermarks, price/discount badges,
-review graphics and suspected third-party branding make safe_for_generation_reference false.
+review graphics, certification seals and sensitive/prohibited content make safe_for_generation_reference false.
+A person, ordinary prop, background text or suspected third-party styling mark makes the source unsuitable
+for direct listing, but it may remain a generation reference when the product is clear and the final generated
+asset removes those elements.
 For size_chart_rows, transcribe only complete, clearly legible rows. Do not estimate obscured digits, convert
 units, rename size codes, or infer measurements from the garment. Return an empty array when no table is legible.
 For a marketplace hero, a person, unrelated prop, multiple products, incomplete product or lifestyle
@@ -503,10 +511,13 @@ Return JSON with:
 - candidates: exactly {len(candidate_urls)} objects, each containing index, usable,
   identity_consistent, construction_consistent, correct_color, single_product,
   product_complete, clean_neutral_background, has_person, has_unrelated_props,
-  unwanted_text, major_artifacts, product_coverage (high/medium/low), score (0-100), and reason.
+  unwanted_text, unwanted_brand_or_logo, major_artifacts, product_coverage
+  (high/medium/low), score (0-100), and reason.
 
 Explicitly inspect visible product type, silhouette, collar/neckline, sleeve or leg length,
 pockets, button/fastener count where visible, hem, pattern and any product logo.
+Reject any candidate that reproduces a background/styling brand, character, store text or logo
+that is not intrinsic to the sellable product.
 
 Verified facts:
 {facts_json}
@@ -542,11 +553,17 @@ Return JSON with:
 - selected_index: zero-based candidate index, or -1 if every candidate is unusable
 - candidates: exactly {len(candidate_urls)} objects, each containing index, usable,
   identity_consistent, construction_consistent, color_consistent, pattern_consistent,
-  slot_match, anatomy_natural, unwanted_text, prohibited_visual, major_artifacts,
+  slot_match, critical_structure_unambiguous, anatomy_natural, unwanted_text,
+  unwanted_brand_or_logo, prohibited_visual, major_artifacts,
   product_coverage (high/medium/low), score (0-100), and reason.
 
 For a variant lineup, every shown variant must be visibly supported by a source reference.
+Do not accept a crop, fold, pose or layout that hides a category-defining feature required to
+recognize the verified product, such as sleeve/leg length, neckline, closures or silhouette. For a
+variant lineup, each item must remain unambiguously the same product; folded long sleeves must still
+be visibly present rather than making the item appear sleeveless.
 For a wearer scene, reject malformed hands, limbs, faces, garment fit or body proportions.
+Reject copied background/styling brands, characters, store text or logos unrelated to the product.
 
 Verified facts:
 {facts_json}

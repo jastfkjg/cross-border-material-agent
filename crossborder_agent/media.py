@@ -164,8 +164,14 @@ def normalize_image(
     canvas: tuple[int, int],
     max_bytes: int = 5 * 1024 * 1024,
     white_background: bool = False,
+    focus_crop: str = "",
 ) -> ImageInfo:
-    """Normalize an image to an RGB JPEG while preserving the entire product."""
+    """Normalize an image to an RGB JPEG.
+
+    Full-view assets preserve the entire source. Deterministic detail fallbacks may
+    request one of a small set of bounded crops so a limited source set can still
+    provide useful neckline, hem, or side-detail coverage without inventing pixels.
+    """
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     if Image is None:
@@ -180,18 +186,44 @@ def normalize_image(
     try:
         with Image.open(source) as opened:
             image = ImageOps.exif_transpose(opened).convert("RGB")
-            contained = ImageOps.contain(image, canvas, method=Image.Resampling.LANCZOS)
-            if white_background:
-                canvas_image = Image.new("RGB", canvas, (255, 255, 255))
+            crop_boxes = {
+                "upper": (0.12, 0.02, 0.88, 0.68),
+                "lower": (0.12, 0.30, 0.88, 0.98),
+                "left": (0.00, 0.10, 0.70, 0.90),
+                "right": (0.30, 0.10, 1.00, 0.90),
+                "center": (0.14, 0.12, 0.86, 0.88),
+            }
+            normalized_focus = focus_crop.strip().lower()
+            if normalized_focus:
+                if normalized_focus not in crop_boxes:
+                    raise MediaError(f"不支持的详情裁切区域: {focus_crop}")
+                left, top, right, bottom = crop_boxes[normalized_focus]
+                focused = image.crop(
+                    (
+                        round(image.width * left),
+                        round(image.height * top),
+                        round(image.width * right),
+                        round(image.height * bottom),
+                    )
+                )
+                canvas_image = ImageOps.fit(
+                    focused, canvas, method=Image.Resampling.LANCZOS
+                )
             else:
-                background = ImageOps.fit(
+                contained = ImageOps.contain(
                     image, canvas, method=Image.Resampling.LANCZOS
-                ).filter(ImageFilter.GaussianBlur(radius=36))
-                veil = Image.new("RGB", canvas, (255, 255, 255))
-                canvas_image = Image.blend(background, veil, 0.42)
-            left = (canvas[0] - contained.width) // 2
-            top = (canvas[1] - contained.height) // 2
-            canvas_image.paste(contained, (left, top))
+                )
+                if white_background:
+                    canvas_image = Image.new("RGB", canvas, (255, 255, 255))
+                else:
+                    background = ImageOps.fit(
+                        image, canvas, method=Image.Resampling.LANCZOS
+                    ).filter(ImageFilter.GaussianBlur(radius=36))
+                    veil = Image.new("RGB", canvas, (255, 255, 255))
+                    canvas_image = Image.blend(background, veil, 0.42)
+                paste_left = (canvas[0] - contained.width) // 2
+                paste_top = (canvas[1] - contained.height) // 2
+                canvas_image.paste(contained, (paste_left, paste_top))
 
             quality = 92
             while True:
@@ -403,7 +435,7 @@ def create_catalog_video(
         inspect_image(path)
         quality = inspect_image_quality(path)
         if quality is not None and any(
-            hash_distance(quality.difference_hash, seen) <= 2 for seen in seen_hashes
+            hash_distance(quality.difference_hash, seen) <= 10 for seen in seen_hashes
         ):
             continue
         usable.append(path)
@@ -432,8 +464,11 @@ def create_catalog_video(
         label = f"v{index}"
         pan_direction = "zoom+0.00045" if index % 2 == 0 else "zoom+0.0003"
         filters.append(
-            f"[{index}:v]scale=1280:720:force_original_aspect_ratio=decrease,"
-            "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=white,"
+            f"[{index}:v]split=2[bg{index}][fg{index}];"
+            f"[bg{index}]scale=1280:720:force_original_aspect_ratio=increase,"
+            f"crop=1280:720,gblur=sigma=28[bgfill{index}];"
+            f"[fg{index}]scale=1280:720:force_original_aspect_ratio=decrease[fgfit{index}];"
+            f"[bgfill{index}][fgfit{index}]overlay=(W-w)/2:(H-h)/2,"
             f"zoompan=z='min({pan_direction},1.045)':d=1:"
             f"s=1280x720:fps={fps},trim=end_frame={frames_per_shot},"
             f"setpts=PTS-STARTPTS,setsar=1,format=yuv420p[{label}]"

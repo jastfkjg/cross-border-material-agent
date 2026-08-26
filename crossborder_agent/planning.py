@@ -256,6 +256,9 @@ def create_creative_plan(
     taxonomy: TaxonomyResult,
     vision: dict[str, Any],
     client: QwenClient | None,
+    *,
+    agent_guidance: dict[str, Any] | None = None,
+    skill_instructions: str = "",
 ) -> tuple[CreativePlan, str]:
     fallback = fallback_creative_plan(facts, taxonomy)
     if client is None:
@@ -265,6 +268,7 @@ def create_creative_plan(
         "You are an expert cross-border fashion e-commerce creative director. Return JSON only. "
         "Your plan must prioritize product identity preservation, factual accuracy, AliExpress-ready composition, "
         "cultural neutrality, and a coherent visual set. Generated images must contain no written text."
+        + ("\n\n" + skill_instructions if skill_instructions else "")
     )
     prompt = f"""
 Plan exactly one main image, five detail images and one short product video.
@@ -290,6 +294,9 @@ Resolved category:
 
 Conservative source-image observations:
 {json.dumps(vision, ensure_ascii=False)}
+
+Bounded manager guidance:
+{json.dumps(agent_guidance or {}, ensure_ascii=False)}
 """.strip()
     try:
         payload = client.chat_json(system, prompt)

@@ -168,6 +168,42 @@ class AssetResult:
 
 
 @dataclass(slots=True)
+class AgentAction:
+    """A bounded repair action selected by the delivery evaluator."""
+
+    tool: str
+    target: str
+    instruction: str
+    reason: str = ""
+    dimension: str = ""
+    priority: int = 0
+
+
+@dataclass(slots=True)
+class AgentEvaluation:
+    """Structured whole-delivery feedback produced by the evaluator model."""
+
+    round_index: int
+    ready_for_delivery: bool
+    weighted_score: float
+    dimension_scores: dict[str, float] = field(default_factory=dict)
+    summary: str = ""
+    issues: list[dict[str, Any]] = field(default_factory=list)
+    repair_actions: list[AgentAction] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class AgentActionResult:
+    """Observable result of executing one model-selected tool call."""
+
+    round_index: int
+    tool: str
+    target: str
+    status: str
+    detail: str = ""
+
+
+@dataclass(slots=True)
 class RunState:
     started_at: str
     input_dir: str
@@ -179,6 +215,9 @@ class RunState:
     assets: list[AssetResult] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     api_calls: list[dict[str, Any]] = field(default_factory=list)
+    agent_plan: dict[str, Any] = field(default_factory=dict)
+    agent_evaluations: list[AgentEvaluation] = field(default_factory=list)
+    agent_actions: list[AgentActionResult] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

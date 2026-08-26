@@ -245,6 +245,15 @@ def _name_match_score(source_name: str, platform_alias: str) -> float:
         return 0.0
     if source == platform:
         return 1.0
+    # Prefer the semantically exact source field when a broad compatibility
+    # synonym (for example 风格) could otherwise tie with 适用场景 for 场合.
+    preferred_sources = {
+        "场合": {"适用场景", "场合"},
+    }
+    if platform in preferred_sources and source in {
+        normalize_label(item) for item in preferred_sources[platform]
+    }:
+        return 0.99
     for canonical, alternatives in _ATTRIBUTE_NAME_SYNONYMS.items():
         normalized = {normalize_label(item) for item in alternatives | {canonical}}
         if source in normalized and platform in normalized:
