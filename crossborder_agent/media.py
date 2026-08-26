@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import struct
@@ -450,9 +451,10 @@ def create_catalog_video(
     ffmpeg = _ffmpeg_executable()
     destination.parent.mkdir(parents=True, exist_ok=True)
     fps = 25
-    frames_per_shot = max(25, round(duration * fps / len(usable)))
+    transition_seconds = 0.18
+    shot_duration = duration / len(usable)
+    frames_per_shot = max(25, math.ceil(shot_duration * fps))
     command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
-    shot_duration = frames_per_shot / fps
     for path in usable:
         command.extend(
             ["-loop", "1", "-framerate", str(fps), "-t", f"{shot_duration:.3f}", "-i", str(path)]
@@ -463,20 +465,30 @@ def create_catalog_video(
     for index in range(len(usable)):
         label = f"v{index}"
         pan_direction = "zoom+0.00045" if index % 2 == 0 else "zoom+0.0003"
+        fade_out = (
+            f"fade=t=out:st={max(0.0, shot_duration - transition_seconds):.3f}:"
+            f"d={transition_seconds:.3f}:color=white,"
+            if index < len(usable) - 1
+            else ""
+        )
         filters.append(
             f"[{index}:v]split=2[bg{index}][fg{index}];"
             f"[bg{index}]scale=1280:720:force_original_aspect_ratio=increase,"
-            f"crop=1280:720,gblur=sigma=28[bgfill{index}];"
+            f"crop=1280:720,eq=contrast=0.68:brightness=0.12:saturation=0.45,"
+            f"gblur=sigma=38[bgfill{index}];"
             f"[fg{index}]scale=1280:720:force_original_aspect_ratio=decrease[fgfit{index}];"
             f"[bgfill{index}][fgfit{index}]overlay=(W-w)/2:(H-h)/2,"
             f"zoompan=z='min({pan_direction},1.045)':d=1:"
-            f"s=1280x720:fps={fps},trim=end_frame={frames_per_shot},"
-            f"setpts=PTS-STARTPTS,setsar=1,format=yuv420p[{label}]"
+            f"s=1280x720:fps={fps},fps={fps},settb=AVTB,"
+            f"trim=end_frame={frames_per_shot},setpts=PTS-STARTPTS,"
+            f"fade=t=in:st=0:d={transition_seconds:.3f}:color=white,"
+            f"{fade_out}setsar=1,format=yuv420p[{label}]"
         )
         streams.append(f"[{label}]")
     filters.append(
         "".join(streams)
-        + f"concat=n={len(usable)}:v=1:a=0,format=yuv420p[outv]"
+        + f"concat=n={len(usable)}:v=1:a=0,fps={fps},"
+        "tpad=stop_mode=clone:stop_duration=1,format=yuv420p[outv]"
     )
     command.extend(
         [

@@ -127,7 +127,7 @@ _FALLBACK_CONTENT: dict[str, dict[str, Any]] = {
             "Available colors and sizes are shown in the variant table.",
             "Seller-provided size guidance is retained without inventing regional equivalents.",
         ],
-        "fit_note": "Regional size labels are not inferred when body measurements are unavailable.",
+        "fit_note": "Body measurements are not provided; seller size labels are retained without inferred regional equivalents.",
     },
     "ko": {
         "overview": "상품의 주요 디테일과 구매 가능한 옵션을 아래에서 확인해 보세요.\n\n구매 전 판매자 사이즈 안내를 확인해 주세요. 지역별 사이즈로 임의 환산하지 않았습니다.",
@@ -136,7 +136,7 @@ _FALLBACK_CONTENT: dict[str, dict[str, Any]] = {
             "구매 가능한 색상과 사이즈는 옵션 표에 정리했습니다.",
             "지역별 사이즈를 임의로 적용하지 않고 판매자 안내를 표시했습니다.",
         ],
-        "fit_note": "신체 치수 정보가 없는 경우 한국 사이즈로 임의 변환하지 않습니다.",
+        "fit_note": "신체 치수 정보가 제공되지 않아 판매자 사이즈 표기를 유지하고 한국 사이즈로 임의 환산하지 않았습니다.",
     },
     "pt": {
         "overview": "Confira os principais detalhes do produto e as opções disponíveis abaixo.\n\nConsulte a orientação de tamanho do vendedor antes da compra; não presumimos equivalência regional.",
@@ -145,7 +145,7 @@ _FALLBACK_CONTENT: dict[str, dict[str, Any]] = {
             "As cores e os tamanhos disponíveis estão na tabela de variações.",
             "A orientação do vendedor é mantida sem inventar equivalências regionais.",
         ],
-        "fit_note": "Não convertemos automaticamente para P, M ou G quando faltam medidas corporais.",
+        "fit_note": "As medidas corporais não foram informadas; mantivemos os tamanhos do vendedor sem conversão automática para P, M ou G.",
     },
 }
 
@@ -157,6 +157,13 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "女式针织衫": "Women's knitwear",
         "女式T恤": "Women's T-shirts",
         "女装T恤": "Women's T-shirts",
+        "女士羊毛和混纺大衣": "Women's wool-blend coat",
+        "女装连衣裙": "Women's dress",
+        "工装": "Men's utility jacket",
+        "男童T恤": "Boys' T-shirt",
+        "女装半身裙": "Women's skirt",
+        "男装休闲衬衫": "Men's casual shirt",
+        "男士无褶短裤": "Men's flat-front shorts",
         "T恤": "T-shirt",
         "女式毛呢外套": "Women's wool-blend coats",
         "男式夹克": "Men's jackets",
@@ -330,6 +337,13 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "女式针织衫": "여성 니트",
         "女式T恤": "여성 티셔츠",
         "女装T恤": "여성 티셔츠",
+        "女士羊毛和混纺大衣": "여성 울 혼방 코트",
+        "女装连衣裙": "여성 원피스",
+        "工装": "남성 유틸리티 재킷",
+        "男童T恤": "남아 티셔츠",
+        "女装半身裙": "여성 스커트",
+        "男装休闲衬衫": "남성 캐주얼 셔츠",
+        "男士无褶短裤": "남성 플랫 프런트 쇼츠",
         "T恤": "티셔츠",
         "女式毛呢外套": "여성 울 혼방 코트",
         "男式夹克": "남성 재킷",
@@ -500,6 +514,13 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "女式针织衫": "Malhas femininas",
         "女式T恤": "Camisetas femininas",
         "女装T恤": "Camisetas femininas",
+        "女士羊毛和混纺大衣": "Casaco feminino de mistura de lã",
+        "女装连衣裙": "Vestido feminino",
+        "工装": "Jaqueta utilitária masculina",
+        "男童T恤": "Camiseta infantil masculina",
+        "女装半身裙": "Saia feminina",
+        "男装休闲衬衫": "Camisa casual masculina",
+        "男士无褶短裤": "Bermuda masculina sem pregas",
         "T恤": "Camiseta",
         "女式毛呢外套": "Casacos femininos de mistura de lã",
         "男式夹克": "Jaquetas masculinas",
@@ -1117,52 +1138,6 @@ def _payload_validation_error(
     return ""
 
 
-_FALLBACK_TITLES: dict[str, dict[str, str]] = {
-    "en": {
-        "29073": "Women's Shirt",
-        "28951": "Women's Knit Pullover",
-        "29069": "Women's T-Shirt",
-        "28976": "Women's Wool-Blend Coat",
-        "39107": "Women's Dress",
-        "30408": "Men's Utility Jacket",
-        "30843": "Boys' T-Shirt",
-        "29553": "Girls' T-Shirt",
-        "39153": "Women's Skirt",
-        "30471": "Men's Casual Shirt",
-        "30341": "Men's Flat-Front Shorts",
-        "30335": "Men's Trousers",
-    },
-    "ko": {
-        "29073": "여성 셔츠",
-        "28951": "여성 니트 풀오버",
-        "29069": "여성 티셔츠",
-        "28976": "여성 울 혼방 코트",
-        "39107": "여성 원피스",
-        "30408": "남성 유틸리티 재킷",
-        "30843": "남아 티셔츠",
-        "29553": "여아 티셔츠",
-        "39153": "여성 스커트",
-        "30471": "남성 캐주얼 셔츠",
-        "30341": "남성 플랫 프런트 쇼츠",
-        "30335": "남성 팬츠",
-    },
-    "pt": {
-        "29073": "Camisa feminina",
-        "28951": "Suéter feminino de malha",
-        "29069": "Camiseta feminina",
-        "28976": "Casaco feminino de mistura de lã",
-        "39107": "Vestido feminino",
-        "30408": "Jaqueta utilitária masculina",
-        "30843": "Camiseta infantil masculina",
-        "29553": "Camiseta infantil feminina",
-        "39153": "Saia feminina",
-        "30471": "Camisa casual masculina",
-        "30341": "Bermuda masculina sem pregas",
-        "30335": "Calça masculina",
-    },
-}
-
-
 def _natural_join(language: str, values: list[str]) -> str:
     clean = [value for value in dict.fromkeys(values) if value and value != "—"]
     if not clean:
@@ -1177,6 +1152,52 @@ def _natural_join(language: str, values: list[str]) -> str:
     if language == "pt":
         return f"{', '.join(clean[:-1])} {conjunction} {clean[-1]}"
     return f"{', '.join(clean[:-1])}, {conjunction} {clean[-1]}"
+
+
+def _localized_category_title(
+    language: str,
+    category_name: str,
+) -> str:
+    """Turn a resolved category label into a title noun without category IDs."""
+
+    localized = _static_localize_term(language, category_name).strip()
+    if language == "en":
+        singular_suffixes = {
+            "T-shirts": "T-Shirt",
+            "shirts": "Shirt",
+            "coats": "Coat",
+            "jackets": "Jacket",
+            "skirts": "Skirt",
+            "dresses": "Dress",
+        }
+        for plural, singular in singular_suffixes.items():
+            if localized.endswith(plural):
+                return localized[: -len(plural)] + singular
+        return localized
+    if language == "pt":
+        words = localized.split()
+        noun_singular = {
+            "Camisetas": "Camiseta",
+            "Camisas": "Camisa",
+            "Malhas": "Malha",
+            "Casacos": "Casaco",
+            "Jaquetas": "Jaqueta",
+            "Calças": "Calça",
+            "Saias": "Saia",
+            "Vestidos": "Vestido",
+        }
+        adjective_singular = {
+            "femininas": "feminina",
+            "masculinas": "masculina",
+            "femininos": "feminino",
+            "masculinos": "masculino",
+            "infantis": "infantil",
+        }
+        return " ".join(
+            noun_singular.get(word, adjective_singular.get(word, word))
+            for word in words
+        )
+    return localized
 
 
 def _attribute_display_values(
@@ -1195,6 +1216,159 @@ def _attribute_display_values(
     return values
 
 
+def _compose_localized_title(
+    language: str,
+    base_title: str,
+    feature_by_source: dict[str, str],
+) -> str:
+    """Build a native title from verified concepts, never from a product ID.
+
+    Attribute priority is shared by all apparel products. Locale-specific grammar
+    controls where the product noun and modifiers appear; unknown attributes stay
+    in the specification table instead of being forced into a keyword-heavy title.
+    """
+
+    ordered_names = ("设计", "图案", "领型", "袖长", "版型")
+    features = [
+        (name, feature_by_source[name])
+        for name in ordered_names
+        if feature_by_source.get(name)
+    ]
+    features = list(dict.fromkeys(features))[:4]
+    if not features:
+        return base_title
+    if language == "en":
+        phrase_overrides = {
+            "Cold-shoulder": "cold-shoulder cutouts",
+            "V-neck": "a V-neck",
+            "Halter neck": "a halter neckline",
+            "Long sleeve": "long sleeves",
+            "Short sleeve": "short sleeves",
+            "Relaxed fit": "a relaxed fit",
+            "Slim fit": "a slim fit",
+            "Vintage floral print": "a vintage floral print",
+            "Floral print": "a floral print",
+            "3D-effect print": "a 3D-effect print",
+            "Striped": "a striped pattern",
+            "Solid color": "a solid-color design",
+        }
+        phrases: list[str] = []
+        for source_name, value in features:
+            phrase = phrase_overrides.get(value)
+            if phrase is None:
+                lowered = value.lower()
+                phrase = (
+                    f"a {lowered}"
+                    if source_name in {"图案", "领型", "版型"}
+                    else lowered
+                )
+            phrases.append(phrase)
+        return f"{base_title} with {_natural_join(language, phrases)}"
+    if language == "ko":
+        return f"{' · '.join(value for _, value in features)} {base_title}"
+    pt_overrides = {
+        "Listrado": "estampa listrada",
+        "Cor lisa": "cor lisa",
+        "Estampa multicolorida": "estampa multicolorida",
+    }
+    phrases = [
+        pt_overrides.get(value, value[:1].lower() + value[1:])
+        for _, value in features
+    ]
+    return f"{base_title} com {_natural_join(language, phrases)}"
+
+
+def _benefit_led_highlight(
+    language: str,
+    source_name: str,
+    localized_name: str,
+    localized_value: str,
+) -> str:
+    """Turn one verified feature into a conservative shopper-facing benefit."""
+
+    if language == "en":
+        if source_name == "领型":
+            return (
+                "V-neckline creates a clean, open shape"
+                if localized_value == "V-neck"
+                else f"{localized_value} defines the neckline shape"
+            )
+        if source_name == "袖长":
+            if localized_value == "Long sleeve":
+                return "Long sleeves provide full-arm coverage"
+            if localized_value == "Short sleeve":
+                return "Short sleeves leave the forearms uncovered"
+            return f"{localized_value} defines the sleeve coverage"
+        if source_name == "版型":
+            if localized_value == "Relaxed fit":
+                return "Relaxed fit leaves room through the body"
+            if localized_value == "Slim fit":
+                return "Slim fit follows a closer silhouette"
+            return f"{localized_value} shapes the overall silhouette"
+        if source_name == "图案":
+            return f"{localized_value} defines the visual style"
+        if source_name in {"衣长", "裤长", "裙长"}:
+            return f"Seller-listed {localized_value.lower()} proportion"
+    elif language == "ko":
+        def ko_with_particle(value: str) -> str:
+            if not value:
+                return value
+            final = ord(value[-1]) - 0xAC00
+            has_batchim = 0 <= final <= 11171 and final % 28 != 0
+            return value + ("으로" if has_batchim else "로")
+
+        if source_name == "设计":
+            return f"{localized_value}을 주요 디자인 디테일로 적용했습니다"
+        if source_name == "领型":
+            return (
+                "브이넥으로 열린 목선 형태를 보여 줍니다"
+                if localized_value == "브이넥"
+                else f"{ko_with_particle(localized_value)} 네크라인 형태를 보여 줍니다"
+            )
+        if source_name == "袖长":
+            return (
+                "긴소매로 팔 전체를 덮습니다"
+                if localized_value == "긴소매"
+                else f"{localized_value} 소매 구성을 적용했습니다"
+            )
+        if source_name == "版型":
+            if localized_value == "루즈핏":
+                return "루즈핏으로 몸통에 여유가 있습니다"
+            if localized_value == "슬림핏":
+                return "슬림핏으로 몸에 가까운 실루엣을 만듭니다"
+            return f"{localized_value}으로 전체 실루엣을 구성했습니다"
+        if source_name == "图案":
+            return f"{localized_value}가 디자인의 시각적 포인트입니다"
+        if source_name in {"衣长", "裤长", "裙长"}:
+            return f"판매자가 표기한 {localized_value} 비율"
+    else:
+        if source_name == "设计":
+            return f"{localized_value} como detalhe visual principal"
+        if source_name == "领型":
+            return (
+                "Decote V com desenho aberto"
+                if localized_value == "Decote V"
+                else f"{localized_value} define o formato do decote"
+            )
+        if source_name == "袖长":
+            return (
+                "Mangas longas oferecem cobertura dos braços"
+                if localized_value == "Manga longa"
+                else f"{localized_value} define a cobertura das mangas"
+            )
+        if source_name == "版型":
+            if localized_value == "Modelagem solta":
+                return "Modelagem solta oferece mais espaço no corpo"
+            if localized_value == "Modelagem ajustada":
+                return "Modelagem ajustada acompanha uma silhueta mais próxima ao corpo"
+            return f"{localized_value} define a silhueta geral"
+        if source_name == "图案":
+            return f"{localized_value} define o estilo visual"
+        if source_name in {"衣长", "裤长", "裙长"}:
+            return f"Proporção de {localized_value.lower()} informada pelo vendedor"
+    return f"{localized_name}: {localized_value}"
+
+
 def _fallback_payload(
     language: str, facts: ProductFacts, taxonomy: TaxonomyResult
 ) -> dict[str, Any]:
@@ -1203,22 +1377,20 @@ def _fallback_payload(
         language, facts, str(payload.get("fit_note") or "")
     )
     term_map = _fallback_term_map(language, facts, taxonomy)
-    base_title = _FALLBACK_TITLES.get(language, {}).get(
-        taxonomy.category.category_id,
-        _static_localize_term(
-            language, taxonomy.category.name or facts.source_category_name
-        ),
+    base_title = _localized_category_title(
+        language,
+        taxonomy.category.name or facts.source_category_name,
     )
     selected_features: list[tuple[str, str]] = []
+    feature_by_source: dict[str, str] = {}
     seen_values: set[str] = set()
     if "露肩" in facts.source_title:
+        cold_shoulder = _TERM_TRANSLATIONS[language]["露肩"]
         selected_features.append(
-            (
-                _TERM_TRANSLATIONS[language]["设计"],
-                _TERM_TRANSLATIONS[language]["露肩"],
-            )
+            (_TERM_TRANSLATIONS[language]["设计"], cold_shoulder)
         )
-        seen_values.add(_TERM_TRANSLATIONS[language]["露肩"])
+        feature_by_source["设计"] = cold_shoulder
+        seen_values.add(cold_shoulder)
     for attribute_name in _MARKETING_ATTRIBUTE_NAMES:
         item = next(
             (attribute for attribute in facts.attributes if attribute.name == attribute_name),
@@ -1248,6 +1420,8 @@ def _fallback_payload(
             }[language]
         if (
             localized_value in seen_values
+            or re.fullmatch(r"\d{6,}", str(localized_value).strip()) is not None
+            or (item.name == "图案" and item.value in {"图片色", "图色"})
             or localized_value
             in {
                 "Seller-declared source value",
@@ -1257,6 +1431,7 @@ def _fallback_payload(
         ):
             continue
         selected_features.append((localized_name, localized_value))
+        feature_by_source.setdefault(item.name, localized_value)
         seen_values.add(localized_value)
         if len(selected_features) == 5:
             break
@@ -1271,21 +1446,8 @@ def _fallback_payload(
     has_slim_fit = any(
         item.name == "版型" and item.value == "修身型" for item in facts.attributes
     )
-    title_values = [value for _, value in selected_features[:4]]
-    if language == "en":
-        title_values = [
-            {
-                "Long sleeve": "Long-Sleeve",
-                "Relaxed fit": "Relaxed Fit",
-                "Slim fit": "Slim Fit",
-                "V-neck": "V-Neck",
-                "Floral print": "Floral Print",
-                "Vintage floral print": "Vintage Floral Print",
-            }.get(value, value)
-            for value in title_values
-        ]
-    payload["title"] = (
-        f"{base_title} — {', '.join(title_values)}" if title_values else base_title
+    payload["title"] = _compose_localized_title(
+        language, base_title, feature_by_source
     )
     if language == "en" and has_cold_shoulders:
         descriptive_title = "Women's Cold-shoulder"
@@ -1302,13 +1464,18 @@ def _fallback_payload(
             if title_tail
             else descriptive_title
         )
-    if language == "ko" and title_values:
-        payload["title"] = f"{base_title} · {' · '.join(title_values)}"
-
     feature_summary = _natural_join(
         language, [value for _, value in selected_features[:4]]
     )
     colors = _attribute_display_values(language, facts, term_map, ("颜色",))
+    sizes = _attribute_display_values(language, facts, term_map, ("尺码",))
+    # Composite seller codes remain in the exact SKU table, but are not suitable
+    # as shopper-facing color/size prose. Very large option sets are likewise
+    # summarized by the table instead of becoming unreadable marketing bullets.
+    if len(colors) > 6 or any("#" in value for value in colors):
+        colors = []
+    if len(sizes) > 10 or any("#" in value for value in sizes):
+        sizes = []
     patterns = _attribute_display_values(language, facts, term_map, ("图案",))
     closures = _attribute_display_values(
         language, facts, term_map, ("门襟", "衣门襟", "穿着方式")
@@ -1364,6 +1531,10 @@ def _fallback_payload(
             second_parts.append(f"Available colors are {option_summary}.")
         if size_label:
             second_parts.append(f"This style is offered in {size_label}.")
+        elif sizes:
+            second_parts.append(
+                f"Seller size labels: {_natural_join(language, sizes)}."
+            )
         second_parts.append(
             "Review the seller's size guidance before ordering; regional size equivalence is not assumed."
         )
@@ -1383,16 +1554,26 @@ def _fallback_payload(
             second_parts.append(f"색상은 {option_summary} 중에서 선택할 수 있습니다.")
         if size_label:
             second_parts.append(f"사이즈는 {size_label}으로 제공됩니다.")
+        elif sizes:
+            second_parts.append(
+                f"판매자 사이즈 표기는 {_natural_join(language, sizes)}입니다."
+            )
         second_parts.append("구매 전 판매자 사이즈 안내를 확인해 주세요.")
         payload["overview"] = first + "\n\n" + " ".join(second_parts)
     else:
+        pt_feature_summary = _natural_join(
+            language,
+            [value[:1].lower() + value[1:] for _, value in selected_features[:4]],
+        )
         first = (
-            f"Esta peça apresenta {feature_summary.lower()}."
-            if feature_summary
+            f"Esta peça apresenta {pt_feature_summary}."
+            if pt_feature_summary
             else "Uma peça com silhueta limpa e foco no produto."
         )
         if patterns and closures:
-            first += f" O acabamento {patterns[0].lower()} combina com a construção {closures[0].lower()}."
+            pattern = patterns[0][:1].lower() + patterns[0][1:]
+            closure = closures[0][:1].lower() + closures[0][1:]
+            first += f" O acabamento {pattern} combina com a construção {closure}."
         second_parts = []
         if len(colors) == 1:
             second_parts.append(f"Disponível na cor {colors[0].lower()}.")
@@ -1400,22 +1581,38 @@ def _fallback_payload(
             second_parts.append(f"As cores disponíveis são {option_summary}.")
         if size_label:
             second_parts.append(f"O modelo está disponível em {size_label}.")
+        elif sizes:
+            second_parts.append(
+                f"Os tamanhos informados pelo vendedor são {_natural_join(language, sizes)}."
+            )
         second_parts.append(
             "Consulte a orientação de tamanho do vendedor antes da compra; não presumimos equivalência regional."
         )
         payload["overview"] = first + "\n\n" + " ".join(second_parts)
 
+    source_by_value = {value: source for source, value in feature_by_source.items()}
     payload["highlights"] = [
-        f"{name}: {value}" for name, value in selected_features[:3]
+        _benefit_led_highlight(
+            language,
+            source_by_value.get(value, ""),
+            name,
+            value,
+        )
+        for name, value in selected_features[:4]
     ]
-    if colors:
+    if size_label:
+        size_heading = _static_localize_term(language, "尺码")
+        payload["highlights"].append(f"{size_heading}: {size_label}")
+    elif sizes:
+        size_heading = _static_localize_term(language, "尺码")
+        payload["highlights"].append(
+            f"{size_heading}: {_natural_join(language, sizes)}"
+        )
+    if colors and len(payload["highlights"]) < 5:
         color_label = _static_localize_term(language, "颜色")
         payload["highlights"].append(
             f"{color_label}: {_natural_join(language, colors)}"
         )
-    if size_label:
-        size_heading = _static_localize_term(language, "尺码")
-        payload["highlights"].append(f"{size_heading}: {size_label}")
     payload["highlights"] = payload["highlights"][:5]
     if language == "en" and has_cold_shoulders:
         design_detail = "Cold-shoulder cutouts"
@@ -1445,7 +1642,11 @@ def _fallback_payload(
             )
         payload["highlights"] = payload["highlights"][:5]
     if len(payload["highlights"]) < 3:
-        payload["highlights"] = list(_FALLBACK_CONTENT[language]["highlights"])
+        for fallback_highlight in _FALLBACK_CONTENT[language]["highlights"]:
+            if fallback_highlight not in payload["highlights"]:
+                payload["highlights"].append(fallback_highlight)
+            if len(payload["highlights"]) == 3:
+                break
     payload["localized_terms"] = term_map
     media_feature_summary = feature_summary
     if language == "en" and has_cold_shoulders:
@@ -1863,7 +2064,20 @@ def render_description(
         name = _localized_display(language, item.name, term_map)
         value = _localized_display(language, item.platform_value, term_map)
         source_name = _localized_display(language, item.source_name, term_map)
-        if source_name == "—":
+        evidence_pointer = str(item.source_evidence_pointer or "")
+        if evidence_pointer.endswith("/subject"):
+            source_label = {
+                "en": "Mapped from seller product title",
+                "ko": "판매자 상품명에서 매핑",
+                "pt": "Mapeado do título informado pelo vendedor",
+            }[language]
+        elif "/productSkuInfos/" in evidence_pointer:
+            source_label = {
+                "en": f"Mapped from seller SKU attribute: {source_name}",
+                "ko": f"판매자 SKU 속성에서 매핑: {source_name}",
+                "pt": f"Mapeado do atributo de SKU do vendedor: {source_name}",
+            }[language]
+        elif source_name == "—":
             source_label = {
                 "en": "Mapped from seller listing facts",
                 "ko": "판매자 상품 정보에서 매핑",
@@ -1969,15 +2183,8 @@ def render_description(
     for filename, description in payload["media_descriptions"].items():
         lines.append(f"- **{filename}:** {str(description).strip()}")
 
-    lines.extend(
-        [
-            "",
-            f"## {locale['note']}",
-            "",
-            verified_note,
-            "",
-            locale["color_note"],
-            "",
-        ]
-    )
+    lines.extend(["", f"## {locale['note']}", ""])
+    if facts.size_conversions or facts.size_chart_rows:
+        lines.extend([verified_note, ""])
+    lines.extend([locale["color_note"], ""])
     return "\n".join(lines)

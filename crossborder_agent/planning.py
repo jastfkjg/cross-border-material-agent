@@ -52,7 +52,9 @@ def _product_family(taxonomy: TaxonomyResult) -> str:
     return "top"
 
 
-def _detail_slot_directives(taxonomy: TaxonomyResult) -> tuple[str, ...]:
+def _detail_slot_directives(
+    taxonomy: TaxonomyResult, facts: ProductFacts | None = None
+) -> tuple[str, ...]:
     family = _product_family(taxonomy)
     category_id = taxonomy.category.category_id
     wearer = (
@@ -61,7 +63,18 @@ def _detail_slot_directives(taxonomy: TaxonomyResult) -> tuple[str, ...]:
         else "one adult woman"
     )
     slot_1 = _BASE_DETAIL_SLOT_DIRECTIVES[0]
-    slot_4 = _BASE_DETAIL_SLOT_DIRECTIVES[3]
+    verified_colors = {
+        item.value
+        for item in (facts.attributes if facts is not None else [])
+        if item.name == "颜色" and item.value
+    }
+    slot_4 = (
+        _BASE_DETAIL_SLOT_DIRECTIVES[3]
+        if len(verified_colors) > 1
+        else "This is detail slot 4: show the back construction and print continuity from shoulder to hem in one "
+        "clean, readable view. This slot is evidence-led, not a second front pose or a synthetic color lineup. "
+        "Do not invent variants, labels, graphics or construction details."
+    )
     if family == "bottom":
         return (
             slot_1,
@@ -99,7 +112,10 @@ def _detail_slot_directives(taxonomy: TaxonomyResult) -> tuple[str, ...]:
             _BASE_DETAIL_SLOT_DIRECTIVES[4].replace("one adult wearer", wearer),
         )
     return (
-        *_BASE_DETAIL_SLOT_DIRECTIVES[:4],
+        _BASE_DETAIL_SLOT_DIRECTIVES[0],
+        _BASE_DETAIL_SLOT_DIRECTIVES[1],
+        _BASE_DETAIL_SLOT_DIRECTIVES[2],
+        slot_4,
         _BASE_DETAIL_SLOT_DIRECTIVES[4].replace("one adult wearer", wearer),
     )
 
@@ -162,9 +178,13 @@ def fallback_creative_plan(
     if verified:
         identity += f" Verified visible source attributes: {verified}."
     identity += " When text facts and reference pixels appear to conflict, preserve the reference product pixels."
-    slot_directives = _detail_slot_directives(taxonomy)
+    slot_directives = _detail_slot_directives(taxonomy, facts)
     return CreativePlan(
-        visual_theme="Clean international marketplace editorial with neutral, culturally inclusive styling",
+        visual_theme=(
+            "Campaign Style Lock: pure white primary, warm ivory secondary, and one accent sampled from the verified "
+            "product color; soft diffused daylight, realistic fabric rendering, restrained modern editorial styling, "
+            "product occupying 70-80% of the frame; no typography, random backgrounds, invented logos, or style drift"
+        ),
         main_prompt=(
             f"Create a square premium e-commerce hero image using the reference product. {identity} "
             "Use a clean white-to-very-light-gray studio background, soft realistic shadow, even lighting, "
@@ -197,8 +217,8 @@ def fallback_creative_plan(
                 + _PRESERVATION
             ),
             (
-                f"Create a vertical 4:5 product-variant presentation based only on colors and variants visible in the "
-                f"reference images. {identity} Arrange the variants in a clean, consistent catalog composition without text. "
+                f"Create a vertical 4:5 evidence-led catalog photograph for its assigned commercial job. {identity} "
+                "Use one clean, consistent full-frame composition without text, labels, swatches or invented variants. "
                 + slot_directives[3]
                 + " "
                 + _PRESERVATION
@@ -283,7 +303,11 @@ Hard constraints for every image prompt:
 {_PRESERVATION}
 
 Main image: square, clean near-white studio background, centered, no text. {_MAIN_PRESENTATION}
-Details: vertical 4:5; cover overall view, construction/detail, verified features, variants, and practical context.
+The visual_theme must be a Campaign Style Lock with no more than three colors, one lighting system,
+a 70-80 percent product-coverage target, and explicit no-drift rules.
+Details: vertical 4:5; assign exactly one primary commercial job to each slot. Cover overall silhouette,
+neckline or closure, sleeve/cuff/material detail, back/hem construction or only genuinely verified variants,
+and practical context. A perceptually different pose is not sufficient if it repeats another slot's job.
 Do not request measurements, care instructions, material performance, certification, price, discount or brand claims.
 
 Verified facts:
@@ -311,7 +335,7 @@ Bounded manager guidance:
     ]
     if any(visual_prompt_violations(prompt) for prompt in all_prompts):
         return fallback, "content-compliance-guard"
-    slot_directives = _detail_slot_directives(taxonomy)
+    slot_directives = _detail_slot_directives(taxonomy, facts)
     plan = CreativePlan(
         visual_theme=payload["visual_theme"].strip(),
         main_prompt=(

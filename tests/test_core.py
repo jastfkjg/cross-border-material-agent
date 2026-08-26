@@ -163,7 +163,7 @@ class VisualSelectionTests(unittest.TestCase):
                         logger=logging.getLogger("configuration-test"),
                     )
 
-    def test_detail_fallback_plan_exhausts_distinct_views_before_crop(self) -> None:
+    def test_detail_fallback_plan_balances_distinct_views_and_detail_crops(self) -> None:
         facts = load_product_facts(
             DATA / "product_info/product_5758364264251.json"
         )
@@ -182,12 +182,13 @@ class VisualSelectionTests(unittest.TestCase):
                 for index in range(1, 6)
             ]
 
-        first_four_urls = [urls[0] for urls, _ in planned[:4]]
-        self.assertEqual(len(set(first_four_urls)), 4)
-        self.assertNotEqual(first_four_urls[0], main_reference)
-        self.assertEqual(first_four_urls[-1], main_reference)
+        first_three_urls = [urls[0] for urls, _ in planned[:3]]
+        self.assertEqual(len(set(first_three_urls)), 3)
+        self.assertNotIn(main_reference, first_three_urls)
+        self.assertEqual(planned[3][0][0], main_reference)
+        self.assertEqual(planned[3][1], "upper")
         self.assertEqual(planned[4][0][0], main_reference)
-        self.assertEqual(planned[4][1], "upper")
+        self.assertEqual(planned[4][1], "lower")
 
     def test_detail_selector_rejects_hidden_critical_structure(self) -> None:
         class SelectorClient:
@@ -365,6 +366,68 @@ class FactAndTaxonomyTests(unittest.TestCase):
         shorts_plan = fallback_creative_plan(shorts, shorts_taxonomy)
         self.assertIn("waistband", shorts_plan.detail_prompts[1])
         self.assertIn("both legs", shorts_plan.video_prompt)
+
+    def test_storyboard_uses_construction_instead_of_invented_single_color_variants(self) -> None:
+        single_color = load_product_facts(
+            DATA / "product_info/product_5758364264251.json"
+        )
+        single_taxonomy = resolve_taxonomy(single_color, self.tree, self.attributes)
+        single_plan = fallback_creative_plan(single_color, single_taxonomy)
+        self.assertIn("back construction", single_plan.detail_prompts[3])
+        self.assertNotIn("color variants", single_plan.detail_prompts[3])
+        self.assertIn("Campaign Style Lock", single_plan.visual_theme)
+
+        multi_color = load_product_facts(
+            DATA / "product_info/product_3887087154767.json"
+        )
+        multi_taxonomy = resolve_taxonomy(multi_color, self.tree, self.attributes)
+        multi_plan = fallback_creative_plan(multi_color, multi_taxonomy)
+        self.assertIn("color variants", multi_plan.detail_prompts[3])
+
+    def test_fact_driven_copy_is_benefit_led_without_product_override(self) -> None:
+        facts = load_product_facts(
+            DATA / "product_info/product_5758364264251.json"
+        )
+        taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
+        plan = fallback_creative_plan(facts, taxonomy)
+        payload, _ = generate_copy_payload("en", facts, taxonomy, plan, None)
+        rendered = render_description("en", payload, facts, taxonomy)
+
+        self.assertEqual(
+            rendered.splitlines()[0],
+            "# Women's T-Shirt with a vintage floral print, a V-neck, long sleeves, and a relaxed fit",
+        )
+        self.assertIn("V-neckline creates a clean, open shape", rendered)
+        self.assertIn("Relaxed fit leaves room through the body", rendered)
+        self.assertIn(
+            "Seller size labels: XL, XXL, XXXL, 4XL, and 5XL", rendered
+        )
+        self.assertIn("Mapped from seller product title", rendered)
+        self.assertIn("Mapped from seller SKU attribute: Color", rendered)
+        self.assertEqual(
+            rendered.count("Body measurements are not provided"), 1
+        )
+
+    def test_category_titles_generalize_without_product_or_category_id_branches(self) -> None:
+        cases = {
+            "8688570444629": ("Boys' T-shirt with short sleeves", "Cotton"),
+            "9493156931235": ("Men's flat-front shorts", "Straight cut"),
+        }
+        for product_id, (title_fragment, feature_fragment) in cases.items():
+            with self.subTest(product_id=product_id):
+                facts = load_product_facts(
+                    DATA / f"product_info/product_{product_id}.json"
+                )
+                taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
+                plan = fallback_creative_plan(facts, taxonomy)
+                payload, _ = generate_copy_payload(
+                    "en", facts, taxonomy, plan, None
+                )
+                rendered = render_description("en", payload, facts, taxonomy)
+                self.assertIn(title_fragment, rendered.splitlines()[0])
+                self.assertIn(feature_fragment, rendered)
+                self.assertNotIn("Seller-declared source value", rendered)
+                self.assertNotIn("MenChildren", rendered)
 
 
 def _walk_objects(value):

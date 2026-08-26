@@ -13,7 +13,13 @@ from unittest import mock
 from PIL import Image
 
 from crossborder_agent.api import ApiConfig, ApiError, HttpJsonClient, QwenClient
-from crossborder_agent.media import MediaError, inspect_image_quality, normalize_image
+from crossborder_agent.media import (
+    MediaError,
+    create_catalog_video,
+    inspect_image_quality,
+    inspect_video,
+    normalize_image,
+)
 
 
 class _FaultHandler(BaseHTTPRequestHandler):
@@ -145,6 +151,24 @@ class ResilienceTests(unittest.TestCase):
                 (full_quality.difference_hash ^ upper_quality.difference_hash).bit_count(),
                 0,
             )
+
+    def test_catalog_video_with_distinct_stills_decodes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agent-catalog-video-") as temporary:
+            root = Path(temporary)
+            images = []
+            for index, color in enumerate(((190, 80, 60), (50, 120, 205))):
+                path = root / f"source-{index}.png"
+                image = Image.new("RGB", (900, 1200), color)
+                for offset in range(80, 820, 120):
+                    for y in range(150 + index * 20, 1050, 160):
+                        image.paste((245, 235, 210), (offset, y, offset + 55, y + 90))
+                image.save(path)
+                images.append(path)
+            destination = root / "catalog.mp4"
+            create_catalog_video(images, destination, duration=3)
+            result = inspect_video(destination)
+            self.assertTrue(result["decoded"])
+            self.assertGreater(result["size_bytes"], 1000)
 
     def test_failed_async_task_is_terminal(self) -> None:
         config = ApiConfig(

@@ -7,7 +7,7 @@ description: Plan, generate, and evaluate short product-commerce video for ident
 
 Create a short product-led video whose motion reveals useful shape or construction without changing the item. Keep color, pattern, silhouette, closures, pockets, trims, hem, and proportions stable in every frame.
 
-Prefer restrained camera arcs, push-ins, or a coherent sequence of perceptually distinct validated stills. Avoid product morphing, duplicate garments, flicker, abrupt framing, unstable hands or anatomy, occlusion, scene clutter, invented text, subtitles, watermarks, speech, or unreviewed music.
+Use a three-act storyboard: establish the complete silhouette, reveal two construction details, then return to a clear decision frame. Prefer restrained camera arcs, push-ins, or a coherent sequence of semantically distinct validated stills. Avoid product morphing, duplicate garments, flicker, abrupt framing, unstable hands or anatomy, occlusion, scene clutter, invented text, subtitles, watermarks, speech, or unreviewed music.
 
 Evaluate both physical playback and semantic/temporal usefulness. A playable file with a single static frame is specification-complete but visually weak; a dynamic clip with identity drift is unusable.
 

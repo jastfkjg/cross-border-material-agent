@@ -1268,8 +1268,11 @@ Allowed leaf candidates:
             if asset_name == "main_image.jpeg"
             else ("detail", "front", "side", "back", "variant", "lifestyle", "hero")
         )
+        detail_emergency = asset_name != "main_image.jpeg"
         ranked_primary = self._source_urls_for_use(
-            primary, use="fallback", preferred_roles=preferred
+            primary,
+            use="reference" if detail_emergency else "fallback",
+            preferred_roles=preferred,
         )
         usable_primary = [
             url
@@ -1279,15 +1282,25 @@ Allowed leaf candidates:
             and not self._source_image_observations.get(url, {}).get(
                 "has_overlay_text", False
             )
-            and not self._terminal_fallback_risks(
-                self._source_image_observations.get(url, {})
+            and (
+                not self._source_image_observations.get(url)
+                or (
+                    self._source_image_observations[url].get(
+                        "safe_for_generation_reference"
+                    )
+                    is True
+                    if detail_emergency
+                    else not self._terminal_fallback_risks(
+                        self._source_image_observations[url]
+                    )
+                )
             )
         ]
         if usable_primary:
             return usable_primary
         ranked_description = self._source_urls_for_use(
             facts.description_image_urls,
-            use="fallback",
+            use="reference" if detail_emergency else "fallback",
             preferred_roles=preferred,
         )
         usable_description = [
@@ -1298,8 +1311,18 @@ Allowed leaf candidates:
             and not self._source_image_observations.get(url, {}).get(
                 "has_overlay_text", False
             )
-            and not self._terminal_fallback_risks(
-                self._source_image_observations.get(url, {})
+            and (
+                not self._source_image_observations.get(url)
+                or (
+                    self._source_image_observations[url].get(
+                        "safe_for_generation_reference"
+                    )
+                    is True
+                    if detail_emergency
+                    else not self._terminal_fallback_risks(
+                        self._source_image_observations[url]
+                    )
+                )
             )
         ]
         return usable_description or ranked_primary or ranked_description
@@ -1313,9 +1336,10 @@ Allowed leaf candidates:
     ) -> tuple[list[str], str]:
         """Assign one deterministic, non-overlapping purpose to each detail slot.
 
-        Full source views are exhausted before bounded crops are introduced. The
-        hero reference is deliberately placed after alternate source views so the
-        first details do not immediately repeat the main image.
+        Use at most three alternate full views, then reserve the final two slots
+        for complementary upper/lower construction crops. This avoids filling a
+        five-image detail set with near-identical model poses merely because their
+        URLs differ. A verified back/side view is preferred before another front.
         """
 
         sources = self._fallback_source_urls(
@@ -1324,17 +1348,44 @@ Allowed leaf candidates:
         if not sources:
             return [], ""
         ordered = [url for url in sources if url != main_reference_url]
+        role_priority = {
+            "back": 0,
+            "side": 1,
+            "detail": 2,
+            "variant": 3,
+            "lifestyle": 4,
+            "front": 5,
+            "hero": 6,
+            "unknown": 7,
+        }
+        # Python's stable sort preserves seller order when observations are absent.
+        ordered = sorted(
+            enumerate(ordered),
+            key=lambda pair: (
+                role_priority.get(
+                    str(
+                        self._source_image_observations.get(pair[1], {}).get(
+                            "role", "unknown"
+                        )
+                    ),
+                    len(role_priority),
+                ),
+                pair[0],
+            ),
+        )
+        ordered = [url for _, url in ordered]
         if main_reference_url in sources:
             ordered.append(main_reference_url)
         if not ordered:
             ordered = list(sources)
 
-        if index <= len(ordered):
+        full_view_limit = min(len(ordered), 3)
+        if index <= full_view_limit:
             selected = ordered[index - 1]
             return [selected] + [url for url in ordered if url != selected], ""
 
         crop_sequence = ("upper", "lower", "left", "right", "center")
-        crop_index = index - len(ordered) - 1
+        crop_index = index - full_view_limit - 1
         focus_crop = crop_sequence[crop_index % len(crop_sequence)]
         selected = (
             main_reference_url
@@ -1876,6 +1927,11 @@ Allowed leaf candidates:
             ),
         )
         accepted_hashes: list[int] = []
+        # Match the delivery QA threshold, but protect verified back/side views:
+        # apparel with the same print can hash similarly even when that view adds
+        # genuinely different construction evidence. Repeated front/hero poses do
+        # not receive that exemption and are converted into useful detail crops.
+        automatic_repair_threshold = 10
         crop_sequence = ("upper", "lower", "left", "right", "center")
         for asset in ordered:
             try:
@@ -1885,8 +1941,16 @@ Allowed leaf candidates:
             if quality is None:
                 continue
             if all(
-                hash_distance(quality.difference_hash, seen) > 10
+                hash_distance(quality.difference_hash, seen)
+                > automatic_repair_threshold
                 for seen in accepted_hashes
+            ):
+                accepted_hashes.append(quality.difference_hash)
+                continue
+            observation = self._source_image_observations.get(asset.source_url, {})
+            if (
+                str(observation.get("role") or "") in {"back", "side"}
+                and asset.source_url != main_reference_url
             ):
                 accepted_hashes.append(quality.difference_hash)
                 continue
@@ -2007,8 +2071,8 @@ Allowed leaf candidates:
                     self.warnings.append(warning)
             elif not self._source_image_observations:
                 warning = (
-                    f"离线出图可用率暂按{estimate_basis}估算为 {usable_rate:.0%}；"
-                    "正式交付仍需模型语义门禁确认背景、人物道具与商品身份"
+                    f"离线图片物理规格与感知差异检查通过 {usable}/{len(image_assets)}；"
+                    "语义可用率未评估，正式交付仍需确认背景、人物道具、分镜任务与商品身份"
                 )
                 if warning not in self.warnings:
                     self.warnings.append(warning)
@@ -2046,6 +2110,12 @@ Allowed leaf candidates:
         failed_calls = [
             item for item in state.api_calls if str(item.get("status") or "") != "ok"
         ]
+        execution_mode = "在线模型生成与评估" if self.client else "显式离线确定性降级"
+        semantic_gate_note = (
+            f"本次完成 {len(state.agent_evaluations)} 轮全局多模态评估。"
+            if state.agent_evaluations
+            else "本次未执行全局多模态语义评估；仅通过确定性事实、规格与感知差异门禁。"
+        )
         raw_agent_plan = state.agent_plan if isinstance(state.agent_plan, dict) else {}
         agent_plan_controls = {
             "risk_priorities": [
@@ -2109,6 +2179,8 @@ Allowed leaf candidates:
             "- 韩文按 ko-KR 自然购物语气编写，避免机械直译和未经证实的韩国尺码映射。",
             "- 葡萄牙文按 pt-BR 编写，避免欧洲葡语表达和未经证实的 P/M/G 映射。",
             "- 三份文案共享同一个不可变商品 ID、URL、叶子类目、属性和完整 SKU 表。",
+            "- 买家文案按 Feature → 可见结构优势 → 保守购买价值组织；任一步缺少事实或像素证据时停止延伸。",
+            "- 买家段落与机器字段分层：前半部分负责自然销售表达，后半部分保留精确 ID、SKU 与来源类型。",
             "- 卖家提供的体重范围只按完全匹配的尺码标签写入对应 SKU，并同时展示 kg/lb，不推导地区尺码。",
             "- 可辨识的源尺码表先由视觉模型转录，再按SKU尺码代码、来源图角色和数值范围进行确定性校验；"
             "英文显示 cm/in 与 kg/lb，韩文和巴西葡萄牙文保留 cm/kg。",
@@ -2116,12 +2188,14 @@ Allowed leaf candidates:
             "",
             "## 5. 图片与视频生成策略",
             "",
-            "- 视觉主题：中性背景、商品优先、跨市场一致的电商摄影。",
+            f"- 本次执行模式：{execution_mode}。",
+            f"- Campaign Style Lock：{state.creative_plan.visual_theme}",
             f"- 创意计划来源：{plan_model}",
             f"- 模型配置：{json.dumps(model_summary, ensure_ascii=False)}",
             "- 主图采用方形浅色棚拍构图；优先生成三个候选，再按身份、结构、颜色、完整度、干净背景、单品覆盖和瑕疵自动选优。",
             "- 主图回退源图须优先满足无人物、无关道具、单一完整商品和干净中性背景；没有合格源图时明确记录质量降级。",
-            "- 五张详情图优先覆盖整体展示、领口/门襟、袖口/垂感、真实变体和使用情境；若源详情图存在可核验尺码表，"
+            "- 五张详情图各承担唯一商业任务：整体轮廓、领口/门襟、袖口/垂感、背面/下摆或真实变体、使用情境；"
+            "感知哈希不同但任务重复的图片仍视为分镜失败。若源详情图存在可核验尺码表，"
             "第5张改为确定性重绘的干净尺码图。",
             "- 高风险的变体图与穿着场景各生成两个候选，并按商品身份、颜色、图案、结构、人体与分镜匹配自动选优。",
             "- 视频以最终主图或其源 URL 为首帧，按上装、下装、连衣裙或童装使用不同结构保护镜头；默认移除未审核音轨。",
@@ -2138,6 +2212,7 @@ Allowed leaf candidates:
             f"- Agent 控制参数：{json.dumps(agent_plan_controls, ensure_ascii=False)}",
             f"- 已完成全局评估轮次：{len(state.agent_evaluations)}。",
             f"- 已执行定向修复工具调用：{len(state.agent_actions)}。",
+            f"- {semantic_gate_note}",
             "",
             "## 7. 合规与质检",
             "",
