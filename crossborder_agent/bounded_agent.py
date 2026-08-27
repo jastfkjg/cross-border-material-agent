@@ -53,6 +53,8 @@ class BoundedDeliveryAgent:
         taxonomy: TaxonomyResult,
         vision: dict[str, Any],
         tools: BoundedToolRegistry,
+        *,
+        use_model: bool = True,
     ) -> dict[str, Any]:
         default = {
             "creative_direction": "Source-faithful international marketplace presentation",
@@ -73,9 +75,9 @@ class BoundedDeliveryAgent:
             "video_strategy": "stable product-led short presentation",
             "max_repair_rounds": 1,
             "max_actions_per_round": 3,
-            "minimum_weighted_score": 82,
+            "minimum_weighted_score": 90,
         }
-        if self.client is None:
+        if self.client is None or not use_model:
             return default
         system = (
             "You are the manager of a bounded cross-border commerce material agent. "
@@ -101,7 +103,7 @@ Return exactly these keys:
 - video_strategy: concise English shot and motion strategy
 - max_repair_rounds: integer 1 or 2
 - max_actions_per_round: integer 1 through 4
-- minimum_weighted_score: integer 70 through 95
+- minimum_weighted_score: integer 90 through 95
 
 Verified product facts:
 {json.dumps(facts.compact_dict(), ensure_ascii=False)}
@@ -152,7 +154,7 @@ Available repair tools for later rounds:
         for key, minimum, maximum in (
             ("max_repair_rounds", 1, 2),
             ("max_actions_per_round", 1, 4),
-            ("minimum_weighted_score", 70, 95),
+            ("minimum_weighted_score", 90, 95),
         ):
             value = payload.get(key)
             if isinstance(value, int):
@@ -211,7 +213,7 @@ Return exactly these keys:
 Only choose tool/target combinations from the catalog. Each instruction must be an actionable,
 artifact-specific correction prompt grounded in the evidence. Prefer revising the weakest high-weight
 dimension. Do not request cosmetic changes that risk factual identity. Set ready_for_delivery true only
-when the weighted score is at least {agent_plan.get('minimum_weighted_score', 82)}, there are no blocker
+when the weighted score is at least {agent_plan.get('minimum_weighted_score', 90)}, there are no blocker
 issues, and A1/A2/A5 have no major issue.
 Treat a deterministic or validation-error copy source as a quality degradation: inspect its rendered
 shopper preview and request revise_localized_copy when it is generic, process-oriented or misses a

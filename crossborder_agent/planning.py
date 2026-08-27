@@ -12,139 +12,187 @@ from .models import CreativePlan, ProductFacts, TaxonomyResult
 
 _PRESERVATION = (
     "Preserve the exact product identity, silhouette, construction, pattern, trims and visible color from the "
-    "reference images. Do not add or remove pockets, buttons, prints, logos, fasteners, sleeves or accessories. "
+    "reference images. Do not add, remove or alter any visible product component, construction detail, fastening, "
+    "surface design or included accessory. "
     "Do not invent text, measurements, materials, certifications or brand marks. No watermark."
 )
 
-_BASE_DETAIL_SLOT_DIRECTIVES = (
-    "This is detail slot 1: show a complete front three-quarter product presentation on a hanger or invisible form "
-    "with the uncluttered, practical editorial styling familiar to US marketplace shoppers. Use a warm neutral wall "
-    "and soft daylight; it must be visibly different from the square white-background hero.",
-    "This is detail slot 2: make a tight but readable upper-garment close-up centered on the verified collar, "
-    "front opening and visible fastening construction. Use restrained Korean commerce styling: pale neutral tones, "
-    "precise spacing and soft diffused light. Do not add Hangul or show an isolated generic fabric swatch.",
-    "This is detail slot 3: make a distinct close-up of the verified sleeve, cuff, hem and natural drape while "
-    "keeping enough of the product visible to identify it. Use warm natural daylight and a subtle contemporary "
-    "Brazilian marketplace mood without flags, landmarks, stereotypes or written Portuguese.",
-    "This is detail slot 4: create a clean catalog lineup using only color variants visibly present in the supplied "
-    "references. Show two or three complete products with identical construction and no labels or swatches.",
-    "This is detail slot 5: show one adult wearer in a restrained everyday styling context, with the product fully "
-    "visible and unobstructed from collar through hem. Use culturally neutral, inclusive styling that reads naturally "
-    "across the US, South Korea and Brazil. Keep anatomy natural and do not add accessories to the product.",
-)
+
+def _is_children_product(facts: ProductFacts, taxonomy: TaxonomyResult) -> bool:
+    """Use category meaning, not benchmark category IDs, for the wearer safety rule."""
+
+    category_text = " ".join(
+        (
+            facts.source_category_name,
+            taxonomy.category.name,
+            taxonomy.category.path,
+        )
+    ).casefold()
+    return any(
+        marker in category_text
+        for marker in ("child", "kid", "boy", "girl", "baby", "infant", "童", "婴")
+    )
 
 
-def _product_family(taxonomy: TaxonomyResult) -> str:
-    category_id = taxonomy.category.category_id
-    if category_id in {"30341", "30335", "39153"}:
-        return "bottom"
-    if category_id in {"30843", "29553"}:
-        return "children"
-    if category_id == "39107":
-        return "dress"
-    return "top"
+def _source_supports_wearer(vision: dict[str, Any] | None) -> bool:
+    images = vision.get("source_images") if isinstance(vision, dict) else None
+    return bool(
+        isinstance(images, list)
+        and any(isinstance(item, dict) and item.get("has_person") is True for item in images)
+    )
 
 
-def _main_presentation(taxonomy: TaxonomyResult) -> str:
+def _verified_variants(
+    facts: ProductFacts | None, vision: dict[str, Any] | None
+) -> bool:
+    """Require seller options and pixel evidence before asking for a variant lineup."""
+
+    seller_colors = {
+        item.value.strip().casefold()
+        for item in (facts.attributes if facts is not None else [])
+        if "颜色" in item.name or "color" in item.name.casefold()
+        if item.value.strip()
+    }
+    if len(seller_colors) < 2 or not isinstance(vision, dict):
+        return False
+    observed = {
+        str(value).strip().casefold()
+        for value in vision.get("visible_colors", [])
+        if str(value).strip()
+    }
+    images = vision.get("source_images")
+    if isinstance(images, list):
+        observed.update(
+            str(item.get("dominant_color") or "").strip().casefold()
+            for item in images
+            if isinstance(item, dict)
+            and item.get("role") in {"variant", "hero", "front", "back", "side"}
+            and str(item.get("dominant_color") or "").strip()
+        )
+    return len(observed) >= 2
+
+
+def _observed_feature_context(vision: dict[str, Any] | None) -> str:
+    """Expose only concise visual evidence; never manufacture category-specific parts."""
+
+    if not isinstance(vision, dict):
+        return ""
+    features: list[str] = []
+    for key in ("visible_design_features", "preservation_constraints"):
+        values = vision.get(key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            clean = " ".join(str(value).split())[:180]
+            if clean and clean not in features:
+                features.append(clean)
+            if len(features) >= 8:
+                break
+    return "; ".join(features)
+
+
+def _main_presentation(
+    facts: ProductFacts, taxonomy: TaxonomyResult, vision: dict[str, Any] | None
+) -> str:
     common = (
         "Show one sellable product in one verified colorway as the single dominant subject. The complete garment "
-        "must be visible, including collar or waistband, both sleeves or legs, cuffs and hem. No colorway lineup, "
+        "must be visible from its highest to lowest product edge, with every source-visible section unobstructed. "
+        "No colorway lineup, "
         "duplicate garment, inset, split screen, montage or collage. "
     )
-    if _product_family(taxonomy) == "children":
+    if _is_children_product(facts, taxonomy):
         return common + (
             "Use a product-only studio presentation such as a clean flat lay, hanger or invisible form; do not "
             "add a child, adult, hands, toys or character props."
         )
+    if _source_supports_wearer(vision):
+        return common + (
+            "Prefer a product-only flat lay, hanger or invisible-form presentation. A single naturally proportioned, "
+            "fully clothed adult wearer is optional because a trusted source already shows a wearer; keep the product "
+            "unobstructed and the background clean."
+        )
     return common + (
-        "Prefer a product-only flat lay, hanger or invisible-form presentation. A single naturally proportioned, "
-        "fully clothed adult wearer is optional only when a trusted source reference already shows a wearer; keep "
-        "the garment unobstructed and the background clean."
+        "Use a product-only flat lay, hanger or invisible-form presentation; do not introduce a wearer that is absent "
+        "from the inspected source references."
     )
 
 
 def _detail_slot_specs(
-    taxonomy: TaxonomyResult, facts: ProductFacts | None = None
+    taxonomy: TaxonomyResult,
+    facts: ProductFacts | None = None,
+    vision: dict[str, Any] | None = None,
 ) -> tuple[tuple[str, str], ...]:
-    family = _product_family(taxonomy)
-    category_id = taxonomy.category.category_id
-    wearer = (
-        "one adult man"
-        if category_id in {"30341", "30335", "30408", "30471"}
-        else "one adult woman"
+    evidence = _observed_feature_context(vision)
+    evidence_clause = (
+        f" Inspected source evidence includes: {evidence}."
+        if evidence
+        else " Use only construction and surface details directly visible in the inspected references."
     )
-    slot_1 = _BASE_DETAIL_SLOT_DIRECTIVES[0]
-    verified_colors = {
-        item.value
-        for item in (facts.attributes if facts is not None else [])
-        if item.name == "颜色" and item.value
-    }
+    variants = _verified_variants(facts, vision)
+    # The taxonomy value is intentionally not used to choose construction details.  It is
+    # still consulted only for the safety-sensitive wearer decision below.
+    children = bool(facts and _is_children_product(facts, taxonomy))
+    wearer_supported = _source_supports_wearer(vision) and not children
+    slot_4_role = "verified_variants" if variants else "verified_alternate_view"
     slot_4 = (
-        _BASE_DETAIL_SLOT_DIRECTIVES[3]
-        if len(verified_colors) > 1
-        else "This is detail slot 4: show the back construction and print continuity from shoulder to hem in one "
-        "clean, readable view. This slot is evidence-led, not a second front pose or a synthetic color lineup. "
-        "Do not invent variants, labels, graphics or construction details."
+        "This is detail slot 4: create a clean catalog comparison using only distinct variants directly visible in "
+        "the inspected references. Keep construction identical and do not add labels or swatches."
+        if variants
+        else "This is detail slot 4: show a source-supported alternate viewpoint or a third, non-redundant visible "
+        "detail. Do not assume a back view, color variant, print continuation or hidden construction."
     )
-    if family == "bottom":
-        return (
-            ("overall_silhouette", slot_1),
-            ("waistband_closure_pockets", "This is detail slot 2: make a tight but readable close-up centered on the verified waistband, "
-            "front closure and pocket construction. Use restrained Korean commerce styling with pale neutral tones, "
-            "precise spacing and diffused light. Do not invent a fly, drawstring, belt loop or pocket."),
-            ("leg_seam_hem", "This is detail slot 3: make a distinct close-up of the verified leg shape, side seam and hem, "
-            "while keeping enough of the product visible to identify it. Use warm natural daylight and a subtle "
-            "contemporary Brazilian marketplace mood without flags, landmarks, stereotypes or written text."),
-            (("verified_variants" if len(verified_colors) > 1 else "back_construction"), slot_4),
-            ("wearer_fit_context", f"This is detail slot 5: show {wearer} in a restrained everyday styling context, with the waistband, "
-            "both legs and hem visible and unobstructed. Use inclusive cross-market styling appropriate to the US, "
-            "South Korea and Brazil. Keep anatomy, body proportions and garment length natural; do not reshape the body."),
-        )
-    if family == "children":
-        return (
-            ("overall_silhouette", slot_1),
-            ("neckline_closure", _BASE_DETAIL_SLOT_DIRECTIVES[1]),
-            ("sleeve_cuff_hem", _BASE_DETAIL_SLOT_DIRECTIVES[2]),
-            (("verified_variants" if len(verified_colors) > 1 else "back_construction"), slot_4),
-            ("product_styling_context", "This is detail slot 5: create a product-only, age-appropriate outfit flat lay. Keep the item complete "
-            "and unobstructed, use only neutral unbranded props with inclusive cross-market styling, and do not depict "
-            "a child or adult wearer."),
-        )
-    if family == "dress":
-        return (
-            ("overall_silhouette", slot_1),
-            ("neckline_bodice_closure", "This is detail slot 2: make a tight but readable close-up centered on the verified neckline, bodice "
-            "and closure construction. Use restrained Korean commerce styling with pale neutral tones, precise spacing "
-            "and diffused light. Do not invent buttons, a zipper, belt or trim."),
-            ("waist_drape_hem", "This is detail slot 3: show the verified waist transition, skirt drape and hem while keeping enough "
-            "of the dress visible to identify its silhouette and length. Use warm natural daylight and a subtle "
-            "contemporary Brazilian marketplace mood without flags, landmarks, stereotypes or written text."),
-            (("verified_variants" if len(verified_colors) > 1 else "back_construction"), slot_4),
-            ("wearer_fit_context", _BASE_DETAIL_SLOT_DIRECTIVES[4].replace("one adult wearer", wearer)),
-        )
+    context_role = "verified_use_context" if wearer_supported else "product_only_context"
+    context = (
+        "This is detail slot 5: show one naturally proportioned, fully clothed adult in the kind of restrained use "
+        "context already supported by a trusted source. Keep the complete product unobstructed and do not alter fit."
+        if wearer_supported
+        else "This is detail slot 5: create a product-only practical context using a clean flat lay, hanger or "
+        "invisible form. Do not introduce a wearer, body, hand or product accessory absent from trusted references."
+    )
     return (
-        ("overall_silhouette", _BASE_DETAIL_SLOT_DIRECTIVES[0]),
-        ("neckline_closure", _BASE_DETAIL_SLOT_DIRECTIVES[1]),
-        ("sleeve_cuff_hem", _BASE_DETAIL_SLOT_DIRECTIVES[2]),
-        (("verified_variants" if len(verified_colors) > 1 else "back_construction"), slot_4),
-        ("wearer_fit_context", _BASE_DETAIL_SLOT_DIRECTIVES[4].replace("one adult wearer", wearer)),
+        (
+            "complete_product",
+            "This is detail slot 1: show one complete three-quarter product presentation, visibly different from "
+            "the square hero, with every source-visible section readable and unobstructed.",
+        ),
+        (
+            "primary_verified_detail",
+            "This is detail slot 2: make a tight but readable close-up of the most category-defining construction or "
+            "surface feature that is directly visible in the inspected references. Do not name or add an unseen part."
+            + evidence_clause,
+        ),
+        (
+            "secondary_verified_detail",
+            "This is detail slot 3: show a different source-visible construction, edge, drape, texture or surface-design "
+            "feature while retaining enough product context for identification. It must not repeat slot 2."
+            + evidence_clause,
+        ),
+        (slot_4_role, slot_4),
+        (context_role, context),
     )
 
 
 def _detail_slot_directives(
-    taxonomy: TaxonomyResult, facts: ProductFacts | None = None
+    taxonomy: TaxonomyResult,
+    facts: ProductFacts | None = None,
+    vision: dict[str, Any] | None = None,
 ) -> tuple[str, ...]:
-    return tuple(directive for _, directive in _detail_slot_specs(taxonomy, facts))
+    return tuple(
+        directive for _, directive in _detail_slot_specs(taxonomy, facts, vision)
+    )
 
 
-def _video_guard(taxonomy: TaxonomyResult) -> str:
-    family = _product_family(taxonomy)
-    focus = {
-        "bottom": "Keep the waistband, closure, pockets, both legs and hem stable and fully visible.",
-        "children": "Use a product-only presentation; do not add a child, adult, hands, toys or character graphics.",
-        "dress": "Keep the neckline, bodice, waist transition, skirt silhouette and hem stable.",
-        "top": "Keep the collar or neckline, front opening, pockets, both sleeves, cuffs and hem stable.",
-    }[family]
+def _video_guard(
+    facts: ProductFacts, taxonomy: TaxonomyResult, vision: dict[str, Any] | None
+) -> str:
+    evidence = _observed_feature_context(vision)
+    focus = (
+        "Use a product-only presentation; do not add a child, adult, hands, toys or character graphics."
+        if _is_children_product(facts, taxonomy)
+        else "Keep every source-visible product section, edge and construction detail stable and unobstructed."
+    )
+    if evidence:
+        focus += f" Preserve these inspected visual anchors: {evidence}."
     return (
         "Use one continuous slow 10-to-15-degree camera arc with a subtle push-in; no scene cuts. "
         + focus
@@ -153,49 +201,53 @@ def _video_guard(taxonomy: TaxonomyResult) -> str:
     )
 
 
-_VISUAL_ATTRIBUTE_MARKERS = (
-    "产品类别",
-    "类别",
-    "款式",
-    "图案",
-    "版型",
-    "领型",
-    "袖长",
-    "袖型",
-    "衣长",
-    "门襟",
-    "裤型",
-    "裤长",
-    "腰型",
-    "裙型",
-    "裙长",
-    "颜色",
-)
+def _planning_vision_context(vision: dict[str, Any]) -> dict[str, Any]:
+    """Keep full-scan evidence useful without sending every per-image flag to planning."""
 
-
-def _visual_fact_summary(facts: ProductFacts) -> str:
-    """Keep visual prompts focused on appearance rather than invisible claims."""
-
-    selected: list[str] = []
-    for item in facts.attributes:
-        if any(marker in item.name for marker in _VISUAL_ATTRIBUTE_MARKERS):
-            fact = f"{item.name}: {item.value}"
-            if fact not in selected:
-                selected.append(fact)
-        if len(selected) == 12:
-            break
-    return ", ".join(selected)
+    compact = {
+        key: vision.get(key)
+        for key in (
+            "product_type",
+            "visible_colors",
+            "visible_design_features",
+            "image_quality_notes",
+            "prohibited_or_risky_visuals",
+            "preservation_constraints",
+        )
+        if vision.get(key)
+    }
+    images = vision.get("source_images")
+    if isinstance(images, list):
+        roles: dict[str, int] = {}
+        for item in images:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "unknown")
+            roles[role] = roles.get(role, 0) + 1
+        compact["scan_summary"] = {
+            "total_images": len(images),
+            "inspected_images": sum(
+                isinstance(item, dict) and item.get("inspection_complete") is True
+                for item in images
+            ),
+            "roles": roles,
+            "wearer_reference_present": _source_supports_wearer(vision),
+            "legible_size_rows": len(vision.get("size_chart_rows") or []),
+        }
+    return compact
 
 
 def fallback_creative_plan(
-    facts: ProductFacts, taxonomy: TaxonomyResult
+    facts: ProductFacts,
+    taxonomy: TaxonomyResult,
+    vision: dict[str, Any] | None = None,
 ) -> CreativePlan:
-    verified = _visual_fact_summary(facts)
     identity = f"Product type: {facts.source_category_name}."
-    if verified:
-        identity += f" Verified visible source attributes: {verified}."
+    observed = _observed_feature_context(vision)
+    if observed:
+        identity += f" Inspected visible source evidence: {observed}."
     identity += " When text facts and reference pixels appear to conflict, preserve the reference product pixels."
-    slot_specs = _detail_slot_specs(taxonomy, facts)
+    slot_specs = _detail_slot_specs(taxonomy, facts, vision)
     slot_directives = tuple(item[1] for item in slot_specs)
     return CreativePlan(
         visual_theme=(
@@ -208,7 +260,7 @@ def fallback_creative_plan(
             "Use a clean white-to-very-light-gray studio background, soft realistic shadow, even lighting, "
             "accurate color, centered composition, and safe margins with the product visually dominant. "
             "No promotional text, badges, borders, collage or extra props. "
-            + _main_presentation(taxonomy)
+            + _main_presentation(facts, taxonomy, vision)
             + " "
             + _PRESERVATION
         ),
@@ -251,7 +303,7 @@ def fallback_creative_plan(
         ],
         video_prompt=(
             "An 8-second premium e-commerce product video based on the first frame. Clean neutral commercial lighting. "
-            + _video_guard(taxonomy)
+            + _video_guard(facts, taxonomy, vision)
         ),
         market_angles={
             "en": "clear specifications and versatile styling",
@@ -299,7 +351,7 @@ def create_creative_plan(
     agent_guidance: dict[str, Any] | None = None,
     skill_instructions: str = "",
 ) -> tuple[CreativePlan, str]:
-    fallback = fallback_creative_plan(facts, taxonomy)
+    fallback = fallback_creative_plan(facts, taxonomy, vision)
     if client is None:
         return fallback, "deterministic-fallback"
 
@@ -321,19 +373,20 @@ Return JSON with exactly these keys:
 Hard constraints for every image prompt:
 {_PRESERVATION}
 
-Main image: square, clean near-white studio background, centered, no text. {_main_presentation(taxonomy)}
+Main image: square, clean near-white studio background, centered, no text. {_main_presentation(facts, taxonomy, vision)}
 The visual_theme must define a restrained campaign direction with explicit product-identity no-drift
 rules. It may accommodate every seller-verified product color. Palette, background, lighting, framing
 and product coverage may vary by commercial role and target-market context; do not impose one global
 color count, background system or coverage percentage.
-Details: vertical 4:5; assign exactly one primary commercial job to each slot. Cover overall silhouette,
-neckline or closure, sleeve/cuff/material detail, back/hem construction or only genuinely verified variants,
-and practical context. A perceptually different pose is not sufficient if it repeats another slot's job.
+Details: vertical 4:5; assign exactly one primary commercial job to each slot. Cover the complete product,
+two distinct source-visible details, one verified alternate view or genuinely verified variant comparison,
+and a source-supported practical context. Never name a garment part merely because it is common for the category.
+A perceptually different pose is not sufficient if it repeats another slot's job.
 Do not request measurements, care instructions, material performance, certification, price, discount or brand claims.
 
 The five slot jobs are fixed by code and cannot be reordered or redefined. Your detail_prompts are optional
 styling proposals only; they will not replace the canonical storyboard contract:
-{json.dumps([{"slot": index + 1, "role": role, "directive": directive} for index, (role, directive) in enumerate(_detail_slot_specs(taxonomy, facts))], ensure_ascii=False)}
+{json.dumps([{"slot": index + 1, "role": role, "directive": directive} for index, (role, directive) in enumerate(_detail_slot_specs(taxonomy, facts, vision))], ensure_ascii=False)}
 
 Verified facts:
 {json.dumps(facts.compact_dict(), ensure_ascii=False)}
@@ -342,7 +395,7 @@ Resolved category:
 {json.dumps({"id": taxonomy.category.category_id, "name": taxonomy.category.name, "path": taxonomy.category.path}, ensure_ascii=False)}
 
 Conservative source-image observations:
-{json.dumps(vision, ensure_ascii=False)}
+{json.dumps(_planning_vision_context(vision), ensure_ascii=False)}
 
 Bounded manager guidance:
 {json.dumps(agent_guidance or {}, ensure_ascii=False)}
@@ -372,7 +425,7 @@ Bounded manager guidance:
         main_prompt=(
             payload["main_prompt"].strip()
             + " "
-            + _main_presentation(taxonomy)
+            + _main_presentation(facts, taxonomy, vision)
             + " "
             + _PRESERVATION
         ),
@@ -383,7 +436,11 @@ Bounded manager guidance:
             + " The assigned slot has exactly one commercial job; do not add panels, insets, grids, or a second view."
             for item in canonical
         ],
-        video_prompt=payload["video_prompt"].strip() + " " + _video_guard(taxonomy),
+        video_prompt=(
+            payload["video_prompt"].strip()
+            + " "
+            + _video_guard(facts, taxonomy, vision)
+        ),
         market_angles={
             key: str(value) for key, value in payload["market_angles"].items()
         },

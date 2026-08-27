@@ -47,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="write structured, redacted TRACE_JSON events to agent_debug.jsonl (local diagnostics)",
     )
     parser.add_argument(
+        "--run-profile",
+        choices=("full", "fast"),
+        default=os.environ.get("AGENT_RUN_PROFILE", "full").strip().lower() or "full",
+        help="full keeps submission behavior; fast reduces model calls for local iteration",
+    )
+    parser.add_argument(
         "--timeout-seconds",
         type=int,
         default=29 * 60,
@@ -83,10 +89,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.timeout_seconds < 60:
             raise InputError("--timeout-seconds 不能小于 60")
         logger.info(
-            "启动 Agent: input=%s output=%s offline=%s",
+            "启动 Agent: input=%s output=%s offline=%s profile=%s",
             input_dir,
             output_dir,
             args.offline,
+            args.run_profile,
         )
         pipeline = Pipeline(
             input_dir=input_dir,
@@ -96,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout_seconds=args.timeout_seconds,
             offline=args.offline,
             debug=debug,
+            run_profile=args.run_profile,
         )
         pipeline.run()
         return 0

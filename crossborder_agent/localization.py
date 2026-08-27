@@ -1875,6 +1875,7 @@ def generate_copy_payload(
     agent_guidance: str = "",
     revision_feedback: str = "",
     skill_instructions: str = "",
+    audit_valid_draft: bool = True,
 ) -> tuple[dict[str, Any], str]:
     fallback = _fallback_payload(language, facts, taxonomy)
     if client is None:
@@ -1972,6 +1973,26 @@ source values will not be published.
         return fallback, "deterministic-fallback"
     if trace:
         trace.emit("copy.draft", language=language, payload=draft)
+
+    if not audit_valid_draft:
+        fast_payload = _normalize_auxiliary_fields(draft, fallback)
+        fast_error = _payload_validation_error(
+            language,
+            fast_payload,
+            facts,
+            taxonomy,
+            set(fallback["media_descriptions"]),
+            set(fallback["localized_terms"]),
+        )
+        if trace:
+            trace.emit(
+                "copy.validation",
+                language=language,
+                stage="fast-draft",
+                validation_error=fast_error,
+            )
+        if not fast_error:
+            return fast_payload, f"{client.config.chat_model}-validated-draft-fast"
 
     audit_system = f"""
 You are a native {locale["locale"]} factual copy auditor. Return JSON only.

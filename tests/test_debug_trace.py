@@ -18,6 +18,21 @@ class DebugTraceTests(unittest.TestCase):
         self.assertFalse(parser.parse_args([]).debug)
         self.assertTrue(parser.parse_args(["--debug"]).debug)
 
+    def test_run_profile_defaults_to_full_but_honors_local_environment(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(build_parser().parse_args([]).run_profile, "full")
+        with mock.patch.dict(
+            os.environ, {"AGENT_RUN_PROFILE": "fast"}, clear=True
+        ):
+            self.assertEqual(build_parser().parse_args([]).run_profile, "fast")
+
+    def test_local_runner_defaults_to_fast_profile(self) -> None:
+        script = (
+            Path(__file__).resolve().parents[1] / "run_agent_local.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn('RUN_PROFILE="${RUN_PROFILE:-fast}"', script)
+        self.assertIn('--run-profile "$RUN_PROFILE"', script)
+
     def test_trace_is_disabled_by_default(self) -> None:
         logger = logging.getLogger("debug-disabled-test")
         with self.assertLogs(logger, level="INFO") as captured:

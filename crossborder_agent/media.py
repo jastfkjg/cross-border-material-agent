@@ -170,8 +170,8 @@ def normalize_image(
     """Normalize an image to an RGB JPEG.
 
     Full-view assets preserve the entire source. Deterministic detail fallbacks may
-    request one of a small set of bounded crops so a limited source set can still
-    provide useful neckline, hem, or side-detail coverage without inventing pixels.
+    request one of a small set of bounded spatial crops so a limited source set can
+    still provide useful source-visible detail coverage without inventing pixels.
     """
 
     destination.parent.mkdir(parents=True, exist_ok=True)

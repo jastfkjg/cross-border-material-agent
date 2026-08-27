@@ -581,6 +581,12 @@ class QwenClient:
         *,
         skill_instructions: str = "",
     ) -> dict[str, Any]:
+        if not image_urls:
+            raise ValueError("source-image analysis requires at least one image")
+        if len(image_urls) > 12:
+            raise ValueError(
+                "source-image analysis accepts at most 12 images per call; batch in the pipeline"
+            )
         system = (
             "You are a conservative e-commerce visual inspector. Return JSON only. "
             "Never infer fabric composition, performance, measurements, brand authorization, or care instructions "
@@ -603,7 +609,7 @@ Return a JSON object with keys:
   - length_cm: numeric string in centimeters, or empty string when not shown
   - weight_guidance: exact visible seller guidance including its unit, or empty string
   - source_image_index: zero-based index of the supplied image containing the row
-- images: an array of exactly {len(image_urls[:12])} objects, one for every supplied image in input order.
+- images: an array of exactly {len(image_urls)} objects, one for every supplied image in input order.
   Every object must contain:
   - index: zero-based integer
   - role: one of hero, front, back, side, detail, variant, size_chart, lifestyle, packaging, unknown
@@ -655,7 +661,7 @@ Verified source facts:
         return self.chat_json(
             system,
             prompt,
-            images=image_urls[:12],
+            images=image_urls,
             model=self.visual_review_model,
             fallback_model=self.visual_review_fallback_model,
         )
@@ -683,7 +689,7 @@ Return JSON with these top-level keys:
 - index: zero-based integer
 - usable: boolean
 - identity_consistent: boolean
-- construction_consistent: boolean (check visible collar, sleeves, pockets, buttons/fasteners, hem and pattern)
+- construction_consistent: boolean (compare every component, edge, fastening, trim and surface design actually visible in the sources)
 - color_consistent: boolean
 - pattern_consistent: boolean
 - slot_match: boolean (whether this asset fulfills its intended storyboard purpose)
@@ -744,8 +750,9 @@ Return JSON with:
   anatomy_natural, unwanted_text, unwanted_brand_or_logo, major_artifacts, product_coverage
   (high/medium/low), score (0-100), and reason.
 
-Explicitly inspect visible product type, silhouette, collar/neckline, sleeve or leg length,
-pockets, button/fastener count where visible, hem, pattern and any product logo.
+Explicitly inspect product type, complete silhouette, every source-visible component and edge,
+fastening or trim count where visible, surface design and any product logo. Do not assume a component
+merely because it is common for the resolved category.
 Reject any candidate that reproduces a background/styling brand, character, store text or logo
 that is not intrinsic to the sellable product.
 Prefer a product-only hero. For adult apparel, a single fully clothed adult wearer is acceptable only
@@ -798,9 +805,9 @@ Evaluate critical_structure_unambiguous as a quality signal relative to the inte
 purpose, not as an automatic rejection. A close-up does not need to show the complete garment: it must
 clearly show its assigned local feature plus enough identity anchors to connect it to the verified
 product. Reject only when the crop causes actual product-identity drift or fails the assigned slot.
-Full-view, variant and wearer slots should keep the category-defining structure recognizable. For a variant lineup, each item must remain
-unambiguously the same product; folded long sleeves must still be visibly present rather than making
-the item appear sleeveless.
+Full-view, variant and wearer slots should keep every source-visible category-defining section recognizable.
+For a variant lineup, each item must remain unambiguously the same product; a folded, occluded or cropped
+source-visible component must not make the candidate appear to have different construction.
 For a wearer scene, reject malformed hands, limbs, faces, garment fit or body proportions.
 Every non-variant detail must use one coherent full-frame composition. Mark unexpected_collage true
 for a montage, grid, split screen, inset, repeated panel, or a hybrid close-up/full-product layout.

@@ -77,8 +77,8 @@ _MAIN_NEGATIVE_PROMPT = (
 )
 
 _VIDEO_NEGATIVE_PROMPT = (
-    "product morphing, changed garment construction, changed color, changed pattern, added pockets, "
-    "added buttons, duplicate product, extra garment, warped fabric, flicker, scene cut, camera shake, "
+    "product morphing, changed product construction, changed color, changed pattern, added or removed components, "
+    "changed fastenings or trims, duplicate product, extra product, warped material, flicker, scene cut, camera shake, "
     "hands covering product, text, subtitles, watermark, logo animation, speech, music"
 )
 
@@ -94,6 +94,7 @@ class Pipeline:
         timeout_seconds: int = 29 * 60,
         offline: bool = False,
         debug: bool = False,
+        run_profile: str = "full",
     ):
         self.input_dir = input_dir
         self.output_dir = output_dir
@@ -101,6 +102,10 @@ class Pipeline:
         self.product_id = product_id
         self.offline = offline
         self.debug = debug
+        if run_profile not in {"full", "fast"}:
+            raise ValueError(f"unsupported run profile: {run_profile}")
+        self.run_profile = run_profile
+        self.fast_mode = run_profile == "fast"
         self.started_monotonic = time.monotonic()
         self.deadline = self.started_monotonic + timeout_seconds
         self.trace = DebugTrace(logger, enabled=debug)
@@ -198,6 +203,7 @@ class Pipeline:
             product_id=self.product_id,
             offline=self.offline,
             debug=self.debug,
+            run_profile=self.run_profile,
             models=self.client.model_summary if self.client else {"mode": "offline"},
             deadline_seconds=round(self.deadline - self.started_monotonic, 1),
         )
@@ -224,9 +230,14 @@ class Pipeline:
             category_tree = load_json(categories_path)
             attribute_data = load_json(attributes_path)
             taxonomy = resolve_taxonomy(facts, category_tree, attribute_data)
-            taxonomy = self._adjudicate_taxonomy(
-                facts, taxonomy, category_tree, attribute_data
-            )
+            if not self.fast_mode:
+                taxonomy = self._adjudicate_taxonomy(
+                    facts, taxonomy, category_tree, attribute_data
+                )
+            else:
+                self.trace.emit(
+                    "taxonomy.adjudication_skipped", reason="fast-profile"
+                )
             self.trace.emit(
                 "taxonomy.resolved",
                 category=taxonomy.category.__dict__
@@ -269,7 +280,11 @@ class Pipeline:
                 protect_size_chart=bool(facts.size_chart_rows)
             )
             agent_plan = self.agent.plan_delivery(
-                facts, taxonomy, vision, tool_registry
+                facts,
+                taxonomy,
+                vision,
+                tool_registry,
+                use_model=not self.fast_mode,
             )
             self.trace.emit("agent.plan", plan=agent_plan)
             creative_plan, plan_model = create_creative_plan(
@@ -332,8 +347,11 @@ class Pipeline:
                     Path(main_asset.path),
                     work_dir,
                     downloads_dir,
-                    main_asset.generated
-                    or self._safe_generation_reference(main_reference_url),
+                    (
+                        main_asset.generated
+                        or self._safe_generation_reference(main_reference_url)
+                    )
+                    and not self.fast_mode,
                 )
                 detail_futures = {
                     executor.submit(
@@ -365,6 +383,7 @@ class Pipeline:
                             "product-grounding",
                             "marketplace-materials",
                         ),
+                        audit_valid_draft=not self.fast_mode,
                     ): language
                     for language in ("en", "ko", "pt")
                 }
@@ -391,14 +410,19 @@ class Pipeline:
                 state.visual_set_review = self._review_visual_set(
                     facts, state.assets
                 )
-                state.visual_set_review = self._repair_visual_set_once(
-                    facts=facts,
-                    creative_plan=creative_plan,
-                    state=state,
-                    review=state.visual_set_review,
-                    work_dir=work_dir,
-                    downloads_dir=downloads_dir,
-                )
+                if not self.fast_mode:
+                    state.visual_set_review = self._repair_visual_set_once(
+                        facts=facts,
+                        creative_plan=creative_plan,
+                        state=state,
+                        review=state.visual_set_review,
+                        work_dir=work_dir,
+                        downloads_dir=downloads_dir,
+                    )
+                else:
+                    self.trace.emit(
+                        "image.set_repair_skipped", reason="fast-profile"
+                    )
                 for future, language in copy_futures.items():
                     try:
                         payload, source = future.result()
@@ -456,18 +480,23 @@ class Pipeline:
                 work_dir=work_dir,
                 downloads_dir=downloads_dir,
             )
-            self._run_bounded_agent_loop(
-                tool_registry,
-                facts=facts,
-                taxonomy=taxonomy,
-                creative_plan=creative_plan,
-                agent_plan=agent_plan,
-                state=state,
-                localization_payloads=localization_payloads,
-                localization_sources=localization_sources,
-                visual_set_review=state.visual_set_review,
-                work_dir=work_dir,
-            )
+            if not self.fast_mode:
+                self._run_bounded_agent_loop(
+                    tool_registry,
+                    facts=facts,
+                    taxonomy=taxonomy,
+                    creative_plan=creative_plan,
+                    agent_plan=agent_plan,
+                    state=state,
+                    localization_payloads=localization_payloads,
+                    localization_sources=localization_sources,
+                    visual_set_review=state.visual_set_review,
+                    work_dir=work_dir,
+                )
+            else:
+                self.trace.emit(
+                    "agent.evaluation_skipped", reason="fast-profile"
+                )
             # A catalog video is rebuilt from the final image set only when video
             # generation was unavailable from the outset; this is not an evaluator fallback.
             self._enhance_fallback_video(state.assets, work_dir)
@@ -554,17 +583,17 @@ class Pipeline:
                 "main": "Seller-source hero image normalized to a square listing format.",
                 "details": [
                     "Alternate seller-source view showing the complete product.",
-                    "Additional seller-source view showing the construction from another angle.",
-                    "Additional seller-source view showing the silhouette and hem.",
-                    "Full product reference showing the fit and proportions.",
+                    "Seller-source view showing a directly visible product detail.",
+                    "Seller-source view showing a different directly visible product detail.",
+                    "Seller-source alternate view supported by the supplied photography.",
                     "Detail crop derived from the seller's product photography.",
                 ],
                 "crops": {
-                    "upper": "Seller-source close-up showing the neckline, print and upper construction.",
-                    "lower": "Seller-source close-up showing the hem, print and lower proportions.",
-                    "left": "Seller-source close-up showing the left-side sleeve and print details.",
-                    "right": "Seller-source close-up showing the right-side sleeve and print details.",
-                    "center": "Seller-source close-up showing the central print and garment construction.",
+                    "upper": "Seller-source close-up of source-visible details in the upper image area.",
+                    "lower": "Seller-source close-up of source-visible details in the lower image area.",
+                    "left": "Seller-source close-up of source-visible details on the left side.",
+                    "right": "Seller-source close-up of source-visible details on the right side.",
+                    "center": "Seller-source close-up of source-visible details in the center.",
                 },
                 "video": "Eight-second silent catalog video assembled from the final distinct product images.",
                 "single_video": "Eight-second product presentation with restrained camera motion.",
@@ -574,17 +603,17 @@ class Pipeline:
                 "main": "판매자 원본을 정사각형 등록 규격에 맞춰 정리한 대표 이미지입니다.",
                 "details": [
                     "상품 전체를 보여 주는 판매자 원본의 다른 이미지입니다.",
-                    "다른 각도에서 상품 구조를 보여 주는 판매자 원본 이미지입니다.",
-                    "실루엣과 밑단을 보여 주는 추가 판매자 원본 이미지입니다.",
-                    "핏과 비율을 확인할 수 있는 상품 전체 이미지입니다.",
+                    "원본에서 직접 확인되는 상품 디테일을 보여 주는 이미지입니다.",
+                    "원본에서 직접 확인되는 다른 상품 디테일을 보여 주는 이미지입니다.",
+                    "판매자 사진으로 확인된 다른 시점의 상품 이미지입니다.",
                     "판매자 상품 사진에서 잘라낸 디테일 이미지입니다.",
                 ],
                 "crops": {
-                    "upper": "네크라인과 프린트, 상단 구조를 보여 주는 판매자 원본 클로즈업입니다.",
-                    "lower": "밑단과 프린트, 하단 비율을 보여 주는 판매자 원본 클로즈업입니다.",
-                    "left": "왼쪽 소매와 프린트 디테일을 보여 주는 판매자 원본 클로즈업입니다.",
-                    "right": "오른쪽 소매와 프린트 디테일을 보여 주는 판매자 원본 클로즈업입니다.",
-                    "center": "중앙 프린트와 의류 구조를 보여 주는 판매자 원본 클로즈업입니다.",
+                    "upper": "원본 이미지 상단에서 직접 확인되는 디테일을 확대한 이미지입니다.",
+                    "lower": "원본 이미지 하단에서 직접 확인되는 디테일을 확대한 이미지입니다.",
+                    "left": "원본 이미지 왼쪽에서 직접 확인되는 디테일을 확대한 이미지입니다.",
+                    "right": "원본 이미지 오른쪽에서 직접 확인되는 디테일을 확대한 이미지입니다.",
+                    "center": "원본 이미지 중앙에서 직접 확인되는 디테일을 확대한 이미지입니다.",
                 },
                 "video": "서로 다른 최종 상품 이미지로 구성한 8초 무음 카탈로그 영상입니다.",
                 "single_video": "절제된 카메라 움직임을 적용한 8초 단일 이미지 상품 영상입니다.",
@@ -594,17 +623,17 @@ class Pipeline:
                 "main": "Imagem principal da fonte do vendedor adaptada ao formato quadrado do anúncio.",
                 "details": [
                     "Outra foto da fonte do vendedor mostrando o produto por inteiro.",
-                    "Foto adicional da fonte do vendedor mostrando a construção em outro ângulo.",
-                    "Foto adicional mostrando a silhueta e a barra da peça.",
-                    "Referência do produto por inteiro mostrando caimento e proporções.",
+                    "Foto da fonte mostrando um detalhe diretamente visível do produto.",
+                    "Foto da fonte mostrando outro detalhe diretamente visível do produto.",
+                    "Vista alternativa confirmada pelas fotos fornecidas pelo vendedor.",
                     "Recorte de detalhe derivado das fotos de produto do vendedor.",
                 ],
                 "crops": {
-                    "upper": "Close da fonte do vendedor mostrando decote, estampa e construção superior.",
-                    "lower": "Close da fonte do vendedor mostrando barra, estampa e proporções inferiores.",
-                    "left": "Close da fonte do vendedor mostrando a manga esquerda e detalhes da estampa.",
-                    "right": "Close da fonte do vendedor mostrando a manga direita e detalhes da estampa.",
-                    "center": "Close da fonte do vendedor mostrando a estampa central e a construção da peça.",
+                    "upper": "Close de detalhes visíveis na área superior da foto do vendedor.",
+                    "lower": "Close de detalhes visíveis na área inferior da foto do vendedor.",
+                    "left": "Close de detalhes visíveis no lado esquerdo da foto do vendedor.",
+                    "right": "Close de detalhes visíveis no lado direito da foto do vendedor.",
+                    "center": "Close de detalhes visíveis no centro da foto do vendedor.",
                 },
                 "video": "Vídeo de catálogo silencioso de 8 segundos montado com as imagens finais distintas do produto.",
                 "single_video": "Apresentação de 8 segundos com uma única imagem e movimento de câmera discreto.",
@@ -616,75 +645,40 @@ class Pipeline:
                 "main": "Clean studio hero showing one complete product.",
                 "video": "Eight-second product presentation based on the final hero image.",
                 "roles": {
-                    "overall_silhouette": "Complete three-quarter view showing the overall silhouette.",
-                    "waistband_closure_pockets": "Close view of the verified waistband, closure and pocket construction.",
-                    "leg_seam_hem": "Close view of the verified leg shape, side seam and hem.",
-                    "neckline_closure": "Close view of the verified neckline and closure construction.",
-                    "neckline_bodice_closure": "Close view of the verified neckline, bodice and closure construction.",
-                    "sleeve_cuff_hem": "Close view of the verified sleeve, cuff, drape and hem.",
-                    "waist_drape_hem": "View of the verified waist transition, drape and hem.",
+                    "complete_product": "Complete three-quarter view showing the full product.",
+                    "primary_verified_detail": "Close view of the primary detail verified in the source images.",
+                    "secondary_verified_detail": "Close view of a different detail verified in the source images.",
                     "verified_variants": "Catalog view comparing only seller-verified color variants.",
-                    "back_construction": "Back view showing the verified rear construction and hem.",
-                    "wearer_fit_context": "Wearer view showing the product's visible fit and proportions.",
-                    "product_styling_context": "Product-only styling view showing practical outfit context.",
+                    "verified_alternate_view": "Alternate view using only source-supported product information.",
+                    "verified_use_context": "Source-supported practical use view with the complete product visible.",
+                    "product_only_context": "Product-only view showing a practical, neutral context.",
                 },
             },
             "ko": {
                 "main": "상품 한 개의 전체 형태를 보여 주는 깔끔한 스튜디오 대표 이미지입니다.",
                 "video": "최종 대표 이미지를 바탕으로 제작한 8초 상품 영상입니다.",
                 "roles": {
-                    "overall_silhouette": "전체 실루엣을 보여 주는 완전한 3/4 각도 이미지입니다.",
-                    "waistband_closure_pockets": "확인된 허리밴드와 여밈, 포켓 구조를 가까이 보여 줍니다.",
-                    "leg_seam_hem": "확인된 다리 라인과 옆선, 밑단을 가까이 보여 줍니다.",
-                    "neckline_closure": "확인된 네크라인과 여밈 구조를 가까이 보여 줍니다.",
-                    "neckline_bodice_closure": "확인된 네크라인과 몸판, 여밈 구조를 가까이 보여 줍니다.",
-                    "sleeve_cuff_hem": "확인된 소매와 커프스, 드레이프, 밑단을 가까이 보여 줍니다.",
-                    "waist_drape_hem": "확인된 허리선과 드레이프, 밑단을 보여 줍니다.",
+                    "complete_product": "상품 전체를 보여 주는 완전한 3/4 각도 이미지입니다.",
+                    "primary_verified_detail": "원본에서 확인된 핵심 디테일을 가까이 보여 줍니다.",
+                    "secondary_verified_detail": "원본에서 확인된 다른 디테일을 가까이 보여 줍니다.",
                     "verified_variants": "판매자 원본에서 확인된 색상 옵션만 비교한 카탈로그 이미지입니다.",
-                    "back_construction": "확인된 뒷면 구조와 밑단을 보여 주는 후면 이미지입니다.",
-                    "wearer_fit_context": "착용 시 보이는 핏과 비율을 보여 주는 이미지입니다.",
-                    "product_styling_context": "실용적인 코디 맥락을 보여 주는 상품 전용 이미지입니다.",
+                    "verified_alternate_view": "원본 근거만 사용한 다른 시점의 상품 이미지입니다.",
+                    "verified_use_context": "상품 전체가 보이는 원본 근거 기반의 실용적 사용 이미지입니다.",
+                    "product_only_context": "실용적이고 중립적인 맥락의 상품 전용 이미지입니다.",
                 },
             },
             "pt": {
                 "main": "Imagem principal de estúdio mostrando uma única peça por inteiro.",
                 "video": "Apresentação de 8 segundos baseada na imagem principal final.",
                 "roles": {
-                    "overall_silhouette": "Vista completa em três quartos mostrando a silhueta geral.",
-                    "waistband_closure_pockets": "Close do cós, do fechamento e dos bolsos confirmados.",
-                    "leg_seam_hem": "Close do formato das pernas, da costura lateral e da barra.",
-                    "neckline_closure": "Close do decote e do fechamento confirmados.",
-                    "neckline_bodice_closure": "Close do decote, do corpo e do fechamento confirmados.",
-                    "sleeve_cuff_hem": "Close da manga, do punho, do caimento e da barra confirmados.",
-                    "waist_drape_hem": "Vista da transição da cintura, do caimento e da barra.",
+                    "complete_product": "Vista completa em três quartos mostrando todo o produto.",
+                    "primary_verified_detail": "Close do principal detalhe confirmado nas imagens de origem.",
+                    "secondary_verified_detail": "Close de outro detalhe confirmado nas imagens de origem.",
                     "verified_variants": "Vista de catálogo comparando apenas cores confirmadas pelo vendedor.",
-                    "back_construction": "Vista traseira mostrando a construção e a barra confirmadas.",
-                    "wearer_fit_context": "Vista no corpo mostrando o caimento e as proporções visíveis.",
-                    "product_styling_context": "Composição sem modelo mostrando um contexto prático de uso.",
+                    "verified_alternate_view": "Vista alternativa usando apenas informações confirmadas na origem.",
+                    "verified_use_context": "Vista de uso confirmada na origem com o produto inteiro visível.",
+                    "product_only_context": "Composição sem modelo em um contexto prático e neutro.",
                 },
-            },
-        }
-        bottom_crop_templates = {
-            "en": {
-                "upper": "Seller-source close-up showing the waistband, closure and upper pocket construction.",
-                "lower": "Seller-source close-up showing the leg shape, side seam and hem.",
-                "left": "Seller-source close-up showing the left pocket, side seam and leg construction.",
-                "right": "Seller-source close-up showing the right pocket, side seam and leg construction.",
-                "center": "Seller-source close-up showing the waistband and front construction.",
-            },
-            "ko": {
-                "upper": "판매자 원본에서 허리밴드와 여밈, 상단 포켓 구조를 확대한 이미지입니다.",
-                "lower": "판매자 원본에서 다리 라인과 옆선, 밑단을 확대한 이미지입니다.",
-                "left": "판매자 원본에서 왼쪽 포켓과 옆선, 다리 구조를 확대한 이미지입니다.",
-                "right": "판매자 원본에서 오른쪽 포켓과 옆선, 다리 구조를 확대한 이미지입니다.",
-                "center": "판매자 원본에서 허리밴드와 전면 구조를 확대한 이미지입니다.",
-            },
-            "pt": {
-                "upper": "Close da foto do vendedor mostrando o cós, o fechamento e os bolsos superiores.",
-                "lower": "Close da foto do vendedor mostrando as pernas, a costura lateral e a barra.",
-                "left": "Close da foto do vendedor mostrando o bolso esquerdo, a lateral e a perna.",
-                "right": "Close da foto do vendedor mostrando o bolso direito, a lateral e a perna.",
-                "center": "Close da foto do vendedor mostrando o cós e a construção frontal.",
             },
         }
         for language, payload in payloads.items():
@@ -719,11 +713,11 @@ class Pipeline:
                         role = (
                             creative_plan.detail_roles[detail_index - 1]
                             if detail_index <= len(creative_plan.detail_roles)
-                            else "overall_silhouette"
+                            else "complete_product"
                         )
                         media[name] = generated_templates[language]["roles"].get(
                             role,
-                            generated_templates[language]["roles"]["overall_silhouette"],
+                            generated_templates[language]["roles"]["complete_product"],
                         )
                     continue
                 if asset.model == "deterministic-size-chart":
@@ -752,11 +746,7 @@ class Pipeline:
                         "",
                     )
                     media[name] = (
-                        (
-                            bottom_crop_templates[language][crop_kind]
-                            if "waistband_closure_pockets" in creative_plan.detail_roles
-                            else fallback_templates[language]["crops"][crop_kind]
-                        )
+                        fallback_templates[language]["crops"][crop_kind]
                         if crop_kind
                         else fallback_templates[language]["details"][
                             max(0, min(4, detail_index - 1))
@@ -1443,52 +1433,97 @@ Allowed leaf candidates:
             )
             return {}
         self._ensure_time(10 * 60)
-        preferred = facts.product_image_urls[:5]
-        sku_sample = _even_sample(facts.sku_image_urls, 4)
-        description_sample = _even_sample(facts.description_image_urls, 3)
-        urls = _unique(preferred + sku_sample + description_sample)[:12]
-        try:
-            result = self.client.analyze_product_images(
-                json.dumps(facts.compact_dict(), ensure_ascii=False),
-                urls,
-                skill_instructions=self.skills.compile(
-                    "source-vision",
-                    "product-grounding",
-                    "marketplace-materials",
-                ),
-            )
-            source_images = normalize_source_image_observations(result, urls)
-            result["source_images"] = source_images
-            self._source_image_observations = {
-                str(item["url"]): item for item in source_images
-            }
-            rejected = sum(
-                not item.get("safe_for_generation_reference", False)
-                for item in source_images
-            )
-            self.logger.info("完成 %d 张源图片的视觉理解", len(urls))
-            if rejected:
-                self.logger.info("源图片风控筛出 %d 张不宜作为生成参考图", rejected)
-            third_party_count = sum(
-                item.get("has_third_party_brand") is True for item in source_images
-            )
-            if third_party_count:
-                self.warnings.append(
-                    f"{third_party_count} 张源图疑似含第三方品牌或角色；不可直接发布，"
-                    "仅可作为需清理的商品身份参考"
-                )
-            global_risks = result.get("prohibited_or_risky_visuals")
-            if isinstance(global_risks, list) and global_risks:
-                risk_summary = "; ".join(
-                    str(item).strip() for item in global_risks[:3] if str(item).strip()
-                )
-                if risk_summary:
-                    self.warnings.append(f"源图视觉风险需人工复核: {risk_summary[:500]}")
-            return result
-        except ApiError as exc:
-            self.logger.warning("源图片视觉理解失败，使用结构化事实继续: %s", exc)
-            self.warnings.append(f"源图片视觉理解失败: {exc}")
+        # The visual endpoint has a per-call image limit.  Preserve every distinct
+        # source URL and batch it instead of uniformly sampling a handful; size
+        # charts and construction details commonly sit near the end of descriptions.
+        urls = _unique(
+            facts.product_image_urls
+            + facts.sku_image_urls
+            + facts.description_image_urls
+        )
+        if not urls:
             return {}
+        batches = [urls[index : index + 12] for index in range(0, len(urls), 12)]
+        facts_json = json.dumps(facts.compact_dict(), ensure_ascii=False)
+        skill_instructions = self.skills.compile(
+            "source-vision",
+            "product-grounding",
+            "marketplace-materials",
+        )
+
+        def inspect_batch(
+            batch_index: int, batch_urls: list[str]
+        ) -> tuple[int, dict[str, Any], str]:
+            try:
+                payload = self.client.analyze_product_images(
+                    facts_json,
+                    batch_urls,
+                    skill_instructions=skill_instructions,
+                )
+                return batch_index, payload, ""
+            except (ApiError, ValueError) as exc:
+                return batch_index, {}, str(exc)
+
+        completed: list[tuple[list[str], dict[str, Any]]] = [
+            (batch, {}) for batch in batches
+        ]
+        errors: list[str] = []
+        worker_count = min(3, len(batches))
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="source-vision",
+        ) as executor:
+            futures = [
+                executor.submit(inspect_batch, index, batch)
+                for index, batch in enumerate(batches)
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                batch_index, payload, error = future.result()
+                completed[batch_index] = (batches[batch_index], payload)
+                if error:
+                    errors.append(f"batch {batch_index + 1}: {error}")
+
+        result = _merge_source_vision_batches(completed, urls)
+        source_images = result["source_images"]
+        self._source_image_observations = {
+            str(item["url"]): item for item in source_images
+        }
+        inspected = sum(item.get("inspection_complete") is True for item in source_images)
+        rejected = sum(
+            item.get("inspection_complete") is True
+            and not item.get("safe_for_generation_reference", False)
+            for item in source_images
+        )
+        self.logger.info(
+            "完成 %d/%d 张源图片的分批视觉理解（%d 批）",
+            inspected,
+            len(urls),
+            len(batches),
+        )
+        if errors:
+            self.logger.warning("%d 个源图扫描批次失败，其余批次继续使用", len(errors))
+            self.warnings.append(
+                f"源图片分批扫描有 {len(errors)}/{len(batches)} 批失败: "
+                + "; ".join(errors[:3])[:500]
+            )
+        if rejected:
+            self.logger.info("源图片风控筛出 %d 张不宜作为生成参考图", rejected)
+        third_party_count = sum(
+            item.get("has_third_party_brand") is True for item in source_images
+        )
+        if third_party_count:
+            self.warnings.append(
+                f"{third_party_count} 张源图疑似含第三方品牌或角色；不可直接发布，"
+                "仅可作为需清理的商品身份参考"
+            )
+        global_risks = result.get("prohibited_or_risky_visuals")
+        if isinstance(global_risks, list) and global_risks:
+            risk_summary = "; ".join(
+                str(item).strip() for item in global_risks[:3] if str(item).strip()
+            )
+            if risk_summary:
+                self.warnings.append(f"源图视觉风险需人工复核: {risk_summary[:500]}")
+        return result
 
     def _apply_size_chart_observations(
         self, facts: ProductFacts, vision: dict[str, Any]
@@ -1500,22 +1535,20 @@ Allowed leaf candidates:
         if not isinstance(raw_rows, list) or not isinstance(source_images, list):
             return
 
+        def size_code(value: Any) -> str:
+            raw = re.split(r"[\(（\[【]", str(value or "").strip(), maxsplit=1)[0]
+            compact = re.sub(r"[^A-Za-z0-9]+", "", raw).upper()
+            repeated_x = re.fullmatch(r"(X+)L", compact)
+            if repeated_x and len(repeated_x.group(1)) >= 2:
+                return f"{len(repeated_x.group(1))}XL"
+            return compact
+
         known_codes: list[str] = []
         for sku in facts.skus:
             for item in sku.attributes:
-                if "尺码" not in item.name and "size" not in item.name.casefold():
-                    continue
-                match = re.match(r"\s*([A-Za-z0-9]+)", item.value)
-                if match and match.group(1).upper() not in known_codes:
-                    known_codes.append(match.group(1).upper())
-        if not known_codes:
-            return
-
-        aliases = {
-            "XXL": "2XL",
-            "XXXL": "3XL",
-            "XXXXL": "4XL",
-        }
+                code = size_code(item.value)
+                if code and len(code) <= 24 and code not in known_codes:
+                    known_codes.append(code)
         image_by_index = {
             item.get("index"): item
             for item in source_images
@@ -1524,32 +1557,44 @@ Allowed leaf candidates:
 
         def measurement(value: Any) -> str:
             match = re.fullmatch(
-                r"\s*(\d{1,3}(?:\.\d+)?)\s*(?:cm)?\s*", str(value or ""), re.I
+                r"\s*(\d{1,4}(?:\.\d+)?)\s*(?:cm)?\s*", str(value or ""), re.I
             )
             if not match:
                 return ""
             numeric = float(match.group(1))
-            return match.group(1) if 20 <= numeric <= 300 else ""
+            return match.group(1) if 0 < numeric <= 1000 else ""
 
         conversions: dict[str, tuple[str, str]] = {}
         for item in facts.size_conversions:
-            match = re.match(r"\s*([A-Za-z0-9]+)", item.source_label)
-            if match:
-                conversions[match.group(1).upper()] = (item.kilograms, item.pounds)
+            code = size_code(item.source_label)
+            if code:
+                conversions[code] = (item.kilograms, item.pounds)
+
+        candidate_rows = [
+            raw
+            for raw in raw_rows
+            if isinstance(raw, dict) and size_code(raw.get("size_label"))
+        ]
+        matched_codes = {
+            size_code(raw.get("size_label"))
+            for raw in candidate_rows
+            if size_code(raw.get("size_label")) in known_codes
+        }
+        require_sku_alignment = len(matched_codes) >= 2
 
         rows: list[SizeChartRow] = []
         seen: set[str] = set()
         for raw in raw_rows:
             if not isinstance(raw, dict):
                 continue
-            raw_code = str(raw.get("size_label") or "").strip().upper()
-            code = aliases.get(raw_code, raw_code)
+            code = size_code(raw.get("size_label"))
             bust = measurement(raw.get("bust_cm"))
             length = measurement(raw.get("length_cm"))
             source_index = raw.get("source_image_index")
             source_item = image_by_index.get(source_index)
             if (
-                code not in known_codes
+                not code
+                or (require_sku_alignment and code not in known_codes)
                 or code in seen
                 or not source_item
                 or str(source_item.get("role") or "") != "size_chart"
@@ -1570,7 +1615,8 @@ Allowed leaf candidates:
             if not self._size_chart_source_url:
                 self._size_chart_source_url = str(source_item.get("url") or "")
             seen.add(code)
-        rows.sort(key=lambda item: known_codes.index(item.size_label))
+        if require_sku_alignment:
+            rows.sort(key=lambda item: known_codes.index(item.size_label))
         if len(rows) < 2:
             return
         facts.size_chart_rows = rows
@@ -2132,7 +2178,7 @@ Allowed leaf candidates:
                 generation_references,
                 size="1600*1600",
                 negative_prompt=_MAIN_NEGATIVE_PROMPT,
-                count=3,
+                count=2 if self.fast_mode else 3,
             )
             reviewed_urls = (
                 [incumbent_url, *candidate_urls] if incumbent_url else candidate_urls
@@ -2414,7 +2460,8 @@ Allowed leaf candidates:
             raise ApiError("image model unavailable")
         active_prompt = prompt
         last_rejection: SemanticRejection | None = None
-        for semantic_attempt in range(2):
+        semantic_attempts = 1 if self.fast_mode else 2
+        for semantic_attempt in range(semantic_attempts):
             candidate_urls, model = self.client.generate_image_candidates(
                 active_prompt,
                 references,
@@ -2428,8 +2475,15 @@ Allowed leaf candidates:
                         else ", collage, montage, grid, duplicate product, multiple views"
                     )
                 ),
-                count=2,
+                count=1 if self.fast_mode else 2,
             )
+            if self.fast_mode:
+                self.trace.emit(
+                    "image.detail_review_skipped",
+                    asset=f"detail_image_{index}.jpeg",
+                    reason="fast-profile",
+                )
+                return candidate_urls[0], model
             reviewed_urls = (
                 [incumbent_url, *candidate_urls] if incumbent_url else candidate_urls
             )
@@ -2446,7 +2500,7 @@ Allowed leaf candidates:
                 return selected, model
             except SemanticRejection as exc:
                 last_rejection = exc
-                if semantic_attempt > 0 or self.deadline - time.monotonic() < 360:
+                if semantic_attempt + 1 >= semantic_attempts or self.deadline - time.monotonic() < 360:
                     raise
                 self.logger.warning(
                     "详情图 %d 存在明确语义硬伤，携带质检反馈重新生成一次: %s",
@@ -2650,7 +2704,11 @@ Allowed leaf candidates:
                 self.logger.warning("视频模型失败，创建确定性视频回退: %s", exc)
                 self.warnings.append(f"视频生成回退: {exc}")
         elif self.client is not None:
-            self.warnings.append("首帧源图触发知识产权或视觉风险，跳过衍生视频生成")
+            if self.fast_mode:
+                generation_failure = "fast profile skips video-model generation"
+                self.trace.emit("video.generation_skipped", reason="fast-profile")
+            else:
+                self.warnings.append("首帧源图触发知识产权或视觉风险，跳过衍生视频生成")
         create_slideshow_video(main_image_path, destination, duration=8)
         return AssetResult(
             name=destination.name,
@@ -2939,11 +2997,17 @@ Allowed leaf candidates:
             self.trace.emit("image.set_review_skipped", reason="missing-review-url")
             return {}
 
-        source_references = _unique(
-            facts.product_image_urls[:3]
-            + _even_sample(facts.sku_image_urls, 1)
-            + _even_sample(facts.description_image_urls, 1)
-        )
+        if self.fast_mode:
+            source_references = _unique(
+                facts.product_image_urls[:2]
+                + _even_sample(facts.sku_image_urls, 1)
+            )
+        else:
+            source_references = _unique(
+                facts.product_image_urls[:3]
+                + _even_sample(facts.sku_image_urls, 1)
+                + _even_sample(facts.description_image_urls, 1)
+            )
         expected_assets = [
             {
                 "name": name,
@@ -3325,6 +3389,129 @@ def _unique(values: list[str]) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
+
+
+def _merge_source_vision_batches(
+    batches: list[tuple[list[str], dict[str, Any]]], all_urls: list[str]
+) -> dict[str, Any]:
+    """Merge batch-local model indexes into one global, source-bound ledger."""
+
+    global_index = {url: index for index, url in enumerate(all_urls)}
+    source_images: list[dict[str, Any]] = []
+    hero_candidates: list[int] = []
+    size_rows: list[dict[str, Any]] = []
+    seen_rows: set[tuple[str, ...]] = set()
+    merged_lists: dict[str, list[str]] = {
+        key: []
+        for key in (
+            "visible_colors",
+            "visible_design_features",
+            "image_quality_notes",
+            "prohibited_or_risky_visuals",
+            "preservation_constraints",
+        )
+    }
+    product_type = ""
+
+    for batch_urls, payload in batches:
+        observations = normalize_source_image_observations(payload, batch_urls)
+        local_to_global = {
+            local_index: global_index[url]
+            for local_index, url in enumerate(batch_urls)
+            if url in global_index
+        }
+        for item in observations:
+            local_index = item.get("index")
+            if not isinstance(local_index, int) or local_index not in local_to_global:
+                continue
+            bound = dict(item)
+            bound["index"] = local_to_global[local_index]
+            source_images.append(bound)
+
+        if not product_type:
+            product_type = str(payload.get("product_type") or "").strip()
+        for key, target in merged_lists.items():
+            values = payload.get(key)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                clean = " ".join(str(value).split())
+                if clean and clean not in target:
+                    target.append(clean)
+
+        local_best = payload.get("best_hero_image_index")
+        if isinstance(local_best, int) and local_best in local_to_global:
+            hero_candidates.append(local_to_global[local_best])
+
+        raw_rows = payload.get("size_chart_rows")
+        if not isinstance(raw_rows, list):
+            continue
+        for raw in raw_rows:
+            if not isinstance(raw, dict):
+                continue
+            local_source = raw.get("source_image_index")
+            if not isinstance(local_source, int) or local_source not in local_to_global:
+                continue
+            row = dict(raw)
+            row["source_image_index"] = local_to_global[local_source]
+            signature = tuple(
+                str(row.get(key) or "").strip().casefold()
+                for key in (
+                    "size_label",
+                    "bust_cm",
+                    "length_cm",
+                    "weight_guidance",
+                    "source_image_index",
+                )
+            )
+            if signature in seen_rows:
+                continue
+            seen_rows.add(signature)
+            size_rows.append(row)
+
+    source_images.sort(key=lambda item: int(item["index"]))
+    by_index = {int(item["index"]): item for item in source_images}
+    best_index = next(
+        (
+            index
+            for index in hero_candidates
+            if by_index.get(index, {}).get("safe_for_main_image") is True
+        ),
+        -1,
+    )
+    if best_index < 0:
+        best_index = next(
+            (
+                index
+                for index in hero_candidates
+                if by_index.get(index, {}).get("safe_for_generation_reference")
+                is True
+            ),
+            -1,
+        )
+    if best_index < 0:
+        best_index = next(
+            (
+                int(item["index"])
+                for item in source_images
+                if item.get("safe_for_generation_reference") is True
+                and item.get("role") in {"hero", "front"}
+            ),
+            -1,
+        )
+
+    return {
+        "product_type": product_type,
+        **merged_lists,
+        "best_hero_image_index": best_index,
+        "size_chart_rows": size_rows,
+        "source_images": source_images,
+        "requested_image_count": len(all_urls),
+        "inspected_image_count": sum(
+            item.get("inspection_complete") is True for item in source_images
+        ),
+        "batch_count": len(batches),
+    }
 
 
 def _even_sample(values: list[str], count: int) -> list[str]:

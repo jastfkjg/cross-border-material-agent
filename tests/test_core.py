@@ -28,7 +28,11 @@ from crossborder_agent.localization import (
 )
 from crossborder_agent.models import AssetResult
 from crossborder_agent.planning import create_creative_plan, fallback_creative_plan
-from crossborder_agent.pipeline import Pipeline, PipelineError
+from crossborder_agent.pipeline import (
+    Pipeline,
+    PipelineError,
+    _merge_source_vision_batches,
+)
 from crossborder_agent.qa import _description_language_surfaces
 from crossborder_agent.taxonomy import resolve_taxonomy
 
@@ -636,6 +640,40 @@ class VisualSelectionTests(unittest.TestCase):
         self.assertEqual(len(client.generate_prompts), 2)
         self.assertIn("identity_consistent", client.generate_prompts[1])
 
+    def test_fast_profile_uses_one_detail_candidate_without_per_image_judge(self) -> None:
+        class FastClient:
+            def __init__(self) -> None:
+                self.requested_counts: list[int] = []
+
+            def generate_image_candidates(self, *args, count=2, **kwargs):
+                self.requested_counts.append(count)
+                return ["https://example.test/fast-detail.jpg"], "fast-image"
+
+            @staticmethod
+            def select_best_detail_image(*args, **kwargs):
+                raise AssertionError("fast profile must skip the per-detail judge")
+
+        facts = load_product_facts(DATA / "product_info/product_5681480836479.json")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temp_dir),
+                logger=logging.getLogger("fast-detail-test"),
+                offline=True,
+                run_profile="fast",
+            )
+            client = FastClient()
+            pipeline.client = client
+            selected, model = pipeline._generate_detail_with_semantic_retry(
+                2,
+                facts,
+                "fast detail prompt",
+                references=["https://example.test/source.jpg"],
+            )
+        self.assertEqual(selected, "https://example.test/fast-detail.jpg")
+        self.assertEqual(model, "fast-image")
+        self.assertEqual(client.requested_counts, [1])
+
 
 class FactAndTaxonomyTests(unittest.TestCase):
     def test_hidden_category_ranking_uses_product_family_audience_and_specialization(self) -> None:
@@ -699,13 +737,17 @@ class FactAndTaxonomyTests(unittest.TestCase):
         self.assertEqual(
             plan.detail_roles,
             [
-                "overall_silhouette",
-                "waistband_closure_pockets",
-                "leg_seam_hem",
-                "verified_variants",
-                "wearer_fit_context",
+                "complete_product",
+                "primary_verified_detail",
+                "secondary_verified_detail",
+                "verified_alternate_view",
+                "product_only_context",
             ],
         )
+        prompts = " ".join(plan.detail_prompts + [plan.video_prompt]).casefold()
+        self.assertNotIn("waistband", prompts)
+        self.assertNotIn("both legs", prompts)
+        self.assertNotIn("shoulder to hem", prompts)
 
     def test_copy_concept_gate_accepts_natural_synonyms(self) -> None:
         text = "A straight-leg silhouette finishes at a knee-length hem."
@@ -797,6 +839,36 @@ class FactAndTaxonomyTests(unittest.TestCase):
             set(payload["localized_terms"]),
         )
         self.assertEqual(error, "source-script-contamination-guard")
+
+    def test_fast_copy_skips_second_model_call_when_draft_is_valid(self) -> None:
+        facts = load_product_facts(DATA / "product_info/product_5758364264251.json")
+        taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
+        plan = fallback_creative_plan(facts, taxonomy)
+        draft = _fallback_payload("en", facts, taxonomy)
+
+        class CopyClient:
+            config = SimpleNamespace(chat_model="fast-copy-model")
+            trace = None
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat_json(self, *args, **kwargs):
+                self.calls += 1
+                return draft
+
+        client = CopyClient()
+        payload, source = generate_copy_payload(
+            "en",
+            facts,
+            taxonomy,
+            plan,
+            client,
+            audit_valid_draft=False,
+        )
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(payload["title"], draft["title"])
+        self.assertEqual(source, "fast-copy-model-validated-draft-fast")
 
     def test_chinese_gate_separates_buyer_copy_from_machine_appendix(self) -> None:
         text = """# Natural product title
@@ -941,9 +1013,10 @@ Natural localized overview.
         shorts = load_product_facts(DATA / "product_info/product_9493156931235.json")
         shorts_taxonomy = resolve_taxonomy(shorts, self.tree, self.attributes)
         shorts_plan = fallback_creative_plan(shorts, shorts_taxonomy)
-        self.assertIn("adult wearer is optional", shorts_plan.main_prompt)
-        self.assertIn("waistband", shorts_plan.detail_prompts[1])
-        self.assertIn("both legs", shorts_plan.video_prompt)
+        self.assertIn("do not introduce a wearer", shorts_plan.main_prompt)
+        self.assertIn("source-visible", shorts_plan.detail_prompts[1])
+        self.assertNotIn("waistband", " ".join(shorts_plan.detail_prompts))
+        self.assertNotIn("both legs", shorts_plan.video_prompt)
 
     def test_storyboard_uses_construction_instead_of_invented_single_color_variants(self) -> None:
         single_color = load_product_facts(
@@ -951,7 +1024,7 @@ Natural localized overview.
         )
         single_taxonomy = resolve_taxonomy(single_color, self.tree, self.attributes)
         single_plan = fallback_creative_plan(single_color, single_taxonomy)
-        self.assertIn("back construction", single_plan.detail_prompts[3])
+        self.assertIn("source-supported alternate", single_plan.detail_prompts[3])
         self.assertNotIn("color variants", single_plan.detail_prompts[3])
         self.assertIn("Campaign Style Lock", single_plan.visual_theme)
 
@@ -959,8 +1032,53 @@ Natural localized overview.
             DATA / "product_info/product_3887087154767.json"
         )
         multi_taxonomy = resolve_taxonomy(multi_color, self.tree, self.attributes)
-        multi_plan = fallback_creative_plan(multi_color, multi_taxonomy)
-        self.assertIn("color variants", multi_plan.detail_prompts[3])
+        multi_plan = fallback_creative_plan(
+            multi_color,
+            multi_taxonomy,
+            {
+                "visible_colors": ["black", "blue"],
+                "source_images": [
+                    {"role": "variant", "dominant_color": "black"},
+                    {"role": "variant", "dominant_color": "blue"},
+                ],
+            },
+        )
+        self.assertIn("distinct variants", multi_plan.detail_prompts[3])
+
+    def test_source_vision_batches_keep_late_size_chart_indexes(self) -> None:
+        urls = [f"https://example.test/{index}.jpg" for index in range(14)]
+        batches = [
+            (
+                urls[:12],
+                {
+                    "images": [
+                        {"index": index, "role": "detail"}
+                        for index in range(12)
+                    ]
+                },
+            ),
+            (
+                urls[12:],
+                {
+                    "images": [
+                        {"index": 0, "role": "size_chart", "has_text": True},
+                        {"index": 1, "role": "detail"},
+                    ],
+                    "size_chart_rows": [
+                        {
+                            "size_label": "M",
+                            "bust_cm": "90",
+                            "length_cm": "60",
+                            "weight_guidance": "",
+                            "source_image_index": 0,
+                        }
+                    ],
+                },
+            ),
+        ]
+        merged = _merge_source_vision_batches(batches, urls)
+        self.assertEqual(len(merged["source_images"]), 14)
+        self.assertEqual(merged["size_chart_rows"][0]["source_image_index"], 12)
 
     def test_fact_driven_copy_is_benefit_led_without_product_override(self) -> None:
         facts = load_product_facts(
