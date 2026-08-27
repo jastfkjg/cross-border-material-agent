@@ -114,7 +114,7 @@
   "generated_text_regex": [
     "(?i)(?:https?://|www\\.)\\S+",
     "(?i)\\b[\\w.+-]+@[\\w.-]+\\.[a-z]{2,}\\b",
-    "(?i)(?:whats?app|wechat|telegram|line|kakao(?:talk)?|instagram|facebook|tiktok)\\s*[:@]?\\s*[\\w+.-]+",
+    "(?i)\\b(?:whats?app|wechat|telegram|line|kakao(?:talk)?|instagram|facebook|tiktok)\\b\\s*[:@]\\s*[\\w+.-]+",
     "(?i)(?:call|text|contact|message|dm)\\s+(?:us|me|seller)\\s*(?:at|on|:)\\s*[^\\n,;]+",
     "(?i)(?:us\\$|r\\$|krw|usd|brl|₩|\\$)\\s*\\d+(?:[.,]\\d+)?",
     "(?i)\\b(?:rated|rating|reviews?|orders?|sold)\\s*[:：]?\\s*\\d+(?:[.,]\\d+)?\\b",

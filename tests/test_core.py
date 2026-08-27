@@ -20,13 +20,16 @@ from crossborder_agent.input_loader import (
     parse_prompt_paths,
 )
 from crossborder_agent.localization import (
+    _fallback_payload,
     _localized_concept_is_mentioned,
+    _payload_validation_error,
     generate_copy_payload,
     render_description,
 )
 from crossborder_agent.models import AssetResult
 from crossborder_agent.planning import create_creative_plan, fallback_creative_plan
 from crossborder_agent.pipeline import Pipeline, PipelineError
+from crossborder_agent.qa import _description_language_surfaces
 from crossborder_agent.taxonomy import resolve_taxonomy
 
 
@@ -63,6 +66,19 @@ class ComplianceTests(unittest.TestCase):
             "en", {"overview": "Contact us at seller@example.com — only US$ 9.99"}
         )
         self.assertTrue(any(item.startswith("regex:") for item in violations))
+
+    def test_contact_rule_does_not_match_ordinary_neckline_copy(self) -> None:
+        self.assertEqual(
+            generated_copy_violations(
+                "en", {"overview": "A V-neckline creates a clean, open shape."}
+            ),
+            [],
+        )
+        self.assertTrue(
+            generated_copy_violations(
+                "en", {"overview": "For help, use LINE: seller_support"}
+            )
+        )
 
     def test_source_observations_are_bound_by_index_and_hard_risk_rejected(self) -> None:
         analysis = {
@@ -158,6 +174,60 @@ class ComplianceTests(unittest.TestCase):
 
 
 class VisualSelectionTests(unittest.TestCase):
+    def test_hero_wearer_requires_trusted_adult_source_support(self) -> None:
+        class WearerSelectorClient:
+            @staticmethod
+            def select_best_generated_image(*args, **kwargs):
+                return {
+                    "selected_index": 0,
+                    "candidates": [
+                        {
+                            "index": 0,
+                            "usable": True,
+                            "identity_consistent": True,
+                            "construction_consistent": True,
+                            "correct_color": True,
+                            "single_product": True,
+                            "product_complete": True,
+                            "clean_neutral_background": True,
+                            "has_person": True,
+                            "has_unrelated_props": False,
+                            "anatomy_natural": True,
+                            "unwanted_text": False,
+                            "unwanted_brand_or_logo": False,
+                            "major_artifacts": False,
+                            "product_coverage": "high",
+                            "score": 90,
+                        }
+                    ],
+                }
+
+        facts = load_product_facts(DATA / "product_info/product_5681480836479.json")
+        source_url = "https://example.test/adult-wearer.jpg"
+        candidate_url = "https://example.test/candidate.jpg"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temp_dir),
+                logger=logging.getLogger("hero-wearer-selection-test"),
+                offline=True,
+            )
+            pipeline.client = WearerSelectorClient()
+            with self.assertRaises(Exception) as caught:
+                pipeline._select_main_candidate(
+                    facts, [source_url], [candidate_url]
+                )
+            self.assertIn("unsupported_wearer", caught.exception.feedback)
+
+            pipeline._source_image_observations[source_url] = {
+                "has_person": True,
+                "safe_for_generation_reference": True,
+            }
+            selected = pipeline._select_main_candidate(
+                facts, [source_url], [candidate_url]
+            )
+        self.assertEqual(selected, candidate_url)
+
     def test_six_image_review_uses_platform_allowed_remote_urls(self) -> None:
         facts = load_product_facts(
             DATA / "product_info/product_9451226053560.json"
@@ -261,7 +331,7 @@ class VisualSelectionTests(unittest.TestCase):
         self.assertEqual(planned[4][0][0], main_reference)
         self.assertEqual(planned[4][1], "lower")
 
-    def test_detail_selector_rejects_hidden_critical_structure(self) -> None:
+    def test_detail_selector_soft_scores_ambiguous_structure_for_closeup(self) -> None:
         class SelectorClient:
             @staticmethod
             def select_best_detail_image(*args, **kwargs):
@@ -298,14 +368,14 @@ class VisualSelectionTests(unittest.TestCase):
                 offline=True,
             )
             pipeline.client = SelectorClient()
-            with self.assertRaisesRegex(Exception, "候选均未通过语义质检"):
-                pipeline._select_detail_candidate(
-                    4,
-                    facts,
-                    ["https://example.test/source.jpg"],
-                    ["https://example.test/candidate.jpg"],
-                    "four-color variant lineup",
-                )
+            selected = pipeline._select_detail_candidate(
+                2,
+                facts,
+                ["https://example.test/source.jpg"],
+                ["https://example.test/candidate.jpg"],
+                "construction close-up",
+            )
+        self.assertEqual(selected, "https://example.test/candidate.jpg")
 
     def test_detail_selector_keeps_candidate_when_judge_is_unavailable(self) -> None:
         class FailingSelectorClient:
@@ -699,6 +769,64 @@ class FactAndTaxonomyTests(unittest.TestCase):
         self.assertEqual(facts.size_conversions[0].pounds, "88.2–104.7 lb")
         self.assertGreaterEqual(len(facts.product_image_urls), 5)
 
+    def test_copy_schema_accepts_natural_paragraphing_and_extra_metadata(self) -> None:
+        facts = load_product_facts(DATA / "product_info/product_5758364264251.json")
+        taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
+        payload = _fallback_payload("en", facts, taxonomy)
+        payload["overview"] = " ".join(payload["overview"].split())
+        payload["diagnostics"] = {"draft": "model-note"}
+        payload["localized_terms"]["__exact_source_label__"] = "原厂型号 A"
+
+        error = _payload_validation_error(
+            "en",
+            payload,
+            facts,
+            taxonomy,
+            set(payload["media_descriptions"]),
+            set(payload["localized_terms"]),
+        )
+        self.assertEqual(error, "")
+
+        payload["title"] += " 中文残留"
+        error = _payload_validation_error(
+            "en",
+            payload,
+            facts,
+            taxonomy,
+            set(payload["media_descriptions"]),
+            set(payload["localized_terms"]),
+        )
+        self.assertEqual(error, "source-script-contamination-guard")
+
+    def test_chinese_gate_separates_buyer_copy_from_machine_appendix(self) -> None:
+        text = """# Natural product title
+
+## Product description
+
+Natural localized overview.
+
+## Key features
+
+- Verified feature
+
+## Listing information
+
+- **Exact source label:** 原厂型号 A
+
+## Media guide
+
+- **main_image.jpeg:** Localized media description.
+"""
+        buyer, machine = _description_language_surfaces(text, "en")
+        self.assertNotRegex(buyer, r"[\u4e00-\u9fff]")
+        self.assertIn("原厂型号", machine)
+
+        contaminated = text.replace(
+            "Localized media description.", "Localized media description 中文"
+        )
+        buyer, _ = _description_language_surfaces(contaminated, "en")
+        self.assertRegex(buyer, r"[\u4e00-\u9fff]")
+
     def test_sample_categories_resolve_to_leaf_nodes(self) -> None:
         expected = {
             "3887087154767": "29073",
@@ -806,12 +934,14 @@ class FactAndTaxonomyTests(unittest.TestCase):
         )
         children_taxonomy = resolve_taxonomy(children, self.tree, self.attributes)
         children_plan = fallback_creative_plan(children, children_taxonomy)
+        self.assertIn("do not add a child, adult", children_plan.main_prompt)
         self.assertIn("product-only", children_plan.detail_prompts[4])
         self.assertNotIn("show one adult wearer", children_plan.detail_prompts[4])
 
         shorts = load_product_facts(DATA / "product_info/product_9493156931235.json")
         shorts_taxonomy = resolve_taxonomy(shorts, self.tree, self.attributes)
         shorts_plan = fallback_creative_plan(shorts, shorts_taxonomy)
+        self.assertIn("adult wearer is optional", shorts_plan.main_prompt)
         self.assertIn("waistband", shorts_plan.detail_prompts[1])
         self.assertIn("both legs", shorts_plan.video_prompt)
 

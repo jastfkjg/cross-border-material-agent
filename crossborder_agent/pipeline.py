@@ -278,11 +278,10 @@ class Pipeline:
                 vision,
                 self.client,
                 agent_guidance=agent_plan,
-                skill_instructions=self.skills.combine(
+                skill_instructions=self.skills.compile(
+                    "creative-plan",
                     "product-grounding",
-                    "aliexpress-content-compliance",
-                    "commerce-visuals",
-                    "commerce-video",
+                    "marketplace-materials",
                 ),
             )
             self.logger.info("创意计划来源: %s", plan_model)
@@ -361,10 +360,10 @@ class Pipeline:
                                 language, ""
                             )
                         ),
-                        skill_instructions=self.skills.combine(
+                        skill_instructions=self.skills.compile(
+                            "copy",
                             "product-grounding",
-                            "aliexpress-content-compliance",
-                            "marketplace-localization",
+                            "marketplace-materials",
                         ),
                     ): language
                     for language in ("en", "ko", "pt")
@@ -1141,10 +1140,10 @@ class Pipeline:
                 agent_plan.get("localization_priorities", {}).get(language, "")
             ),
             revision_feedback=instruction,
-            skill_instructions=self.skills.combine(
+            skill_instructions=self.skills.compile(
+                "copy",
                 "product-grounding",
-                "aliexpress-content-compliance",
-                "marketplace-localization",
+                "marketplace-materials",
             ),
         )
         if not source.startswith(self.client.config.chat_model):
@@ -1385,7 +1384,9 @@ Candidate 1:
         system = (
             "You are a conservative AliExpress apparel taxonomy classifier. Return JSON only. "
             "You must choose exactly one supplied leaf category ID. Do not invent an ID.\n\n"
-            + self.skills.combine("product-grounding", "aliexpress-taxonomy")
+            + self.skills.compile(
+                "taxonomy", "product-grounding", "aliexpress-taxonomy"
+            )
         )
         prompt = f"""
 Choose the most accurate leaf category for the verified product.
@@ -1450,10 +1451,10 @@ Allowed leaf candidates:
             result = self.client.analyze_product_images(
                 json.dumps(facts.compact_dict(), ensure_ascii=False),
                 urls,
-                skill_instructions=self.skills.combine(
+                skill_instructions=self.skills.compile(
+                    "source-vision",
                     "product-grounding",
-                    "aliexpress-content-compliance",
-                    "commerce-visuals",
+                    "marketplace-materials",
                 ),
             )
             source_images = normalize_source_image_observations(result, urls)
@@ -1958,6 +1959,10 @@ Allowed leaf candidates:
             score += 2.0
         if item.get("usable") is False:
             score -= 8.0
+        # A close-up may omit the full category outline while still delivering
+        # its assigned local feature. Identity and slot mismatch remain hard.
+        if item.get("critical_structure_unambiguous") is False:
+            score -= 6.0
         coverage = str(item.get("product_coverage") or "").casefold()
         if coverage == "low":
             score -= 10.0
@@ -2209,6 +2214,7 @@ Allowed leaf candidates:
             keep = incumbent_index if incumbent_index is not None else 0
             self.warnings.append("主图语义评审结构不完整，采用确定性候选")
             return candidate_urls[keep]
+        wearer_supported = self._hero_wearer_supported(facts, source_urls)
         ranked: list[tuple[float, int, dict[str, Any]]] = []
         hard_reasons: list[str] = []
         for item in candidates:
@@ -2223,12 +2229,18 @@ Allowed leaf candidates:
                 "correct_color": False,
                 "single_product": False,
                 "product_complete": False,
-                "has_person": True,
                 "unwanted_text": True,
                 "unwanted_brand_or_logo": True,
                 "major_artifacts": True,
             }
             failed = [key for key, value in hard_fields.items() if item.get(key) is value]
+            if item.get("has_person") is True and not wearer_supported:
+                failed.append("unsupported_wearer")
+            if (
+                item.get("has_person") is True
+                and item.get("anatomy_natural") is False
+            ):
+                failed.append("anatomy_natural")
             if failed:
                 hard_reasons.append(
                     f"candidate {index}: {','.join(failed)}; {item.get('reason', '')}"
@@ -2239,6 +2251,8 @@ Allowed leaf candidates:
                 score -= 8
             if item.get("has_unrelated_props") is True:
                 score -= 5
+            if item.get("has_person") is True:
+                score -= 2
             ranked.append((score, index, item))
         return self._choose_monotonic_candidate(
             "主图",
@@ -2247,6 +2261,35 @@ Allowed leaf candidates:
             incumbent_index=incumbent_index,
             minimum_improvement=minimum_improvement,
             hard_reasons=hard_reasons,
+        )
+
+    @staticmethod
+    def _is_children_product(facts: ProductFacts) -> bool:
+        source_text = " ".join(
+            [
+                facts.source_title,
+                facts.source_category_name,
+                *[f"{item.name} {item.value}" for item in facts.attributes],
+            ]
+        ).casefold()
+        return bool(
+            re.search(r"[男女]?童|儿童|婴儿|婴幼儿", source_text)
+            or re.search(
+                r"\b(?:boy|boys|girl|girls|kid|kids|child|children|baby|toddler)\b",
+                source_text,
+            )
+        )
+
+    def _hero_wearer_supported(
+        self, facts: ProductFacts, source_urls: list[str]
+    ) -> bool:
+        if self._is_children_product(facts):
+            return False
+        return any(
+            observation.get("has_person") is True
+            and observation.get("safe_for_generation_reference") is True
+            for url in source_urls
+            if (observation := self._source_image_observations.get(url))
         )
 
     def _build_detail_image(
@@ -2488,8 +2531,6 @@ Allowed leaf candidates:
                 "construction_consistent": False,
                 "color_consistent": False,
                 "pattern_consistent": False,
-                "critical_structure_unambiguous": False,
-                "anatomy_natural": False,
                 "unwanted_text": True,
                 "unwanted_brand_or_logo": True,
                 "prohibited_visual": True,
@@ -2497,6 +2538,12 @@ Allowed leaf candidates:
                 "unexpected_collage": True,
                 "single_composition": False,
             }
+            purpose_text = purpose.casefold()
+            if any(
+                token in purpose_text
+                for token in ("wearer", "person", "adult", "man", "woman", "body")
+            ):
+                hard_fields["anatomy_natural"] = False
             failed = [key for key, value in hard_fields.items() if item.get(key) is value]
             if failed:
                 hard_reasons.append(
@@ -2510,12 +2557,6 @@ Allowed leaf candidates:
                 continue
             score = self._candidate_soft_score(item, selected_index=selected)
             ranked.append((score, candidate_index, item))
-        if incumbent_index is None and ranked and max(row[0] for row in ranked) < 65:
-            hard_reasons.extend(
-                f"candidate {candidate_index}: quality score {score:.1f} below 65; {item.get('reason', '')}"
-                for score, candidate_index, item in ranked
-            )
-            ranked = []
         return self._choose_monotonic_candidate(
             f"详情图 {index}",
             candidate_urls,
@@ -3037,7 +3078,7 @@ Allowed leaf candidates:
             for item in (
                 str(row.get("reason") or "").strip(),
                 str(review.get("summary") or "").strip(),
-                "Restore the canonical slot role and remove semantic duplication, split panels, or low product coverage.",
+                "Restore the canonical slot role and remove semantic duplication or split panels; use framing and product coverage appropriate to that role.",
             )
             if item
         )[:1400]

@@ -16,13 +16,6 @@ _PRESERVATION = (
     "Do not invent text, measurements, materials, certifications or brand marks. No watermark."
 )
 
-_MAIN_PRESENTATION = (
-    "Show exactly one physical product in exactly one verified colorway. The complete product must be visible, "
-    "including collar or waistband, both sleeves or legs, cuffs and hem. Use a product-only studio presentation "
-    "such as a clean flat lay, hanger, or invisible mannequin; no person, mannequin body, colorway lineup, duplicate "
-    "garment, inset, split screen, montage or collage."
-)
-
 _BASE_DETAIL_SLOT_DIRECTIVES = (
     "This is detail slot 1: show a complete front three-quarter product presentation on a hanger or invisible form "
     "with the uncluttered, practical editorial styling familiar to US marketplace shoppers. Use a warm neutral wall "
@@ -50,6 +43,24 @@ def _product_family(taxonomy: TaxonomyResult) -> str:
     if category_id == "39107":
         return "dress"
     return "top"
+
+
+def _main_presentation(taxonomy: TaxonomyResult) -> str:
+    common = (
+        "Show one sellable product in one verified colorway as the single dominant subject. The complete garment "
+        "must be visible, including collar or waistband, both sleeves or legs, cuffs and hem. No colorway lineup, "
+        "duplicate garment, inset, split screen, montage or collage. "
+    )
+    if _product_family(taxonomy) == "children":
+        return common + (
+            "Use a product-only studio presentation such as a clean flat lay, hanger or invisible form; do not "
+            "add a child, adult, hands, toys or character props."
+        )
+    return common + (
+        "Prefer a product-only flat lay, hanger or invisible-form presentation. A single naturally proportioned, "
+        "fully clothed adult wearer is optional only when a trusted source reference already shows a wearer; keep "
+        "the garment unobstructed and the background clean."
+    )
 
 
 def _detail_slot_specs(
@@ -188,16 +199,16 @@ def fallback_creative_plan(
     slot_directives = tuple(item[1] for item in slot_specs)
     return CreativePlan(
         visual_theme=(
-            "Campaign Style Lock: pure white primary, warm ivory secondary, and one accent sampled from the verified "
-            "product color; soft diffused daylight, realistic fabric rendering, restrained modern editorial styling, "
-            "product occupying 70-80% of the frame; no typography, random backgrounds, invented logos, or style drift"
+            "Campaign Style Lock: restrained styling coordinated with every seller-verified product color; realistic "
+            "fabric rendering and role-appropriate variation in background, lighting and framing; coherence comes "
+            "from product identity rather than identical treatment; no typography, invented logos, or style drift"
         ),
         main_prompt=(
             f"Create a square premium e-commerce hero image using the reference product. {identity} "
             "Use a clean white-to-very-light-gray studio background, soft realistic shadow, even lighting, "
-            "accurate color, centered composition, and generous margins. Product occupies about 80 percent of frame. "
+            "accurate color, centered composition, and safe margins with the product visually dominant. "
             "No promotional text, badges, borders, collage or extra props. "
-            + _MAIN_PRESENTATION
+            + _main_presentation(taxonomy)
             + " "
             + _PRESERVATION
         ),
@@ -310,9 +321,11 @@ Return JSON with exactly these keys:
 Hard constraints for every image prompt:
 {_PRESERVATION}
 
-Main image: square, clean near-white studio background, centered, no text. {_MAIN_PRESENTATION}
-The visual_theme must be a Campaign Style Lock with no more than three colors, one lighting system,
-a 70-80 percent product-coverage target, and explicit no-drift rules.
+Main image: square, clean near-white studio background, centered, no text. {_main_presentation(taxonomy)}
+The visual_theme must define a restrained campaign direction with explicit product-identity no-drift
+rules. It may accommodate every seller-verified product color. Palette, background, lighting, framing
+and product coverage may vary by commercial role and target-market context; do not impose one global
+color count, background system or coverage percentage.
 Details: vertical 4:5; assign exactly one primary commercial job to each slot. Cover overall silhouette,
 neckline or closure, sleeve/cuff/material detail, back/hem construction or only genuinely verified variants,
 and practical context. A perceptually different pose is not sufficient if it repeats another slot's job.
@@ -359,7 +372,7 @@ Bounded manager guidance:
         main_prompt=(
             payload["main_prompt"].strip()
             + " "
-            + _MAIN_PRESENTATION
+            + _main_presentation(taxonomy)
             + " "
             + _PRESERVATION
         ),

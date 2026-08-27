@@ -5,11 +5,11 @@ description: Select and review AliExpress apparel leaf categories, enumerated pr
 
 # AliExpress Taxonomy
 
-Choose only from supplied leaf-category candidates and preserve the exact category ID. Use verified product type, intended wearer, garment family, silhouette, and source category as evidence; visual styling alone must not override stronger structured facts.
+## Compilable rules
 
-Map attributes only to keys and enumerated values allowed by the selected category schema. Preserve platform attribute IDs, value IDs, sales-attribute status, source values, and evidence pointers. Never invent a required value that is absent from the source.
-
-If the leaf category has no independent attribute metadata and the platform snapshot supplies a parent or common schema, keep the selected leaf ID for listing and report the schema category separately. Do not mistake a schema fallback for a different listing category.
-
-When reviewing A3, compare exact IDs and enumerations rather than judging whether a free-text label merely sounds plausible.
-
+- [taxonomy][hard] Choose only a supplied leaf category and preserve its exact ID; product family, intended wearer, garment length and explicit source attributes outrank visual styling.
+- [taxonomy][hard] Reject an explicit alias when it conflicts with verified product type, wearer or garment length; aliases may guide ranking but cannot bypass compatibility checks.
+- [taxonomy][hard] Map only supplied schema keys and enumerated values, preserve exact attribute/value IDs and genuine SKU combinations, and never invent a missing required value.
+- [taxonomy][hard] A parent or common schema may supply attribute definitions without changing the selected listing leaf ID.
+- [taxonomy][soft] Prefer ordinary apparel leaves unless supplied evidence supports a specialized sport, uniform, maternity, plus-size or novelty purpose.
+- [final-review][hard] Judge A3 by exact leaf, attribute, value and SKU identifiers rather than plausible free-text labels.

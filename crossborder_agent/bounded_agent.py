@@ -19,6 +19,7 @@ from .models import (
     ProductFacts,
     TaxonomyResult,
 )
+from .qa import _description_language_surfaces
 from .skill_runtime import SkillLibrary
 
 
@@ -80,12 +81,11 @@ class BoundedDeliveryAgent:
             "You are the manager of a bounded cross-border commerce material agent. "
             "Return JSON only. Plan outcomes and priorities; do not invent product facts. "
             "The executor exposes only the listed tools and a deterministic final specification gate.\n\n"
-            + self.skills.combine(
-                "delivery-planning",
+            + self.skills.compile(
+                "manager",
+                "delivery-quality",
                 "product-grounding",
                 "aliexpress-taxonomy",
-                "aliexpress-content-compliance",
-                "rubric-evaluation",
             )
         )
         prompt = f"""
@@ -185,14 +185,12 @@ Available repair tools for later rounds:
             "Judge the complete delivery against A1-A7 and select only high-value repairs. Do not replace a "
             "weak generated asset with a source fallback: ask the matching tool to revise or regenerate it. "
             "Do not reward strategy claims that are not evidenced by the artifact manifest or supplied media.\n\n"
-            + self.skills.combine(
-                "rubric-evaluation",
+            + self.skills.compile(
+                "final-review",
+                "delivery-quality",
                 "product-grounding",
                 "aliexpress-taxonomy",
-                "aliexpress-content-compliance",
-                "marketplace-localization",
-                "commerce-visuals",
-                "commerce-video",
+                "marketplace-materials",
             )
         )
         prompt = f"""
@@ -217,8 +215,11 @@ when the weighted score is at least {agent_plan.get('minimum_weighted_score', 82
 issues, and A1/A2/A5 have no major issue.
 Treat a deterministic or validation-error copy source as a quality degradation: inspect its rendered
 shopper preview and request revise_localized_copy when it is generic, process-oriented or misses a
-distinctive source-title design detail. Do not reward raw evidence volume. Localized deliverables must
-not contain Chinese source values, JSON pointers, canonical/evidence labels or duplicated audit tables.
+distinctive source-title design detail. Do not reward raw evidence volume. Buyer-facing prose and media
+descriptions must use the requested locale and must not contain stray Chinese fragments. Do not treat
+an exact source URL, identifier, model code or necessary source label inside the clearly separated
+machine appendix as buyer-copy contamination. JSON pointers, canonical/evidence labels and duplicated
+audit tables remain defects.
 Treat the six-image set review below as independent evidence about semantic duplication and missing
 commercial roles. A set-level repair target is higher priority than a cosmetic per-image preference.
 It may predate repairs in later rounds, so corroborate it against the current manifest and media.
@@ -292,19 +293,22 @@ Available repair tools:
                 for line in text.splitlines()
                 if line.startswith("## ")
             ]
-            first = text.find("\n## ")
-            second = text.find("\n## ", first + 1) if first >= 0 else -1
-            third = text.find("\n## ", second + 1) if second >= 0 else -1
-            shopper_preview = text[: third if third > 0 else 2500]
-            localized_surface = re.sub(r"https?://[^\s)>]+", "", text)
+            shopper_preview, machine_appendix = _description_language_surfaces(
+                text, language
+            )
+            localized_surface = re.sub(r"https?://[^\s)>]+", "", shopper_preview)
+            machine_surface = re.sub(r"https?://[^\s)>]+", "", machine_appendix)
             evidence.append(
                 {
                     "language": language,
                     "readable": True,
                     "characters": len(text),
                     "headings": headings,
-                    "chinese_character_count": len(
+                    "buyer_chinese_character_count": len(
                         re.findall(r"[\u4e00-\u9fff]", localized_surface)
+                    ),
+                    "machine_appendix_chinese_character_count": len(
+                        re.findall(r"[\u4e00-\u9fff]", machine_surface)
                     ),
                     "json_pointer_count": text.count("/ret/result/result"),
                     "shopper_preview": shopper_preview[:2500],

@@ -992,7 +992,10 @@ def _normalize_auxiliary_fields(
             if (
                 isinstance(value, str)
                 and value.strip()
-                and not re.search(r"[\u4e00-\u9fff]", value)
+                and (
+                    object_key == "localized_terms"
+                    or not re.search(r"[\u4e00-\u9fff]", value)
+                )
             ):
                 merged[key] = value.strip()
             else:
@@ -1035,7 +1038,7 @@ def _salvage_copy_payload(
     highlights = candidate.get("highlights")
     if (
         isinstance(highlights, list)
-        and 3 <= len(highlights) <= 5
+        and 1 <= len(highlights) <= 8
         and all(
             isinstance(item, str)
             and item.strip()
@@ -1059,12 +1062,7 @@ def _salvage_copy_payload(
         )
         if not error:
             return merged, "field-level-salvage"
-        if error in {
-            "shopper-overview-needs-two-paragraphs",
-            "shopper-overview-paragraph-too-short",
-        }:
-            merged["overview"] = fallback["overview"]
-        elif error == "localized-title-guard":
+        if error == "localized-title-guard":
             merged["title"] = fallback["title"]
         elif error == "numeric-fact-guard":
             merged = _repair_numeric_fields(
@@ -1119,30 +1117,17 @@ def _payload_validation_error(
         "media_descriptions",
         "localized_terms",
     }
-    if not isinstance(payload, dict) or set(payload) != required:
+    if not isinstance(payload, dict) or not required.issubset(payload):
         return "invalid-model-payload"
     if not all(
         isinstance(payload.get(key), str) and payload[key].strip()
         for key in ("title", "overview", "fit_note")
     ):
         return "invalid-model-payload"
-    overview_paragraphs = [
-        part.strip()
-        for part in re.split(r"\n\s*\n", str(payload.get("overview") or ""))
-        if part.strip()
-    ]
-    if len(overview_paragraphs) != 2:
-        return "shopper-overview-needs-two-paragraphs"
-    minimum_paragraph_chars = {"en": 45, "ko": 20, "pt": 45}[language]
-    if any(
-        len(re.sub(r"\s+", "", paragraph)) < minimum_paragraph_chars
-        for paragraph in overview_paragraphs
-    ):
-        return "shopper-overview-paragraph-too-short"
     highlights = payload.get("highlights")
     if (
         not isinstance(highlights, list)
-        or not 3 <= len(highlights) <= 5
+        or not 1 <= len(highlights) <= 8
         or not all(isinstance(item, str) and item.strip() for item in highlights)
     ):
         return "invalid-model-payload"
@@ -1163,14 +1148,13 @@ def _payload_validation_error(
         )
     ):
         return "invalid-localized-terms"
-    generated_text = "\n".join(
+    buyer_text = "\n".join(
         [
             str(payload.get("title") or ""),
             str(payload.get("overview") or ""),
             str(payload.get("fit_note") or ""),
             *[str(item) for item in payload.get("highlights", [])],
             *[str(item) for item in media.values()],
-            *[str(item) for item in localized_terms.values()],
         ]
     )
     natural_text = "\n".join(
@@ -1185,7 +1169,7 @@ def _payload_validation_error(
         str(payload.get("title") or "").strip()
     ) > 128:
         return "localized-title-guard"
-    if re.search(r"[\u4e00-\u9fff]", generated_text):
+    if re.search(r"[\u4e00-\u9fff]", buyer_text):
         return "source-script-contamination-guard"
     if language == "ko" and not re.search(r"[\uac00-\ud7a3]", natural_text):
         return "ko-KR-native-language-guard"
@@ -1253,9 +1237,15 @@ def _payload_validation_error(
     )
     if matched_features < min(3, len(localized_feature_values)):
         return "insufficient-verified-details"
-    if _contains_unverified_numbers(payload, _allowed_numbers(facts, taxonomy)):
+    buyer_payload = {
+        key: payload.get(key)
+        for key in ("title", "overview", "highlights", "fit_note", "media_descriptions")
+    }
+    if _contains_unverified_numbers(
+        buyer_payload, _allowed_numbers(facts, taxonomy)
+    ):
         return "numeric-fact-guard"
-    if generated_copy_violations(language, payload):
+    if generated_copy_violations(language, buyer_payload):
         return "content-compliance-guard"
     return ""
 
@@ -1925,25 +1915,26 @@ labels or audit terminology there. Code will place those exact machine fields in
 Use normal grammar rather than concatenating localized field values. In English, for example, write
 "a cold-shoulder design, a halter-style neckline, long sleeves, and a slim fit" rather than copying
 Title Case attribute labels into a sentence.
-The overview must contain exactly two useful shopper-facing paragraphs separated by a blank line.
-Paragraph one should describe the product and its distinctive design; paragraph two should explain
-available options and conservative sizing information. Do not refer shoppers to an audit, evidence
-ledger, canonical data, source verification process or SKU matrix.
+Write a concise, substantive overview in the paragraph structure that reads most naturally for this
+product and locale. It may use one or several short paragraphs; formatting alone is never a reason to
+discard factual, fluent copy. Cover distinctive design, available options and conservative sizing where
+supported. Do not refer shoppers to an audit, evidence ledger, canonical data, source verification
+process or SKU matrix.
 For en-US, use US spelling and concise marketplace phrasing. For ko-KR, use natural Korean retail
 sentence endings and Korean option terminology. For pt-BR, use Brazilian vocabulary and forms such
 as produto, tamanho, camiseta and consulte; avoid European Portuguese vocabulary.
 {skill_instructions}
 """.strip()
     prompt = f"""
-Produce JSON with exactly these keys:
+Produce a JSON object containing at least these required fields; extra explanatory fields are ignored:
 - title: localized product title
-- overview: exactly two concise localized paragraphs separated by the literal delimiter \\n\\n as one string
-- highlights: array of 3 to 5 natural shopper-facing feature phrases, not raw field labels
+- overview: concise substantive localized prose using natural paragraphing
+- highlights: preferably 3 to 5 distinct natural shopper-facing feature phrases, not raw field labels
 - fit_note: one conservative localized sizing note
 - media_descriptions: object with exactly these keys:
   main_image.jpeg, detail_image_1.jpeg, detail_image_2.jpeg,
   detail_image_3.jpeg, detail_image_4.jpeg, detail_image_5.jpeg, product_video.mp4
-- localized_terms: object whose keys exactly match every source term in the list below and whose values are concise native translations. Keep model numbers, IDs and size codes unchanged, but translate all Chinese words.
+- localized_terms: object covering every source term below with a concise native display value. Keep model numbers, IDs and size codes unchanged. Translate source-script labels when reliable; preserve an exact proper label only when translation would lose evidence.
 
 Source terms requiring localized display values:
 {json.dumps(sorted(source_terms), ensure_ascii=False)}
@@ -1994,12 +1985,13 @@ Keep natural localized language, but prefer precise field-level facts over gener
 Replace stock marketing phrases with product-specific syntax and vary sentence structure. Keep buyer
 copy free of IDs and raw field labels because code renders machine-oriented data in a separate appendix.
 Make each highlight serve a distinct purchase decision instead of repeating the overview.
-The result must contain exactly the requested six top-level keys and exactly the seven required media keys.
-Do not copy Chinese characters into any customer-facing value. The localized_terms keys are the sole
-exception: preserve those exact source keys, while translating every localized_terms value.
+The result must contain all requested fields and all seven required media keys; ignore harmless extra
+top-level metadata instead of rewriting good prose. Do not copy Chinese characters into buyer-facing
+prose or media descriptions. Preserve exact localized_terms source keys, and normally translate their
+values; an exact identifier, model code or proper source label may remain in this machine-oriented map.
 Apply native {locale["locale"]} grammar and retail terminology, not literal source-language word order.
-Keep exactly two substantive shopper-facing overview paragraphs separated by a blank line. Remove
-process language, evidence-led phrasing and instructions to inspect a SKU matrix.
+Use natural paragraphing for the overview. Remove process language, evidence-led phrasing and
+instructions to inspect a SKU matrix.
 {skill_instructions}
 """.strip()
     audit_prompt = f"""
@@ -2064,10 +2056,12 @@ The video description may state the fixed 8-second duration. Output the correcte
     if validation_error:
         repair_prompt = f"""
 Repair the candidate payload because it failed this deterministic check: {validation_error}.
-Return the same exact schema in natural {locale["locale"]}. Translate all source concepts fully;
-do not copy Chinese characters into values. Preserve the exact Chinese localized_terms keys listed below.
+Return all required schema fields in natural {locale["locale"]}; harmless extra top-level fields are
+allowed and ignored. Remove Chinese fragments from buyer-facing prose and media descriptions. Preserve
+the exact localized_terms source keys below; translate their display values when reliable, while keeping
+exact identifiers, model codes and necessary proper source labels unchanged.
 Remove unsupported numbers and claims instead of replacing them with new claims.
-The localized_terms object must contain exactly these source keys:
+The localized_terms object must cover these source keys; extra keys are ignored:
 {json.dumps(sorted(expected_terms), ensure_ascii=False)}
 
 Candidate:

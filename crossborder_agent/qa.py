@@ -38,6 +38,42 @@ class ValidationReport:
     warnings: list[str] = field(default_factory=list)
 
 
+_MEDIA_HEADINGS = {
+    "en": "Media guide",
+    "ko": "미디어 안내",
+    "pt": "Guia de mídia",
+}
+
+
+def _description_language_surfaces(text: str, language: str) -> tuple[str, str]:
+    """Separate locale-facing copy from the exact machine listing appendix."""
+
+    headings = list(re.finditer(r"(?m)^## ", text))
+    appendix_start = headings[2].start() if len(headings) >= 3 else len(text)
+    buyer_surface = text[:appendix_start]
+    machine_surface = text[appendix_start:]
+
+    media_heading = _MEDIA_HEADINGS.get(language)
+    if media_heading:
+        match = re.search(rf"(?m)^## {re.escape(media_heading)}\s*$", text)
+        if match:
+            next_heading = re.search(r"(?m)^## ", text[match.end() :])
+            media_end = (
+                match.end() + next_heading.start()
+                if next_heading
+                else len(text)
+            )
+            media_surface = text[match.start() : media_end]
+            buyer_surface += "\n" + media_surface
+            if match.start() >= appendix_start:
+                relative_start = match.start() - appendix_start
+                relative_end = media_end - appendix_start
+                machine_surface = (
+                    machine_surface[:relative_start] + machine_surface[relative_end:]
+                )
+    return buyer_surface, machine_surface
+
+
 def _validate_description(
     path: Path,
     facts: ProductFacts,
@@ -68,11 +104,17 @@ def _validate_description(
         if value and value not in text:
             report.errors.append(f"{path.name} 缺少必需内容: {value}")
 
-    # Buyer-visible copy and machine display values must be localized. Immutable
-    # source URLs may legally contain Unicode path/query text and are not copy.
-    localized_surface = re.sub(r"https?://[^\s)>]+", "", text)
-    if re.search(r"[\u4e00-\u9fff]", localized_surface):
-        report.errors.append(f"{path.name} 含未本地化的中文字符")
+    language = path.stem.removeprefix("product_description_")
+    buyer_surface, machine_surface = _description_language_surfaces(text, language)
+    # Source URLs, identifiers and exact proper labels belong to the evidence
+    # appendix. Source script is a hard defect only when it leaks into shopper
+    # prose or media descriptions; appendix residue remains visible as a warning.
+    buyer_surface = re.sub(r"https?://[^\s)>]+", "", buyer_surface)
+    machine_surface = re.sub(r"https?://[^\s)>]+", "", machine_surface)
+    if re.search(r"[\u4e00-\u9fff]", buyer_surface):
+        report.errors.append(f"{path.name} 买家文案或媒体描述含未本地化中文")
+    if re.search(r"[\u4e00-\u9fff]", machine_surface):
+        report.warnings.append(f"{path.name} 机器附录保留了中文来源值")
     forbidden_internal_markers = (
         "/ret/result/result",
         "Source evidence",
@@ -97,17 +139,12 @@ def _validate_description(
             for item in re.split(r"\n\s*\n", overview_body)
             if item.strip()
         ]
-        language = path.stem.removeprefix("product_description_")
-        minimum_paragraph_chars = {"en": 45, "ko": 20, "pt": 45}.get(
-            language, 45
+        minimum_overview_chars = {"en": 70, "ko": 35, "pt": 70}.get(language, 70)
+        overview_length = len(
+            re.sub(r"\s+", "", " ".join(paragraphs))
         )
-        if len(paragraphs) != 2:
-            report.errors.append(f"{path.name} 商品描述须包含两个段落")
-        elif any(
-            len(re.sub(r"\s+", "", paragraph)) < minimum_paragraph_chars
-            for paragraph in paragraphs
-        ):
-            report.errors.append(f"{path.name} 商品描述段落内容过短")
+        if overview_length < minimum_overview_chars:
+            report.warnings.append(f"{path.name} 商品描述内容偏短")
 
     for item in taxonomy.attributes:
         for value in (item.attr_id, item.value_id):

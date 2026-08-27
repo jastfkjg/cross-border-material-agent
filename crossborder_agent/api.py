@@ -741,13 +741,16 @@ Return JSON with:
 - candidates: exactly {len(candidate_urls)} objects, each containing index, usable,
   identity_consistent, construction_consistent, correct_color, single_product,
   product_complete, clean_neutral_background, has_person, has_unrelated_props,
-  unwanted_text, unwanted_brand_or_logo, major_artifacts, product_coverage
+  anatomy_natural, unwanted_text, unwanted_brand_or_logo, major_artifacts, product_coverage
   (high/medium/low), score (0-100), and reason.
 
 Explicitly inspect visible product type, silhouette, collar/neckline, sleeve or leg length,
 pockets, button/fastener count where visible, hem, pattern and any product logo.
 Reject any candidate that reproduces a background/styling brand, character, store text or logo
 that is not intrinsic to the sellable product.
+Prefer a product-only hero. For adult apparel, a single fully clothed adult wearer is acceptable only
+when a trusted source already shows a wearer, the garment remains complete and unobstructed, anatomy is
+natural, and the clean near-white hero composition is preserved. Never add a wearer for children's goods.
 
 Verified facts:
 {facts_json}
@@ -791,10 +794,13 @@ Return JSON with:
   product_coverage (high/medium/low), score (0-100), and reason.
 
 For a variant lineup, every shown variant must be visibly supported by a source reference.
-Do not accept a crop, fold, pose or layout that hides a category-defining feature required to
-recognize the verified product, such as sleeve/leg length, neckline, closures or silhouette. For a
-variant lineup, each item must remain unambiguously the same product; folded long sleeves must still
-be visibly present rather than making the item appear sleeveless.
+Evaluate critical_structure_unambiguous as a quality signal relative to the intended storyboard
+purpose, not as an automatic rejection. A close-up does not need to show the complete garment: it must
+clearly show its assigned local feature plus enough identity anchors to connect it to the verified
+product. Reject only when the crop causes actual product-identity drift or fails the assigned slot.
+Full-view, variant and wearer slots should keep the category-defining structure recognizable. For a variant lineup, each item must remain
+unambiguously the same product; folded long sleeves must still be visibly present rather than making
+the item appear sleeveless.
 For a wearer scene, reject malformed hands, limbs, faces, garment fit or body proportions.
 Every non-variant detail must use one coherent full-frame composition. Mark unexpected_collage true
 for a montage, grid, split screen, inset, repeated panel, or a hybrid close-up/full-product layout.
