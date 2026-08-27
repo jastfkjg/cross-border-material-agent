@@ -18,6 +18,7 @@ from typing import Any
 from .agent_tools import BoundedToolRegistry, ToolExecution, ToolSpec
 from .api import ApiConfig, ApiError, HttpJsonClient, QwenClient
 from .bounded_agent import BoundedDeliveryAgent
+from .claims import build_claim_ledger, filter_invalid_mapping_provenance
 from .compliance import normalize_source_image_observations
 from .debug_trace import DebugTrace
 from .input_loader import discover_input_files, load_json, load_product_facts
@@ -81,6 +82,50 @@ _VIDEO_NEGATIVE_PROMPT = (
     "changed fastenings or trims, duplicate product, extra product, warped material, flicker, scene cut, camera shake, "
     "hands covering product, text, subtitles, watermark, logo animation, speech, music"
 )
+
+
+def _reviewed_media_description(
+    review: dict[str, Any] | None,
+    name: str,
+    language: str,
+    stale_names: set[str],
+) -> str:
+    """Use a caption only when it describes the current, accepted final asset."""
+
+    if not review or name in stale_names:
+        return ""
+    rows = review.get("assets")
+    if not isinstance(rows, list):
+        return ""
+    row = next(
+        (
+            item
+            for item in rows
+            if isinstance(item, dict) and item.get("name") == name
+        ),
+        None,
+    )
+    if not isinstance(row, dict) or row.get("usable") is not True:
+        return ""
+    if any(
+        row.get(field) is False
+        for field in ("identity_consistent", "construction_consistent", "color_consistent")
+    ):
+        return ""
+    if row.get("description_confidence") not in {"high", "medium"}:
+        return ""
+    descriptions = row.get("media_descriptions")
+    value = descriptions.get(language) if isinstance(descriptions, dict) else ""
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    if not 12 <= len(value) <= 300 or re.search(r"[\u4e00-\u9fff]", value):
+        return ""
+    if language == "ko" and not re.search(r"[\uac00-\ud7a3]", value):
+        return ""
+    if language in {"en", "pt"} and re.search(r"[\uac00-\ud7a3]", value):
+        return ""
+    return value
 
 
 class Pipeline:
@@ -238,6 +283,10 @@ class Pipeline:
                 self.trace.emit(
                     "taxonomy.adjudication_skipped", reason="fast-profile"
                 )
+            provenance_warnings = filter_invalid_mapping_provenance(facts, taxonomy)
+            self.warnings.extend(provenance_warnings)
+            for warning in provenance_warnings:
+                self.logger.warning(warning)
             self.trace.emit(
                 "taxonomy.resolved",
                 category=taxonomy.category.__dict__
@@ -276,6 +325,14 @@ class Pipeline:
             vision = self._analyze_source_images(facts)
             self.trace.emit("vision.source_review", result=vision)
             self._apply_size_chart_observations(facts, vision)
+            claim_ledger = build_claim_ledger(facts, taxonomy, vision)
+            self.trace.emit(
+                "claims.ledger",
+                count=len(claim_ledger),
+                publishable_count=sum(
+                    "buyer_copy" in item.allowed_surfaces for item in claim_ledger
+                ),
+            )
             tool_registry = self._create_tool_registry(
                 protect_size_chart=bool(facts.size_chart_rows)
             )
@@ -319,6 +376,7 @@ class Pipeline:
                 facts=facts,
                 taxonomy=taxonomy,
                 creative_plan=creative_plan,
+                claim_ledger=claim_ledger,
                 vision_observations=vision,
                 warnings=self.warnings,
                 agent_plan=agent_plan,
@@ -373,6 +431,7 @@ class Pipeline:
                         taxonomy,
                         creative_plan,
                         self.client,
+                        claim_ledger=claim_ledger,
                         agent_guidance=str(
                             agent_plan.get("localization_priorities", {}).get(
                                 language, ""
@@ -466,6 +525,7 @@ class Pipeline:
                 localization_payloads,
                 state.assets,
                 work_dir,
+                state.visual_set_review,
             )
             self._bind_repair_tools(
                 tool_registry,
@@ -480,6 +540,7 @@ class Pipeline:
                 work_dir=work_dir,
                 downloads_dir=downloads_dir,
             )
+            post_review_action_start = len(state.agent_actions)
             if not self.fast_mode:
                 self._run_bounded_agent_loop(
                     tool_registry,
@@ -501,6 +562,12 @@ class Pipeline:
             # generation was unavailable from the outset; this is not an evaluator fallback.
             self._enhance_fallback_video(state.assets, work_dir)
             self._record_visual_delivery_quality(state.assets)
+            stale_review_assets = {
+                item.target
+                for item in state.agent_actions[post_review_action_start:]
+                if item.status == "completed"
+                and item.tool in {"regenerate_main_image", "regenerate_detail_image"}
+            }
             self._write_localized_descriptions(
                 facts,
                 taxonomy,
@@ -508,11 +575,17 @@ class Pipeline:
                 localization_payloads,
                 state.assets,
                 work_dir,
+                state.visual_set_review,
+                stale_review_assets,
             )
             if self.client is not None:
                 state.api_calls = self.client.metrics
             self._write_strategy_document(
-                state, localization_sources, plan_model, work_dir
+                state,
+                localization_sources,
+                localization_payloads,
+                plan_model,
+                work_dir,
             )
 
             report = validate_delivery(work_dir, facts, taxonomy)
@@ -576,6 +649,8 @@ class Pipeline:
         payloads: dict[str, dict[str, Any]],
         assets: list[AssetResult],
         work_dir: Path,
+        visual_set_review: dict[str, Any] | None = None,
+        stale_review_assets: set[str] | None = None,
     ) -> None:
         asset_by_name = {asset.name: asset for asset in assets}
         fallback_templates = {
@@ -682,6 +757,7 @@ class Pipeline:
             },
         }
         for language, payload in payloads.items():
+            stale_names = stale_review_assets or set()
             media = payload.get("media_descriptions")
             if not isinstance(media, dict):
                 media = {}
@@ -697,6 +773,20 @@ class Pipeline:
             ):
                 asset = asset_by_name.get(name)
                 if asset is None:
+                    continue
+                reviewed_description = (
+                    ""
+                    if name == "product_video.mp4"
+                    or asset.model == "deterministic-size-chart"
+                    else _reviewed_media_description(
+                        visual_set_review,
+                        name,
+                        language,
+                        stale_names,
+                    )
+                )
+                if reviewed_description:
+                    media[name] = reviewed_description
                     continue
                 if asset.generated:
                     if name == "main_image.jpeg":
@@ -3181,6 +3271,7 @@ Allowed leaf candidates:
         self,
         state: RunState,
         localization_sources: dict[str, str],
+        localization_payloads: dict[str, dict[str, Any]],
         plan_model: str,
         work_dir: Path,
     ) -> None:
@@ -3227,6 +3318,22 @@ Allowed leaf candidates:
             cleaned = re.sub(r"https?://\S+", "[url]", value.replace("\n", " "))
             return cleaned[:260]
 
+        known_claim_ids = {item.claim_id for item in state.claim_ledger}
+        copy_claim_reference_lines: list[str] = []
+        for language, payload in localization_payloads.items():
+            refs = payload.get("claim_refs") if isinstance(payload, dict) else None
+            referenced = sorted(
+                {
+                    value
+                    for value in re.findall(r"\bC\d{3}\b", json.dumps(refs or {}))
+                    if value in known_claim_ids
+                }
+            )
+            if referenced:
+                copy_claim_reference_lines.append(
+                    f"- {language}: {', '.join(referenced)}"
+                )
+
         lines = [
             "# 商品本地化素材生成策略说明",
             "",
@@ -3249,6 +3356,38 @@ Allowed leaf candidates:
             f"本次共读取 {len(facts.attributes)} 条商品属性、{len(facts.skus)} 个 SKU、"
             f"{len(facts.all_image_urls())} 个不重复源图片 URL。",
             f"从源详情图核验并结构化 {len(facts.size_chart_rows)} 行服装尺码数据。",
+            f"内部 Claim Ledger 共 {len(state.claim_ledger)} 条；每条记录来源类型、原始字段和证据指针，"
+            "买家文案只开放 allowed_surfaces 包含 buyer_copy 的声明。",
+            "",
+            "### Claim Ledger（可发布声明与证据）",
+            "",
+            "| Claim ID | 声明概念 | 原始值 | 来源类型 | 来源字段 | 证据指针 |",
+            "|---|---|---|---|---|---|",
+            *[
+                "| "
+                + " | ".join(
+                    (
+                        item.claim_id,
+                        brief(item.concept).replace("|", "\\|"),
+                        (
+                            "[卖家标题原文已在内部账本保留]"
+                            if item.source_type == "seller_title"
+                            else brief(item.value).replace("|", "\\|")
+                        ),
+                        item.source_type,
+                        brief(item.source_name).replace("|", "\\|"),
+                        brief(item.evidence_pointer).replace("|", "\\|"),
+                    )
+                )
+                + " |"
+                for item in state.claim_ledger
+                if "buyer_copy" in item.allowed_surfaces
+            ],
+            *(
+                ["", "模型返回的买家文案声明引用：", *copy_claim_reference_lines]
+                if copy_claim_reference_lines
+                else []
+            ),
             "",
             "## 3. AliExpress 类目与属性策略",
             "",

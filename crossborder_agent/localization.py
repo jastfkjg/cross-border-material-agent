@@ -8,8 +8,9 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from .api import ApiError, QwenClient
+from .claims import buyer_safe_source_name, publishable_claims
 from .compliance import generated_copy_violations
-from .models import CreativePlan, ProductFacts, TaxonomyResult
+from .models import ClaimEvidence, CreativePlan, ProductFacts, TaxonomyResult
 
 
 LANGUAGES: dict[str, dict[str, str]] = {
@@ -203,6 +204,11 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "裙型": "Skirt shape",
         "裙长": "Skirt length",
         "裙类别": "Skirt type",
+        "工艺": "Construction detail",
+        "弹力": "Stretch",
+        "风格类型": "Style type",
+        "风格": "Style",
+        "适用场景": "Applicable occasion",
         "穿着方式": "Wearing style",
         "穿搭方式": "Styling method",
         "适用性别": "Gender",
@@ -222,6 +228,10 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "素色": "Solid color",
         "条纹": "Striped",
         "印花": "Printed",
+        "百褶": "Pleating",
+        "无弹": "No stretch",
+        "日式": "Japanese",
+        "韩语": "Korean",
         "几何": "Geometric",
         "3D效果": "3D-effect print",
         "3D/立体图案": "3D-effect pattern",
@@ -385,6 +395,11 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "裙型": "스커트 형태",
         "裙长": "스커트 길이",
         "裙类别": "스커트 유형",
+        "工艺": "제작 디테일",
+        "弹力": "신축성",
+        "风格类型": "스타일 유형",
+        "风格": "스타일",
+        "适用场景": "적용 상황",
         "适用性别": "성별",
         "化纤": "합성섬유",
         "涤纶（聚酯纤维）": "폴리에스터",
@@ -401,6 +416,10 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "素色": "무지",
         "条纹": "스트라이프",
         "印花": "프린트",
+        "百褶": "플리츠",
+        "无弹": "신축성 없음",
+        "日式": "일본풍",
+        "韩语": "한국풍",
         "几何": "기하학 패턴",
         "3D效果": "3D 효과 프린트",
         "3D/立体图案": "입체 패턴",
@@ -564,6 +583,11 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "裙型": "Modelagem da saia",
         "裙长": "Comprimento da saia",
         "裙类别": "Tipo de saia",
+        "工艺": "Detalhe de construção",
+        "弹力": "Elasticidade",
+        "风格类型": "Tipo de estilo",
+        "风格": "Estilo",
+        "适用场景": "Ocasião aplicável",
         "适用性别": "Gênero",
         "化纤": "Fibra sintética",
         "涤纶（聚酯纤维）": "Poliéster",
@@ -580,6 +604,10 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "素色": "Sem estampa",
         "条纹": "Listrado",
         "印花": "Estampado",
+        "百褶": "Plissado",
+        "无弹": "Sem elasticidade",
+        "日式": "Japonês",
+        "韩语": "Coreano",
         "几何": "Geométrico",
         "3D效果": "Estampa com efeito 3D",
         "3D/立体图案": "Estampa com efeito 3D",
@@ -695,20 +723,27 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
 
 
 _MARKETING_ATTRIBUTE_NAMES = (
+    "图案",
     "领型",
     "袖长",
     "版型",
-    "图案",
-    "主面料成分",
-    "门襟",
-    "衣门襟",
+    "腰型",
     "衣长",
-    "裤型",
-    "裤长",
     "裙型",
     "裙长",
+    "裤型",
+    "裤长",
+    "门襟",
+    "衣门襟",
+    "主面料成分",
     "面料",
     "面料名称",
+    "工艺",
+    "弹力",
+    "颜色",
+    "风格",
+    "风格类型",
+    "适用场景",
 )
 
 
@@ -746,7 +781,6 @@ _PUBLIC_ATTRIBUTE_NAMES = (
     "裙长",
     "裙类别",
 )
-
 
 _PROCESS_FILLER_PATTERNS: dict[str, tuple[str, ...]] = {
     "en": (
@@ -1192,17 +1226,60 @@ def _payload_validation_error(
             "choose your usual size",
             "size up",
             "size down",
+            "standard size",
+            "standard sizes",
+            "universal size",
         ),
-        "ko": ("정사이즈", "평소 사이즈", "한 사이즈 크게", "한 사이즈 작게"),
+        "ko": (
+            "정사이즈",
+            "평소 사이즈",
+            "한 사이즈 크게",
+            "한 사이즈 작게",
+            "표준 사이즈",
+            "공용 사이즈",
+        ),
         "pt": (
             "tamanho normal",
             "seu tamanho habitual",
             "um tamanho maior",
             "um tamanho menor",
+            "tamanho padrão",
+            "tamanhos padrão",
+            "tamanho universal",
         ),
     }
     if any(phrase in natural_text.casefold() for phrase in unsupported_fit_claims[language]):
         return "unsupported-fit-guidance-guard"
+    unavailable_measurement_references = {
+        "en": (
+            "garment measurements below",
+            "measurements listed below",
+            "specific garment measurements",
+        ),
+        "ko": ("아래 실측", "하단 실측", "구체적인 의류 실측"),
+        "pt": (
+            "medidas da peça abaixo",
+            "medidas listadas abaixo",
+            "medidas específicas da peça",
+        ),
+    }
+    if not facts.size_chart_rows and any(
+        phrase in natural_text.casefold()
+        for phrase in unavailable_measurement_references[language]
+    ):
+        return "missing-size-chart-reference-guard"
+    normalized_overview = re.sub(
+        r"[^\w\uac00-\ud7a3]+", "", str(payload["overview"]).casefold()
+    )
+    normalized_highlights = [
+        re.sub(r"[^\w\uac00-\ud7a3]+", "", str(item).casefold())
+        for item in highlights
+    ]
+    if len(set(normalized_highlights)) != len(normalized_highlights) or any(
+        len(item) >= 18 and item in normalized_overview
+        for item in normalized_highlights
+    ):
+        return "repetitive-shopper-copy-guard"
     incomplete_main_material = any(
         item.name == "主面料成分含量" and item.value == "30%以下"
         for item in facts.attributes
@@ -1372,7 +1449,18 @@ def _compose_localized_title(
     in the specification table instead of being forced into a keyword-heavy title.
     """
 
-    ordered_names = ("设计", "图案", "领型", "袖长", "版型")
+    ordered_names = (
+        "设计",
+        "图案",
+        "领型",
+        "袖长",
+        "版型",
+        "腰型",
+        "裙型",
+        "裙长",
+        "裤型",
+        "裤长",
+    )
     features = [
         (name, feature_by_source[name])
         for name in ordered_names
@@ -1451,6 +1539,18 @@ def _benefit_led_highlight(
             return f"{localized_value} shapes the overall silhouette"
         if source_name == "图案":
             return f"{localized_value} defines the visual style"
+        if source_name == "工艺":
+            return f"{localized_value} defines the visible construction detail"
+        if source_name == "腰型":
+            return f"Seller-listed {localized_value.lower()} waist profile"
+        if source_name == "弹力":
+            return f"Seller-listed stretch level: {localized_value.lower()}"
+        if source_name == "颜色":
+            return f"Offered in {localized_value}"
+        if source_name in {"裙型", "裤型"}:
+            return f"{localized_value} defines the product silhouette"
+        if source_name in {"面料", "面料名称", "主面料成分"}:
+            return f"Seller lists {localized_value} for the fabric"
         if source_name in {"衣长", "裤长", "裙长"}:
             return f"Seller-listed {localized_value.lower()} proportion"
     elif language == "ko":
@@ -1485,6 +1585,18 @@ def _benefit_led_highlight(
             return f"{localized_value}으로 전체 실루엣을 구성했습니다"
         if source_name == "图案":
             return f"{localized_value}가 디자인의 시각적 포인트입니다"
+        if source_name == "工艺":
+            return f"{localized_value} 디테일이 구조적 포인트를 이룹니다"
+        if source_name == "腰型":
+            return f"판매자가 표기한 허리선은 {localized_value}입니다"
+        if source_name == "弹力":
+            return f"판매자가 표기한 신축성은 {localized_value}입니다"
+        if source_name == "颜色":
+            return f"{localized_value} 색상으로 제공됩니다"
+        if source_name in {"裙型", "裤型"}:
+            return f"{localized_value} 형태로 전체 실루엣을 구성했습니다"
+        if source_name in {"面料", "面料名称", "主面料成分"}:
+            return f"판매자가 표기한 원단은 {localized_value}입니다"
         if source_name in {"衣长", "裤长", "裙长"}:
             return f"판매자가 표기한 {localized_value} 비율"
     else:
@@ -1510,6 +1622,18 @@ def _benefit_led_highlight(
             return f"{localized_value} define a silhueta geral"
         if source_name == "图案":
             return f"{localized_value} define o estilo visual"
+        if source_name == "工艺":
+            return f"{localized_value} define o detalhe de construção visível"
+        if source_name == "腰型":
+            return f"Altura da cintura informada pelo vendedor: {localized_value.lower()}"
+        if source_name == "弹力":
+            return f"Elasticidade informada pelo vendedor: {localized_value.lower()}"
+        if source_name == "颜色":
+            return f"Disponível em {localized_value.lower()}"
+        if source_name in {"裙型", "裤型"}:
+            return f"{localized_value} define a silhueta da peça"
+        if source_name in {"面料", "面料名称", "主面料成分"}:
+            return f"O vendedor informa {localized_value} para o tecido"
         if source_name in {"衣长", "裤长", "裙长"}:
             return f"Proporção de {localized_value.lower()} informada pelo vendedor"
     return f"{localized_name}: {localized_value}"
@@ -1614,6 +1738,20 @@ def _fallback_payload(
         language, [value for _, value in selected_features[:4]]
     )
     colors = _attribute_display_values(language, facts, term_map, ("颜色",))
+    category_words = [
+        word for word in re.findall(r"[\w\uac00-\ud7a3]+", base_title) if len(word) >= 3
+    ]
+    cleaned_colors: list[str] = []
+    for color in colors:
+        cleaned = color
+        for word in category_words:
+            cleaned = re.sub(
+                rf"{re.escape(word)}s?\b", "", cleaned, flags=re.IGNORECASE
+            )
+        cleaned = cleaned.strip(" -/·")
+        if cleaned and cleaned not in cleaned_colors:
+            cleaned_colors.append(cleaned)
+    colors = cleaned_colors
     sizes = _attribute_display_values(language, facts, term_map, ("尺码",))
     # Composite seller codes remain in the exact SKU table, but are not suitable
     # as shopper-facing color/size prose. Very large option sets are likewise
@@ -1755,12 +1893,20 @@ def _fallback_payload(
         for name, value in selected_features[:4]
     ]
     if size_label:
-        size_heading = _static_localize_term(language, "尺码")
-        payload["highlights"].append(f"{size_heading}: {size_label}")
-    elif sizes:
-        size_heading = _static_localize_term(language, "尺码")
         payload["highlights"].append(
-            f"{size_heading}: {_natural_join(language, sizes)}"
+            {
+                "en": f"Seller-listed size guidance begins with {size_label}",
+                "ko": f"판매자 사이즈 안내는 {size_label}부터 확인할 수 있습니다",
+                "pt": f"A orientação de tamanho do vendedor começa em {size_label}",
+            }[language]
+        )
+    elif sizes:
+        payload["highlights"].append(
+            {
+                "en": f"Seller-listed sizes: {_natural_join(language, sizes)}",
+                "ko": f"판매자 표기 사이즈: {_natural_join(language, sizes)}",
+                "pt": f"Tamanhos informados pelo vendedor: {_natural_join(language, sizes)}",
+            }[language]
         )
     if colors and len(payload["highlights"]) < 5:
         color_label = _static_localize_term(language, "颜色")
@@ -1872,6 +2018,7 @@ def generate_copy_payload(
     creative_plan: CreativePlan,
     client: QwenClient | None,
     *,
+    claim_ledger: list[ClaimEvidence] | None = None,
     agent_guidance: str = "",
     revision_feedback: str = "",
     skill_instructions: str = "",
@@ -1884,6 +2031,11 @@ def generate_copy_payload(
     locale = LANGUAGES[language]
     trace = getattr(client, "trace", None)
     source_terms = _source_terms(facts, taxonomy)
+    claim_context = (
+        json.dumps(publishable_claims(claim_ledger), ensure_ascii=False)
+        if claim_ledger
+        else "No separate ledger supplied; use only the verified product facts below."
+    )
     system = f"""
 You are a native {locale["locale"]} e-commerce copywriter and a strict factual editor.
 Write {locale["description"]}. Return JSON only.
@@ -1906,21 +2058,28 @@ Treat the source title as useful product evidence: retain distinctive, concrete 
 as shoulder cutouts, neckline construction or silhouette when they are explicitly named there.
 Use product-first phrasing natural to {locale["locale"]}; avoid translated syntax, keyword stuffing,
 generic filler and mixed-language fragments. Keep the title under 128 characters.
+Build the title from the localized product category plus the strongest supported search concepts such
+as construction, silhouette, length, pattern, color or material. Prefer a readable title over listing
+every available field, and do not reduce a compound seller value to only one of its stated components.
 Write from this product's most distinctive verified construction detail rather than a stock opening.
 Avoid reusable templates such as "designed for everyday style", "a must-have addition", "perfect for
 any occasion", "elevate your wardrobe", "clean and polished look", or their translated equivalents.
 Every highlight must communicate a different buyer decision: visible design, silhouette/construction,
 available option, or conservative fit guidance. Do not turn highlights into raw "Field: Value" rows.
+Do not repeat the overview as bullets. Use the overview for the overall product proposition, then make
+each highlight add one new source-backed decision point.
 The shopper prose is a presentation layer: never include category IDs, attribute IDs, SKU IDs, source
 labels or audit terminology there. Code will place those exact machine fields in a separate appendix.
 Use normal grammar rather than concatenating localized field values. In English, for example, write
 "a cold-shoulder design, a halter-style neckline, long sleeves, and a slim fit" rather than copying
 Title Case attribute labels into a sentence.
-Write a concise, substantive overview in the paragraph structure that reads most naturally for this
-product and locale. It may use one or several short paragraphs; formatting alone is never a reason to
-discard factual, fluent copy. Cover distinctive design, available options and conservative sizing where
-supported. Do not refer shoppers to an audit, evidence ledger, canonical data, source verification
-process or SKU matrix.
+Write a concise, substantive overview as two short natural paragraphs. The first should explain the
+distinctive construction and silhouette; the second should add supported options, seller-listed use or
+style context, and conservative sizing information. Do not pad either paragraph when those facts are
+absent. Do not refer shoppers to an audit, evidence ledger, canonical data, source verification process
+or SKU matrix.
+Call source size labels "seller-listed sizes", never standard, universal or true-to-size. Refer to
+garment measurements below only when verified size_chart rows actually exist.
 For en-US, use US spelling and concise marketplace phrasing. For ko-KR, use natural Korean retail
 sentence endings and Korean option terminology. For pt-BR, use Brazilian vocabulary and forms such
 as produto, tamanho, camiseta and consulte; avoid European Portuguese vocabulary.
@@ -1936,6 +2095,8 @@ Produce a JSON object containing at least these required fields; extra explanato
   main_image.jpeg, detail_image_1.jpeg, detail_image_2.jpeg,
   detail_image_3.jpeg, detail_image_4.jpeg, detail_image_5.jpeg, product_video.mp4
 - localized_terms: object covering every source term below with a concise native display value. Keep model numbers, IDs and size codes unchanged. Translate source-script labels when reliable; preserve an exact proper label only when translation would lose evidence.
+- claim_refs: optional object mapping title, overview, highlights and fit_note to supporting claim_id values
+  from the ledger. Use only listed IDs; this metadata is for the delivery audit and is not shopper copy.
 
 Source terms requiring localized display values:
 {json.dumps(sorted(source_terms), ensure_ascii=False)}
@@ -1958,6 +2119,12 @@ Independent evaluator revision feedback:
 Only write claims supported by the verified facts. Compact localized listing tables will be inserted
 by code; do not repeat all SKUs or attributes in the prose. Internal evidence pointers and Chinese
 source values will not be published.
+
+Publishable claim ledger (use only these claims in shopper prose; source-image observations that are
+not present here may guide media but must not be promoted into buyer claims):
+{claim_context}
+The seller_title row is evidence context, not permission to repeat promotional or body-effect wording;
+extract only concrete product type, construction, silhouette, pattern, color and option facts from it.
 """.strip()
     try:
         draft = client.chat_json(system, prompt)
@@ -1993,6 +2160,14 @@ source values will not be published.
             )
         if not fast_error:
             return fast_payload, f"{client.config.chat_model}-validated-draft-fast"
+        if fast_error in {
+            "missing-size-chart-reference-guard",
+            "repetitive-shopper-copy-guard",
+        }:
+            # These are presentation defects, not missing machine facts. In the
+            # latency-sensitive profile, prefer the already validated factual
+            # fallback instead of spending a second model call on prose polish.
+            return fallback, fast_error
 
     audit_system = f"""
 You are a native {locale["locale"]} factual copy auditor. Return JSON only.
@@ -2010,6 +2185,7 @@ The result must contain all requested fields and all seven required media keys; 
 top-level metadata instead of rewriting good prose. Do not copy Chinese characters into buyer-facing
 prose or media descriptions. Preserve exact localized_terms source keys, and normally translate their
 values; an exact identifier, model code or proper source label may remain in this machine-oriented map.
+When the candidate contains valid claim_refs, preserve only ledger IDs that still support the rewritten field.
 Apply native {locale["locale"]} grammar and retail terminology, not literal source-language word order.
 Use natural paragraphing for the overview. Remove process language, evidence-led phrasing and
 instructions to inspect a SKU matrix.
@@ -2270,11 +2446,36 @@ def render_description(
         "pt": "teor informado pelo vendedor: {content}; composição têxtil completa não informada",
     }
     public_rows: dict[str, dict[str, list[str]]] = {}
+    natural_buyer_text = "\n".join(
+        [
+            str(payload.get("title") or ""),
+            str(payload.get("overview") or ""),
+            str(payload.get("fit_note") or ""),
+            *[str(item) for item in payload.get("highlights", [])],
+        ]
+    )
+    mapped_source_names = {
+        item.source_name for item in taxonomy.attributes if item.source_name
+    }
     for item in facts.attributes:
-        if item.name not in _PUBLIC_ATTRIBUTE_NAMES:
+        localized_value = _localized_display(language, item.value, term_map)
+        mentioned_in_buyer_copy = (
+            buyer_safe_source_name(item.name)
+            and
+            localized_value != "—"
+            and len(re.sub(r"\W+", "", localized_value)) >= 3
+            and _localized_concept_is_mentioned(
+                language, localized_value, natural_buyer_text
+            )
+        )
+        if (
+            item.name not in _PUBLIC_ATTRIBUTE_NAMES
+            and item.name not in mapped_source_names
+            and not mentioned_in_buyer_copy
+        ):
             continue
         name = _localized_display(language, item.name, term_map)
-        value = _localized_display(language, item.value, term_map)
+        value = localized_value
         if (
             item.name == "主面料成分"
             and main_material_content is not None
@@ -2355,7 +2556,7 @@ def render_description(
         value = _localized_display(language, item.platform_value, term_map)
         source_name = _localized_display(language, item.source_name, term_map)
         evidence_pointer = str(item.source_evidence_pointer or "")
-        if evidence_pointer.endswith("/subject"):
+        if evidence_pointer == facts.source_title_evidence_pointer:
             source_label = {
                 "en": "Mapped from seller product title",
                 "ko": "판매자 상품명에서 매핑",

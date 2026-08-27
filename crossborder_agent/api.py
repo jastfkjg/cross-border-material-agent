@@ -698,6 +698,13 @@ Return JSON with these top-level keys:
 - major_artifacts: boolean
 - unexpected_collage: boolean (true for montage, grid, split-screen or repeated panels; detail slot 4 may intentionally show a clean variant lineup)
 - product_coverage: one of high, medium, low
+- actual_role: one of hero, complete_product, construction_detail, surface_detail,
+  alternate_view, variant_comparison, wearer_context, product_only_context, size_chart, other
+- description_confidence: one of high, medium, low
+- observed_features: array of concise English phrases describing only details directly visible in this asset
+- media_descriptions: object with exactly en, ko and pt keys. Each value must be a concise, native
+  factual caption of what this final asset actually shows. Never describe the planned slot when the
+  visible result differs; never invent a closure, pocket, body part, seam, material property or variant.
 - reason: concise string
 - set_usable: boolean; false only for a hard defect or a materially redundant/unfinished set
 - usable_count: integer from 0 to {len(generated_image_urls)}

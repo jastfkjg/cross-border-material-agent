@@ -273,7 +273,7 @@ def fallback_creative_plan(
                 + _PRESERVATION
             ),
             (
-                f"Create a vertical 4:5 detail-focused commerce image showing visible construction and design details. "
+                f"Create a vertical 4:5 detail-focused commerce image showing source-visible construction and design details. "
                 f"{identity} Use realistic close-up photography while keeping the full product identity consistent. "
                 + slot_directives[1]
                 + " "

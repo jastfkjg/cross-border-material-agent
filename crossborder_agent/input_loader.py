@@ -314,6 +314,7 @@ def load_product_facts(product_path: Path) -> ProductFacts:
     description_images = _description_urls(_safe_text(product.get("description")))
     fingerprint = hashlib.sha256(raw_bytes).hexdigest()
 
+    title_key = "subjectTrans" if product.get("subjectTrans") else "subject"
     facts = ProductFacts(
         platform=_safe_text(product.get("platform")),
         source_url=_safe_text(product.get("url")),
@@ -328,6 +329,7 @@ def load_product_facts(product_path: Path) -> ProductFacts:
         description_image_urls=description_images,
         size_conversions=[],
         size_chart_rows=[],
+        source_title_evidence_pointer=f"/ret/result/result/{title_key}",
         input_file=str(product_path),
         fingerprint=fingerprint,
     )

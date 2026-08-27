@@ -464,9 +464,17 @@ _VALUE_EQUIVALENTS = (
     {"夏", "夏季"},
     {"秋", "秋季"},
     {"冬", "冬季"},
-    {"日韩休闲", "韩语", "韩式"},
     {"休闲风", "舒适休闲", "休闲"},
     {"普通款", "中"},
+)
+
+# Atomic aliases let a composite seller value map to every supported option
+# when the destination field is multi-select. This is intentionally separate
+# from whole-value equivalence: "Japanese & Korean casual" must not collapse
+# to only Korean.
+_ATOMIC_VALUE_EQUIVALENTS = (
+    {"日", "日本", "日式", "日系"},
+    {"韩", "韩国", "韩式", "韩系", "韩语"},
 )
 
 
@@ -541,6 +549,60 @@ def _season_value_matches(
     return result
 
 
+def _multiple_value_matches(
+    source_value: str, values: list[dict[str, Any]]
+) -> list[tuple[str, str]]:
+    """Return every enum value explicitly represented by a compound source value."""
+
+    source = normalize_label(source_value)
+    matches: list[tuple[str, str]] = []
+    atomic_groups = [
+        {normalize_label(item) for item in group}
+        for group in _ATOMIC_VALUE_EQUIVALENTS
+    ]
+    short_marker_groups = {
+        index
+        for index, group in enumerate(atomic_groups)
+        if any(len(item) == 1 and item in source for item in group)
+    }
+    for value in values:
+        alias = str(value.get("valueNameAlias") or "")
+        name = str(value.get("name") or "")
+        candidates = [normalize_label(item) for item in (alias, name) if item]
+        represented = any(
+            len(candidate) >= 2 and candidate in source for candidate in candidates
+        )
+        if not represented:
+            for index, normalized_group in enumerate(atomic_groups):
+                source_mentions_long_alias = any(
+                    len(item) >= 2 and item in source for item in normalized_group
+                )
+                source_is_atomic_marker = source in {
+                    item for item in normalized_group if len(item) == 1
+                }
+                source_is_compound_abbreviation = (
+                    index in short_marker_groups and len(short_marker_groups) >= 2
+                )
+                source_mentions_group = (
+                    source_mentions_long_alias
+                    or source_is_atomic_marker
+                    or source_is_compound_abbreviation
+                )
+                value_belongs_to_group = any(
+                    item in normalized_group for item in candidates
+                )
+                if source_mentions_group and value_belongs_to_group:
+                    represented = True
+                    break
+        pair = (str(value.get("id") or ""), alias or name)
+        if represented and pair[0] and pair not in matches:
+            matches.append(pair)
+    if matches:
+        return matches
+    value_id, platform_value = _value_match(source_value, values)
+    return [(value_id, platform_value)] if value_id else []
+
+
 def _map_attribute_group(
     facts: ProductFacts,
     definitions: list[dict[str, Any]],
@@ -563,7 +625,7 @@ def _map_attribute_group(
                     attribute_id="",
                     name="尺码类型",
                     value="大码",
-                    evidence_pointer="/ret/result/result/subject",
+                    evidence_pointer=facts.source_title_evidence_pointer,
                 )
             )
         matches = sorted(
@@ -621,6 +683,8 @@ def _map_attribute_group(
             resolved_values = (
                 _season_value_matches(item.value, values)
                 if multiple and "季节" in alias and values
+                else _multiple_value_matches(item.value, values)
+                if multiple and values
                 else [_value_match(item.value, values)]
             )
             for value_id, platform_value in resolved_values:

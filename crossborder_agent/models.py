@@ -67,6 +67,7 @@ class ProductFacts:
     input_file: str
     fingerprint: str
     size_chart_rows: list[SizeChartRow] = field(default_factory=list)
+    source_title_evidence_pointer: str = ""
 
     def all_image_urls(self) -> list[str]:
         seen: set[str] = set()
@@ -137,6 +138,20 @@ class MappedAttribute:
     platform_value: str = ""
     required: bool = False
     sales_attribute: bool = False
+
+
+@dataclass(slots=True)
+class ClaimEvidence:
+    """One publishable or machine-only claim with its original evidence pointer."""
+
+    claim_id: str
+    concept: str
+    value: str
+    source_type: str
+    source_name: str
+    evidence_pointer: str
+    confidence: float = 1.0
+    allowed_surfaces: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -215,6 +230,7 @@ class RunState:
     facts: ProductFacts
     taxonomy: TaxonomyResult
     creative_plan: CreativePlan
+    claim_ledger: list[ClaimEvidence] = field(default_factory=list)
     vision_observations: dict[str, Any] = field(default_factory=dict)
     assets: list[AssetResult] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
