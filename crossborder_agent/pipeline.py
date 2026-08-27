@@ -19,6 +19,7 @@ from .agent_tools import BoundedToolRegistry, ToolExecution, ToolSpec
 from .api import ApiConfig, ApiError, HttpJsonClient, QwenClient
 from .bounded_agent import BoundedDeliveryAgent
 from .compliance import normalize_source_image_observations
+from .debug_trace import DebugTrace
 from .input_loader import discover_input_files, load_json, load_product_facts
 from .localization import generate_copy_payload, render_description
 from .media import (
@@ -88,14 +89,17 @@ class Pipeline:
         product_id: str = "",
         timeout_seconds: int = 29 * 60,
         offline: bool = False,
+        debug: bool = False,
     ):
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.logger = logger
         self.product_id = product_id
         self.offline = offline
+        self.debug = debug
         self.started_monotonic = time.monotonic()
         self.deadline = self.started_monotonic + timeout_seconds
+        self.trace = DebugTrace(logger, enabled=debug)
         self.api_config = None if offline else ApiConfig.from_environment()
         if not offline and self.api_config is None:
             required = (
@@ -110,12 +114,14 @@ class Pipeline:
                 + "；开发降级测试请显式传入 --offline"
             )
         self.client = (
-            QwenClient(self.api_config, logger, self.deadline)
+            QwenClient(self.api_config, logger, self.deadline, self.trace)
             if self.api_config
             else None
         )
         self.downloader = (
-            self.client.http if self.client else HttpJsonClient(logger, self.deadline)
+            self.client.http
+            if self.client
+            else HttpJsonClient(logger, self.deadline, self.trace)
         )
         self.skills = SkillLibrary()
         self.agent = BoundedDeliveryAgent(self.client, logger, self.skills)
@@ -124,6 +130,7 @@ class Pipeline:
         self._raw_counter_lock = threading.Lock()
         self._source_image_observations: dict[str, dict[str, Any]] = {}
         self._source_selection_warnings: set[str] = set()
+        self._size_chart_source_url = ""
 
     def _ensure_time(self, reserve_seconds: float = 0) -> None:
         remaining = self.deadline - time.monotonic()
@@ -180,6 +187,16 @@ class Pipeline:
         return registry
 
     def run(self) -> RunState:
+        self.trace.emit(
+            "run.start",
+            input_dir=str(self.input_dir),
+            output_dir=str(self.output_dir),
+            product_id=self.product_id,
+            offline=self.offline,
+            debug=self.debug,
+            models=self.client.model_summary if self.client else {"mode": "offline"},
+            deadline_seconds=round(self.deadline - self.started_monotonic, 1),
+        )
         self.output_dir.mkdir(parents=True, exist_ok=True)
         work_dir = self.output_dir / f".agent-work-{uuid.uuid4().hex}"
         downloads_dir = work_dir / "_downloads"
@@ -191,11 +208,46 @@ class Pipeline:
                 self.input_dir, self.product_id
             )
             facts = load_product_facts(product_path)
+            self.trace.emit(
+                "input.loaded",
+                offer_id=facts.offer_id,
+                fingerprint=facts.fingerprint,
+                source_category=facts.source_category_name,
+                attribute_count=len(facts.attributes),
+                sku_count=len(facts.skus),
+                image_count=len(facts.all_image_urls()),
+            )
             category_tree = load_json(categories_path)
             attribute_data = load_json(attributes_path)
             taxonomy = resolve_taxonomy(facts, category_tree, attribute_data)
             taxonomy = self._adjudicate_taxonomy(
                 facts, taxonomy, category_tree, attribute_data
+            )
+            self.trace.emit(
+                "taxonomy.resolved",
+                category=taxonomy.category.__dict__
+                if hasattr(taxonomy.category, "__dict__")
+                else {
+                    "category_id": taxonomy.category.category_id,
+                    "name": taxonomy.category.name,
+                    "path": taxonomy.category.path,
+                    "confidence": taxonomy.category.confidence,
+                    "method": taxonomy.category.method,
+                    "candidates": taxonomy.category.candidates,
+                },
+                mapped_attributes=[
+                    {
+                        "attr_id": item.attr_id,
+                        "name": item.name,
+                        "source_name": item.source_name,
+                        "source_value": item.source_value,
+                        "value_id": item.value_id,
+                        "platform_value": item.platform_value,
+                        "sales_attribute": item.sales_attribute,
+                    }
+                    for item in taxonomy.attributes
+                ],
+                missing_required=taxonomy.missing_required,
             )
             self.logger.info(
                 "商品 %s: 类目 %s %s (%.2f, %s)",
@@ -207,6 +259,7 @@ class Pipeline:
             )
 
             vision = self._analyze_source_images(facts)
+            self.trace.emit("vision.source_review", result=vision)
             self._apply_size_chart_observations(facts, vision)
             tool_registry = self._create_tool_registry(
                 protect_size_chart=bool(facts.size_chart_rows)
@@ -214,6 +267,7 @@ class Pipeline:
             agent_plan = self.agent.plan_delivery(
                 facts, taxonomy, vision, tool_registry
             )
+            self.trace.emit("agent.plan", plan=agent_plan)
             creative_plan, plan_model = create_creative_plan(
                 facts,
                 taxonomy,
@@ -228,6 +282,17 @@ class Pipeline:
                 ),
             )
             self.logger.info("创意计划来源: %s", plan_model)
+            self.trace.emit(
+                "creative.plan",
+                source=plan_model,
+                plan={
+                    "visual_theme": creative_plan.visual_theme,
+                    "main_prompt": creative_plan.main_prompt,
+                    "detail_prompts": creative_plan.detail_prompts,
+                    "video_prompt": creative_plan.video_prompt,
+                    "market_angles": creative_plan.market_angles,
+                },
+            )
 
             state = RunState(
                 started_at=datetime.now(timezone.utc).isoformat(),
@@ -322,6 +387,22 @@ class Pipeline:
                 state.assets.append(detail_assets[index])
             if video_result:
                 state.assets.append(video_result)
+            self.trace.emit(
+                "assets.initial_complete",
+                assets=[
+                    {
+                        "name": item.name,
+                        "model": item.model,
+                        "generated": item.generated,
+                        "source_url": item.source_url,
+                        "fallback_reason": item.fallback_reason,
+                        "description": item.description,
+                    }
+                    for item in state.assets
+                ],
+                localization_sources=localization_sources,
+                localization_payloads=localization_payloads,
+            )
 
             # Initial generation failures may use deterministic emergency assets so the
             # delivery remains complete. Evaluation never replaces an accepted artifact
@@ -335,6 +416,9 @@ class Pipeline:
             )
             self._enhance_fallback_video(state.assets, work_dir)
             self._record_visual_delivery_quality(state.assets)
+            state.visual_set_review = self._review_visual_set(
+                facts, state.assets
+            )
             self._write_localized_descriptions(
                 facts, taxonomy, localization_payloads, state.assets, work_dir
             )
@@ -360,6 +444,7 @@ class Pipeline:
                 state=state,
                 localization_payloads=localization_payloads,
                 localization_sources=localization_sources,
+                visual_set_review=state.visual_set_review,
                 work_dir=work_dir,
             )
             # A catalog video is rebuilt from the final image set only when video
@@ -376,6 +461,12 @@ class Pipeline:
             )
 
             report = validate_delivery(work_dir, facts, taxonomy)
+            self.trace.emit(
+                "qa.work_directory",
+                valid=report.valid,
+                errors=report.errors,
+                warnings=report.warnings,
+            )
             for warning in report.warnings:
                 self.logger.warning("交付告警: %s", warning)
             if not report.valid:
@@ -383,6 +474,23 @@ class Pipeline:
 
             self._commit_delivery(work_dir)
             final_report = validate_delivery(self.output_dir, facts, taxonomy)
+            self.trace.emit(
+                "run.complete",
+                valid=final_report.valid,
+                errors=final_report.errors,
+                warnings=final_report.warnings,
+                assets=[
+                    {
+                        "name": item.name,
+                        "model": item.model,
+                        "generated": item.generated,
+                        "fallback_reason": item.fallback_reason,
+                    }
+                    for item in state.assets
+                ],
+                api_calls=state.api_calls,
+                remaining_seconds=round(self.deadline - time.monotonic(), 1),
+            )
             if not final_report.valid:
                 raise PipelineError(
                     "最终目录复核失败: " + "; ".join(final_report.errors)
@@ -602,6 +710,7 @@ class Pipeline:
         state: RunState,
         localization_payloads: dict[str, dict[str, Any]],
         localization_sources: dict[str, str],
+        visual_set_review: dict[str, Any],
         work_dir: Path,
     ) -> None:
         if self.client is None:
@@ -627,6 +736,7 @@ class Pipeline:
                 assets=state.assets,
                 localization_payloads=localization_payloads,
                 localization_sources=localization_sources,
+                visual_set_review=visual_set_review,
                 work_dir=work_dir,
                 tools=registry,
             )
@@ -634,6 +744,26 @@ class Pipeline:
                 self.warnings.append("LLM 全局评估未完成；不触发回退，保留当前已校验素材")
                 break
             state.agent_evaluations.append(evaluation)
+            self.trace.emit(
+                "agent.evaluation",
+                round_index=round_index,
+                ready=evaluation.ready_for_delivery,
+                weighted_score=evaluation.weighted_score,
+                dimension_scores=evaluation.dimension_scores,
+                summary=evaluation.summary,
+                issues=evaluation.issues,
+                repair_actions=[
+                    {
+                        "tool": item.tool,
+                        "target": item.target,
+                        "instruction": item.instruction,
+                        "reason": item.reason,
+                        "dimension": item.dimension,
+                        "priority": item.priority,
+                    }
+                    for item in evaluation.repair_actions
+                ],
+            )
             self.logger.info(
                 "Agent 全局评估轮次 %d: score=%.1f ready=%s actions=%d",
                 round_index,
@@ -666,6 +796,17 @@ class Pipeline:
                         status=result.status,
                         detail=result.detail,
                     )
+                )
+                self.trace.emit(
+                    "agent.repair_result",
+                    round_index=round_index,
+                    tool=action.tool,
+                    target=action.target,
+                    dimension=action.dimension,
+                    instruction=action.instruction,
+                    status=result.status,
+                    detail=result.detail,
+                    metadata=result.metadata,
                 )
                 if result.status == "completed":
                     completed += 1
@@ -908,7 +1049,9 @@ Candidate 1:
 {json.dumps(candidate, ensure_ascii=False)}
 """.strip()
         try:
-            review = self.client.chat_json(system, prompt)
+            review = self.client.chat_json(
+                system, prompt, model=self.client.config.review_model
+            )
         except ApiError as exc:
             self.logger.warning("%s 文案 A/B 评审不可用，保留旧文案: %s", language, exc)
             return False
@@ -1063,9 +1206,25 @@ Candidate 1:
         category_tree: dict[str, Any],
         attribute_data: dict[str, Any],
     ) -> TaxonomyResult:
-        if self.client is None or taxonomy.category.confidence >= 0.85:
-            return taxonomy
         candidates = taxonomy.category.candidates[:12]
+        top_score = (
+            float(candidates[0].get("score") or 0) if candidates else 0.0
+        )
+        second_score = (
+            float(candidates[1].get("score") or 0)
+            if len(candidates) > 1
+            else top_score
+        )
+        score_margin = max(0.0, top_score - second_score)
+        # Curated aliases are deterministic and should not be second-guessed. A
+        # locally ranked hidden category is adjudicated whenever the ranking is
+        # weak or close, even if its absolute lexical score happened to be high.
+        needs_model_adjudication = (
+            taxonomy.category.method == "local-lexical-ranking"
+            and (taxonomy.category.confidence < 0.91 or score_margin < 18.0)
+        )
+        if self.client is None or not needs_model_adjudication:
+            return taxonomy
         allowed_ids = {str(item.get("category_id")) for item in candidates}
         if not allowed_ids:
             return taxonomy
@@ -1088,11 +1247,31 @@ Allowed leaf candidates:
             response = self.client.chat_json(system, prompt)
         except ApiError as exc:
             self.logger.warning("类目候选裁决失败，保留本地结果: %s", exc)
+            self.trace.emit(
+                "taxonomy.adjudication_failed",
+                category=taxonomy.category.category_id,
+                confidence=taxonomy.category.confidence,
+                score_margin=score_margin,
+                error=str(exc),
+            )
             return taxonomy
         selected_id = str(response.get("selected_category_id") or "")
         if selected_id not in allowed_ids:
             self.logger.warning("类目裁决返回候选外 ID，已忽略: %s", selected_id)
+            self.trace.emit(
+                "taxonomy.adjudication_rejected",
+                selected_category_id=selected_id,
+                allowed_category_ids=sorted(allowed_ids),
+            )
             return taxonomy
+        self.trace.emit(
+            "taxonomy.adjudication",
+            local_category_id=taxonomy.category.category_id,
+            selected_category_id=selected_id,
+            confidence=taxonomy.category.confidence,
+            score_margin=score_margin,
+            evidence=response.get("evidence"),
+        )
         return resolve_taxonomy(
             facts,
             category_tree,
@@ -1233,6 +1412,8 @@ Allowed leaf candidates:
                     evidence_pointer=f"source-image:{source_index}",
                 )
             )
+            if not self._size_chart_source_url:
+                self._size_chart_source_url = str(source_item.get("url") or "")
             seen.add(code)
         rows.sort(key=lambda item: known_codes.index(item.size_label))
         if len(rows) < 2:
@@ -1861,6 +2042,15 @@ Allowed leaf candidates:
 
         candidates = review.get("candidates")
         selected = review.get("selected_index")
+        self.trace.emit(
+            "image.hero_review",
+            source_urls=source_urls,
+            candidate_urls=candidate_urls,
+            selected_index=selected,
+            review=review,
+            incumbent_index=incumbent_index,
+            minimum_improvement=minimum_improvement,
+        )
         if not isinstance(candidates, list):
             keep = incumbent_index if incumbent_index is not None else 0
             self.warnings.append("主图语义评审结构不完整，采用确定性候选")
@@ -2108,6 +2298,17 @@ Allowed leaf candidates:
             return candidate_urls[keep]
         candidates = review.get("candidates")
         selected = review.get("selected_index")
+        self.trace.emit(
+            "image.detail_review",
+            asset=f"detail_image_{index}.jpeg",
+            purpose=purpose,
+            source_urls=source_urls,
+            candidate_urls=candidate_urls,
+            selected_index=selected,
+            review=review,
+            incumbent_index=incumbent_index,
+            minimum_improvement=minimum_improvement,
+        )
         if not isinstance(candidates, list):
             keep = incumbent_index if incumbent_index is not None else 0
             self.warnings.append(f"详情图 {index} 评审结构不完整，采用确定性候选")
@@ -2277,7 +2478,7 @@ Allowed leaf candidates:
             self.warnings.append(f"尺码表详情图生成失败: {exc}")
             return
         asset.path = str(destination)
-        asset.source_url = ""
+        asset.source_url = self._size_chart_source_url or asset.source_url
         asset.model = "deterministic-size-chart"
         asset.generated = False
         asset.fallback_reason = "source size chart transcribed and deterministically rendered"
@@ -2490,6 +2691,115 @@ Allowed leaf candidates:
             warning = "回退视频继承了未通过直接发布门禁的静态图片"
             if warning not in self.warnings:
                 self.warnings.append(warning)
+
+    def _review_visual_set(
+        self,
+        facts: ProductFacts,
+        assets: list[AssetResult],
+    ) -> dict[str, Any]:
+        """Judge hero + five details as one set, without mutating accepted files."""
+
+        if self.client is None:
+            return {}
+        if self.deadline - time.monotonic() <= 6 * 60:
+            self.warnings.append("剩余时间不足，跳过六图集合语义评审并保留全局评估预算")
+            return {}
+        ordered_names = ["main_image.jpeg"] + [
+            f"detail_image_{index}.jpeg" for index in range(1, 6)
+        ]
+        by_name = {asset.name: asset for asset in assets}
+        if any(name not in by_name for name in ordered_names):
+            self.warnings.append("六图集合不完整，无法执行集合级语义评审")
+            return {}
+        review_inputs = [by_name[name].source_url for name in ordered_names]
+        if any(not url for url in review_inputs):
+            self.warnings.append("六图集合缺少平台允许的远程评审 URL，跳过集合级模型评审")
+            return {}
+
+        source_references = _unique(
+            facts.product_image_urls[:3]
+            + _even_sample(facts.sku_image_urls, 1)
+            + _even_sample(facts.description_image_urls, 1)
+        )
+        expected_assets = [
+            {
+                "name": name,
+                "purpose": by_name[name].description or name,
+                "representation": (
+                    "source proxy for deterministic local rendering"
+                    if by_name[name].model == "deterministic-size-chart"
+                    else "final model output before lossless delivery normalization"
+                    if by_name[name].generated
+                    else "source-backed fallback"
+                ),
+            }
+            for name in ordered_names
+        ]
+        try:
+            review = self.client.review_generated_images(
+                json.dumps(facts.compact_dict(), ensure_ascii=False),
+                source_references,
+                review_inputs,
+                expected_assets,
+            )
+        except ApiError as exc:
+            # A judge outage is not evidence that an already accepted image is bad.
+            self.logger.warning("六图集合语义评审不可用，保留当前素材: %s", exc)
+            self.warnings.append(f"六图集合语义评审未完成: {exc}")
+            self.trace.emit(
+                "image.set_review_failed",
+                category=exc.category,
+                retryable=exc.retryable,
+                status_code=exc.status_code,
+                error=str(exc),
+            )
+            return {}
+
+        rows = review.get("assets")
+        if not isinstance(rows, list) or len(rows) != len(ordered_names):
+            self.warnings.append("六图集合评审返回结构异常，忽略该评审而不判定素材失败")
+            self.trace.emit("image.set_review_invalid", review=review)
+            return {}
+        normalized_rows: list[dict[str, Any]] = []
+        for index, name in enumerate(ordered_names):
+            item = next(
+                (
+                    row
+                    for row in rows
+                    if isinstance(row, dict) and row.get("index") == index
+                ),
+                {},
+            )
+            normalized_rows.append({"name": name, **item})
+        review["assets"] = normalized_rows
+        review["reviewed_names"] = ordered_names
+        review["review_model"] = self.client.config.review_model
+
+        duplicate_pairs = review.get("near_duplicate_pairs")
+        if isinstance(duplicate_pairs, list) and duplicate_pairs:
+            readable_pairs: list[str] = []
+            for pair in duplicate_pairs[:6]:
+                if (
+                    isinstance(pair, list)
+                    and len(pair) == 2
+                    and all(isinstance(item, int) for item in pair)
+                    and all(0 <= item < len(ordered_names) for item in pair)
+                ):
+                    readable_pairs.append(
+                        f"{ordered_names[pair[0]]}/{ordered_names[pair[1]]}"
+                    )
+            if readable_pairs:
+                self.warnings.append(
+                    "六图集合存在语义重复: " + ", ".join(readable_pairs)
+                )
+        missing_roles = review.get("missing_roles")
+        if isinstance(missing_roles, list) and missing_roles:
+            self.warnings.append(
+                "六图集合商业任务覆盖不足: "
+                + ", ".join(str(item)[:80] for item in missing_roles[:5])
+            )
+        self.trace.emit("image.set_review", review=review)
+        return review
 
     def _write_strategy_document(
         self,

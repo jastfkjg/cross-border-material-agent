@@ -68,7 +68,10 @@ def _validate_description(
         if value and value not in text:
             report.errors.append(f"{path.name} 缺少必需内容: {value}")
 
-    if re.search(r"[\u4e00-\u9fff]", text):
+    # Buyer-visible copy and machine display values must be localized. Immutable
+    # source URLs may legally contain Unicode path/query text and are not copy.
+    localized_surface = re.sub(r"https?://[^\s)>]+", "", text)
+    if re.search(r"[\u4e00-\u9fff]", localized_surface):
         report.errors.append(f"{path.name} 含未本地化的中文字符")
     forbidden_internal_markers = (
         "/ret/result/result",

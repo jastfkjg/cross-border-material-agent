@@ -170,6 +170,7 @@ Available repair tools for later rounds:
         assets: list[AssetResult],
         localization_payloads: dict[str, dict[str, Any]],
         localization_sources: dict[str, str],
+        visual_set_review: dict[str, Any],
         work_dir: Path,
         tools: BoundedToolRegistry,
     ) -> AgentEvaluation | None:
@@ -218,6 +219,9 @@ Treat a deterministic or validation-error copy source as a quality degradation: 
 shopper preview and request revise_localized_copy when it is generic, process-oriented or misses a
 distinctive source-title design detail. Do not reward raw evidence volume. Localized deliverables must
 not contain Chinese source values, JSON pointers, canonical/evidence labels or duplicated audit tables.
+Treat the six-image set review below as independent evidence about semantic duplication and missing
+commercial roles. A set-level repair target is higher priority than a cosmetic per-image preference.
+It may predate repairs in later rounds, so corroborate it against the current manifest and media.
 
 Rubric weights:
 {json.dumps(_RUBRIC_WEIGHTS)}
@@ -240,6 +244,9 @@ Localized copy payloads:
 Copy generation sources:
 {json.dumps(localization_sources, ensure_ascii=False)}
 
+Six-image set review:
+{json.dumps(visual_set_review, ensure_ascii=False)}
+
 Rendered localized-copy evidence:
 {json.dumps(copy_artifacts, ensure_ascii=False)}
 
@@ -258,6 +265,7 @@ Available repair tools:
                 prompt,
                 images=image_urls,
                 videos=video_urls,
+                model=self.client.config.review_model,
             )
         except ApiError as exc:
             self.logger.warning("全局交付评估不可用，保留当前已校验版本: %s", exc)
@@ -288,6 +296,7 @@ Available repair tools:
             second = text.find("\n## ", first + 1) if first >= 0 else -1
             third = text.find("\n## ", second + 1) if second >= 0 else -1
             shopper_preview = text[: third if third > 0 else 2500]
+            localized_surface = re.sub(r"https?://[^\s)>]+", "", text)
             evidence.append(
                 {
                     "language": language,
@@ -295,7 +304,7 @@ Available repair tools:
                     "characters": len(text),
                     "headings": headings,
                     "chinese_character_count": len(
-                        re.findall(r"[\u4e00-\u9fff]", text)
+                        re.findall(r"[\u4e00-\u9fff]", localized_surface)
                     ),
                     "json_pointer_count": text.count("/ret/result/result"),
                     "shopper_preview": shopper_preview[:2500],

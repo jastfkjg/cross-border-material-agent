@@ -16,6 +16,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
+from .debug_trace import DebugTrace
+
 
 class ApiError(RuntimeError):
     """A retryable or terminal model service failure."""
@@ -73,6 +75,8 @@ class ApiConfig:
     openai_base_url: str
     chat_model: str = "qwen3.8-max"
     chat_fallback_model: str = "qwen3.7-plus"
+    review_model: str = "qwen3.8-max"
+    review_fallback_model: str = "qwen3.7-plus"
     image_model: str = "wan2.7-image-pro"
     image_fallback_model: str = "qwen-image-3.0-pro"
     video_model: str = "wan2.7-i2v-2026-04-25"
@@ -91,6 +95,10 @@ class ApiConfig:
             chat_model=os.environ.get("AGENT_CHAT_MODEL", "qwen3.8-max"),
             chat_fallback_model=os.environ.get(
                 "AGENT_CHAT_FALLBACK_MODEL", "qwen3.7-plus"
+            ),
+            review_model=os.environ.get("AGENT_REVIEW_MODEL", "qwen3.8-max"),
+            review_fallback_model=os.environ.get(
+                "AGENT_REVIEW_FALLBACK_MODEL", "qwen3.7-plus"
             ),
             image_model=os.environ.get("AGENT_IMAGE_MODEL", "wan2.7-image-pro"),
             image_fallback_model=os.environ.get(
@@ -136,9 +144,15 @@ def _collect_urls(value: Any, *, preferred_keys: tuple[str, ...] = ()) -> list[s
 
 
 class HttpJsonClient:
-    def __init__(self, logger: logging.Logger, deadline: float):
+    def __init__(
+        self,
+        logger: logging.Logger,
+        deadline: float,
+        trace: DebugTrace | None = None,
+    ):
         self.logger = logger
         self.deadline = deadline
+        self.trace = trace
         self.ssl_context = ssl.create_default_context()
 
     def _remaining(self, maximum: float) -> float:
@@ -169,6 +183,15 @@ class HttpJsonClient:
         request_headers = {"Content-Type": "application/json", **(headers or {})}
         last_error = ""
         for attempt in range(attempts):
+            if self.trace:
+                self.trace.emit(
+                    "http.request.attempt",
+                    method=method,
+                    url=url,
+                    attempt=attempt + 1,
+                    max_attempts=attempts,
+                    remaining_seconds=round(self.remaining_seconds, 1),
+                )
             request = Request(url, data=payload, headers=request_headers, method=method)
             try:
                 with urlopen(
@@ -182,11 +205,29 @@ class HttpJsonClient:
                         retryable=True,
                         category="response_format",
                     )
+                if self.trace:
+                    self.trace.emit(
+                        "http.request.success",
+                        method=method,
+                        url=url,
+                        attempt=attempt + 1,
+                    )
                 return parsed
             except HTTPError as exc:
                 detail = exc.read(8192).decode("utf-8", errors="replace")
                 last_error = f"HTTP {exc.code}: {detail}"
                 retryable = exc.code in {408, 409, 425, 429, 500, 502, 503, 504}
+                if self.trace:
+                    self.trace.emit(
+                        "http.request.failure",
+                        method=method,
+                        url=url,
+                        attempt=attempt + 1,
+                        status_code=exc.code,
+                        retryable=retryable,
+                        category=_failure_category(exc.code, last_error),
+                        error=last_error,
+                    )
                 if not retryable or attempt + 1 >= attempts:
                     raise ApiError(
                         last_error,
@@ -201,6 +242,17 @@ class HttpJsonClient:
                     delay = min(18.0, (2**attempt) + random.random() * 1.5)
             except ApiError as exc:
                 last_error = str(exc)
+                if self.trace:
+                    self.trace.emit(
+                        "http.request.failure",
+                        method=method,
+                        url=url,
+                        attempt=attempt + 1,
+                        status_code=exc.status_code,
+                        retryable=exc.retryable,
+                        category=exc.category,
+                        error=last_error,
+                    )
                 if exc.retryable is not True or attempt + 1 >= attempts:
                     raise
                 delay = min(8.0, (2**attempt) + random.random())
@@ -212,18 +264,37 @@ class HttpJsonClient:
                 UnicodeError,
             ) as exc:
                 last_error = str(exc)
-                if attempt + 1 >= attempts:
-                    category = (
-                        "response_format"
-                        if isinstance(exc, (json.JSONDecodeError, UnicodeError))
-                        else "timeout"
-                        if isinstance(exc, TimeoutError)
-                        else "network"
+                category = (
+                    "response_format"
+                    if isinstance(exc, (json.JSONDecodeError, UnicodeError))
+                    else "timeout"
+                    if isinstance(exc, TimeoutError)
+                    else "network"
+                )
+                if self.trace:
+                    self.trace.emit(
+                        "http.request.failure",
+                        method=method,
+                        url=url,
+                        attempt=attempt + 1,
+                        retryable=True,
+                        category=category,
+                        error=last_error,
                     )
+                if attempt + 1 >= attempts:
                     raise ApiError(
                         last_error, retryable=True, category=category
                     ) from exc
                 delay = min(18.0, (2**attempt) + random.random() * 1.5)
+            if self.trace:
+                self.trace.emit(
+                    "http.request.retry_scheduled",
+                    method=method,
+                    url=url,
+                    attempt=attempt + 1,
+                    delay_seconds=round(delay, 3),
+                    error=last_error,
+                )
             self.logger.warning(
                 "API 请求失败，%.1f 秒后重试: %s", delay, last_error[:500]
             )
@@ -284,10 +355,17 @@ class HttpJsonClient:
 class QwenClient:
     """Explicit model adapters; no model-built-in tools are used."""
 
-    def __init__(self, config: ApiConfig, logger: logging.Logger, deadline: float):
+    def __init__(
+        self,
+        config: ApiConfig,
+        logger: logging.Logger,
+        deadline: float,
+        trace: DebugTrace | None = None,
+    ):
         self.config = config
         self.logger = logger
-        self.http = HttpJsonClient(logger, deadline)
+        self.trace = trace
+        self.http = HttpJsonClient(logger, deadline, trace)
         self._chat_slots = threading.BoundedSemaphore(3)
         self._image_slots = threading.BoundedSemaphore(2)
         self._video_slots = threading.BoundedSemaphore(1)
@@ -321,11 +399,15 @@ class QwenClient:
             item["error"] = error[:300]
         with self._metrics_lock:
             self._metrics.append(item)
+        if self.trace:
+            self.trace.emit("api.operation", **item)
 
     @property
     def model_summary(self) -> dict[str, str]:
         return {
             "chat": self.config.chat_model,
+            "review": self.config.review_model,
+            "review_fallback": self.config.review_fallback_model,
             "image": self.config.image_model,
             "image_fallback": self.config.image_fallback_model,
             "video": self.config.video_model,
@@ -412,8 +494,13 @@ class QwenClient:
             "enable_thinking": False,
         }
         models = [selected_model]
-        if self.config.chat_fallback_model not in models:
-            models.append(self.config.chat_fallback_model)
+        fallback_model = (
+            self.config.review_fallback_model
+            if selected_model == self.config.review_model
+            else self.config.chat_fallback_model
+        )
+        if fallback_model not in models:
+            models.append(fallback_model)
         last_error: ApiError | None = None
         with self._chat_slots:
             for candidate_model in models:
@@ -539,7 +626,12 @@ background makes the source unsuitable even when it remains usable as a detail r
 Verified source facts:
 {facts_json}
 """.strip()
-        return self.chat_json(system, prompt, images=image_urls[:12])
+        return self.chat_json(
+            system,
+            prompt,
+            images=image_urls[:12],
+            model=self.config.review_model,
+        )
 
     def review_generated_images(
         self,
@@ -559,7 +651,8 @@ The first {len(source_image_urls)} supplied images are trusted source references
 against the source references and verified facts. Do not reject a faithful crop or a changed neutral
 background; reject changes to the product itself.
 
-Return JSON with key assets, an array of exactly {len(generated_image_urls)} objects. Each object must contain:
+Return JSON with these top-level keys:
+- assets: an array of exactly {len(generated_image_urls)} objects. Each object must contain:
 - index: zero-based integer
 - usable: boolean
 - identity_consistent: boolean
@@ -573,6 +666,19 @@ Return JSON with key assets, an array of exactly {len(generated_image_urls)} obj
 - unexpected_collage: boolean (true for montage, grid, split-screen or repeated panels; detail slot 4 may intentionally show a clean variant lineup)
 - product_coverage: one of high, medium, low
 - reason: concise string
+- set_usable: boolean; false only for a hard defect or a materially redundant/unfinished set
+- usable_count: integer from 0 to {len(generated_image_urls)}
+- distinct_commercial_roles: integer from 0 to {len(generated_image_urls)}
+- coherent: boolean (consistent product identity and campaign style without making all slots alike)
+- near_duplicate_pairs: array of two-index arrays, for example [[1,2]]
+- missing_roles: array of intended purposes that are absent or materially under-delivered
+- repair_targets: array of generated indices whose replacement would most improve the set
+- summary: concise set-level diagnosis
+
+Judge the six assets as one commercial collection after judging each image. Penalize repeated camera
+angles, repeated crops, repeated backgrounds or two slots that communicate the same shopper value even
+when each image is individually usable. Do not call faithful consistency a duplicate when framing and
+commercial purpose are clearly distinct. A deterministic size chart may be visually different by design.
 
 Verified facts:
 {facts_json}
@@ -584,6 +690,7 @@ Expected asset purposes in generated-image order:
             system,
             prompt,
             images=[*source_image_urls, *generated_image_urls],
+            model=self.config.review_model,
         )
 
     def select_best_generated_image(
@@ -621,6 +728,7 @@ Verified facts:
             system,
             prompt,
             images=[*source_image_urls, *candidate_urls],
+            model=self.config.review_model,
         )
 
     def select_best_detail_image(
@@ -667,6 +775,7 @@ Verified facts:
             system,
             prompt,
             images=[*source_image_urls, *candidate_urls],
+            model=self.config.review_model,
         )
 
     def review_generated_video(
@@ -714,7 +823,13 @@ Verified facts:
 {facts_json}
 """.strip()
             videos = [video_url]
-        return self.chat_json(system, prompt, images=source_image_urls, videos=videos)
+        return self.chat_json(
+            system,
+            prompt,
+            images=source_image_urls,
+            videos=videos,
+            model=self.config.review_model,
+        )
 
     def generate_image(
         self,

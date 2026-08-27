@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -41,6 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip model calls and exercise deterministic fallbacks (development only)",
     )
     parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="write structured, redacted TRACE_JSON events to agent.log (local diagnostics)",
+    )
+    parser.add_argument(
         "--timeout-seconds",
         type=int,
         default=29 * 60,
@@ -55,7 +61,13 @@ def main(argv: list[str] | None = None) -> int:
         print(VERSION)
         return 0
 
-    logger = configure_logging()
+    debug = args.debug or os.environ.get("AGENT_DEBUG", "").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    logger = configure_logging(debug=debug)
     try:
         if args.input_dir or args.output_dir:
             if not args.input_dir or not args.output_dir:
@@ -83,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
             logger=logger,
             timeout_seconds=args.timeout_seconds,
             offline=args.offline,
+            debug=debug,
         )
         pipeline.run()
         return 0

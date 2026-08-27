@@ -147,6 +147,81 @@ def _char_overlap(left: str, right: str) -> float:
     return len(a & b) / len(a | b)
 
 
+_CATEGORY_FAMILIES = {
+    "tshirt": ("t恤", "tee", "t-shirt", "t shirt"),
+    "shirt": ("衬衫", "blouse", "shirt"),
+    "knit": ("针织衫", "毛衣", "sweater", "pullover", "knitwear"),
+    "coat": ("外套", "夹克", "大衣", "jacket", "coat"),
+    "dress": ("连衣裙", "dress"),
+    "skirt": ("半身裙", "skirt"),
+    "shorts": ("短裤", "五分裤", "shorts"),
+    "pants": ("休闲裤", "长裤", "裤子", "pants", "trousers"),
+}
+
+_CATEGORY_AUDIENCES = {
+    "girls": ("女童", "girls", "girl"),
+    "boys": ("男童", "boys", "boy"),
+    "women": ("女式", "女士", "女装", "women", "woman"),
+    "men": ("男式", "男士", "男装", "men", "man"),
+}
+
+_SPECIALIZED_CATEGORY_MARKERS = (
+    "大码",
+    "孕妇",
+    "户外",
+    "高尔夫",
+    "滑冰",
+    "运动",
+    "传统",
+    "民族",
+    "配饰",
+    "舞台",
+    "制服",
+)
+
+
+def _semantic_groups(text: str, groups: dict[str, tuple[str, ...]]) -> set[str]:
+    folded = normalize_label(text or "")
+    return {
+        name
+        for name, markers in groups.items()
+        if any(normalize_label(marker) in folded for marker in markers)
+    }
+
+
+def _source_audience_groups(facts: ProductFacts) -> set[str]:
+    """Infer audience from title/category plus explicit gender/age attributes."""
+
+    evidence = " ".join(
+        [
+            facts.source_title,
+            facts.source_category_name,
+            *[
+                item.value
+                for item in facts.attributes
+                if any(
+                    marker in item.name
+                    for marker in ("性别", "人群", "年龄", "童")
+                )
+            ],
+        ]
+    )
+    folded = normalize_label(evidence)
+    audiences = _semantic_groups(evidence, _CATEGORY_AUDIENCES)
+    child_context = any(marker in folded for marker in ("童", "儿童", "婴幼"))
+    if child_context:
+        if "女" in folded:
+            audiences.add("girls")
+        if "男" in folded:
+            audiences.add("boys")
+    else:
+        if "女" in folded:
+            audiences.add("women")
+        if "男" in folded:
+            audiences.add("men")
+    return audiences
+
+
 def _category_score(facts: ProductFacts, candidate: dict[str, Any]) -> float:
     source = normalize_label(facts.source_category_name)
     title = normalize_label(facts.source_title)
@@ -163,6 +238,47 @@ def _category_score(facts: ProductFacts, candidate: dict[str, Any]) -> float:
     )
     clues = normalize_label(type_values + facts.source_category_name)
     score += _char_overlap(clues, name) * 20
+
+    raw_source_evidence = " ".join(
+        [
+            facts.source_category_name,
+            facts.source_title,
+            type_values,
+            *[f"{item.name}:{item.value}" for item in facts.attributes],
+        ]
+    )
+    raw_candidate = " ".join(
+        [
+            str(candidate.get("name") or ""),
+            str(candidate.get("name_chinese") or ""),
+            str(candidate.get("path") or ""),
+        ]
+    )
+    source_families = _semantic_groups(raw_source_evidence, _CATEGORY_FAMILIES)
+    candidate_families = _semantic_groups(raw_candidate, _CATEGORY_FAMILIES)
+    if source_families and candidate_families:
+        score += 28 if source_families & candidate_families else -48
+    source_audiences = _source_audience_groups(facts)
+    candidate_audiences = _semantic_groups(raw_candidate, _CATEGORY_AUDIENCES)
+    if source_audiences and candidate_audiences:
+        score += 16 if source_audiences & candidate_audiences else -52
+    normalized_evidence = normalize_label(raw_source_evidence)
+    normalized_candidate = normalize_label(raw_candidate)
+    for marker in _SPECIALIZED_CATEGORY_MARKERS:
+        normalized_marker = normalize_label(marker)
+        if (
+            normalized_marker in normalized_candidate
+            and normalized_marker not in normalized_evidence
+        ):
+            score -= 34
+
+    normalized_source_category = normalize_label(facts.source_category_name)
+    if normalized_source_category and normalized_source_category == name:
+        score += 35
+    elif normalized_source_category and (
+        normalized_source_category in name or name in normalized_source_category
+    ):
+        score += 18
     if any(token in title for token in ("男", "男士", "男童")) and "女士" in path:
         score -= 40
     if any(token in title for token in ("女", "女士", "女童")) and "男士" in path:
@@ -217,20 +333,33 @@ def _category_parent_map(data: dict[str, Any]) -> dict[str, str]:
 
 
 _ATTRIBUTE_NAME_SYNONYMS = {
-    "面料成分": {"主面料成分", "面料", "面料名称", "材质"},
+    "面料成分": {"主面料成分", "面料", "面料名称", "材质", "材质成分", "织物"},
+    "面料成分含量": {
+        "主面料成分含量",
+        "面料成分含量",
+        "材质含量",
+        "成分含量",
+    },
     "图案": {"图案", "图案花纹"},
-    "包容度": {"版型", "包容度"},
-    "领型": {"领型", "衣领类型"},
-    "袖长": {"袖长"},
-    "袖型": {"袖型", "袖子类型"},
-    "衣长": {"衣长"},
+    "包容度": {"版型", "包容度", "廓形", "剪裁"},
+    "领型": {"领型", "衣领类型", "领口", "领口类型"},
+    "袖长": {"袖长", "袖子长度"},
+    "袖型": {"袖型", "袖子类型", "袖子款式"},
+    "衣长": {"衣长", "上衣长度"},
+    "裤长": {"裤长", "裤子长度"},
+    "裤型": {"裤型", "裤子版型"},
+    "腰型": {"腰型", "腰高", "腰线", "腰部类型"},
+    "裙长": {"裙长", "裙子长度"},
+    "裙型": {"裙型", "裙子版型"},
     "风格": {"风格", "风格类型", "跨境风格类型"},
     "季节": {"适合季节", "上市年份季节", "上市年份/季节", "季节"},
     "场合": {"适用场景", "场合", "风格", "跨境风格类型"},
     "设计": {"设计", "流行元素"},
     "尺码类型": {"尺码类型"},
-    "颜色": {"颜色"},
-    "尺码": {"尺码", "适合身高"},
+    "颜色": {"颜色", "色彩", "颜色分类", "色号"},
+    "尺码": {"尺码", "适合身高", "规格", "大小"},
+    "适用性别": {"适用性别", "性别", "适合人群"},
+    "产品类别": {"产品类别", "类别", "品类", "商品类型"},
 }
 
 
@@ -484,7 +613,13 @@ def resolve_taxonomy(
         )
     elif candidates:
         top = candidates[0]
-        confidence = min(0.9, max(0.35, float(top["score"]) / 100))
+        second_score = (
+            float(candidates[1]["score"]) if len(candidates) > 1 else float(top["score"])
+        )
+        margin = max(0.0, float(top["score"]) - second_score)
+        absolute = min(1.0, max(0.0, float(top["score"]) / 125.0))
+        separation = min(1.0, margin / 30.0)
+        confidence = min(0.94, max(0.35, 0.35 + absolute * 0.4 + separation * 0.25))
         choice = CategoryChoice(
             category_id=str(top["category_id"]),
             name=str(top["name"]),

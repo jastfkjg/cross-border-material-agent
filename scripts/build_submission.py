@@ -63,7 +63,34 @@ def vendor_linux_dependencies() -> None:
             f"--dest={wheel_dir}",
             f"--requirement={ROOT / 'requirements.txt'}",
         ]
-        subprocess.run(command, check=True)
+        try:
+            subprocess.run(command, check=True)
+        except subprocess.CalledProcessError:
+            # Local mirrors occasionally stop serving a pinned manylinux wheel.
+            # Reuse only an earlier submission whose dependency manifest is
+            # byte-for-byte identical; source files are still rebuilt below.
+            if not ZIP_PATH.is_file():
+                raise
+            with zipfile.ZipFile(ZIP_PATH) as previous:
+                if (
+                    previous.read("requirements.txt")
+                    != (ROOT / "requirements.txt").read_bytes()
+                ):
+                    raise
+                vendor_members = [
+                    name
+                    for name in previous.namelist()
+                    if name.startswith("vendor/") and not name.endswith("/")
+                ]
+                if not vendor_members:
+                    raise
+                for name in vendor_members:
+                    relative = Path(name)
+                    destination = STAGING / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(previous.read(name))
+            print("Reused matching Linux vendor dependencies from previous agent.zip")
+            return
         wheels = sorted(wheel_dir.glob("*.whl"))
         if not wheels:
             raise RuntimeError("pip did not download any dependency wheels")
@@ -74,7 +101,7 @@ def vendor_linux_dependencies() -> None:
 
 def validate_staging(skip_dependencies: bool) -> None:
     manifest = json.loads((STAGING / "agent.json").read_text(encoding="utf-8"))
-    if manifest != {"runtime": "python", "version": "2.2.0"}:
+    if manifest != {"runtime": "python", "version": "2.3.0"}:
         raise RuntimeError(f"Unexpected agent.json: {manifest}")
     if not skip_dependencies:
         pillow = STAGING / "vendor" / "PIL"

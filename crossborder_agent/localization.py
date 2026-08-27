@@ -1723,6 +1723,7 @@ def generate_copy_payload(
         return fallback, "deterministic-fallback"
 
     locale = LANGUAGES[language]
+    trace = getattr(client, "trace", None)
     source_terms = _source_terms(facts, taxonomy)
     system = f"""
 You are a native {locale["locale"]} e-commerce copywriter and a strict factual editor.
@@ -1746,6 +1747,13 @@ Treat the source title as useful product evidence: retain distinctive, concrete 
 as shoulder cutouts, neckline construction or silhouette when they are explicitly named there.
 Use product-first phrasing natural to {locale["locale"]}; avoid translated syntax, keyword stuffing,
 generic filler and mixed-language fragments. Keep the title under 128 characters.
+Write from this product's most distinctive verified construction detail rather than a stock opening.
+Avoid reusable templates such as "designed for everyday style", "a must-have addition", "perfect for
+any occasion", "elevate your wardrobe", "clean and polished look", or their translated equivalents.
+Every highlight must communicate a different buyer decision: visible design, silhouette/construction,
+available option, or conservative fit guidance. Do not turn highlights into raw "Field: Value" rows.
+The shopper prose is a presentation layer: never include category IDs, attribute IDs, SKU IDs, source
+labels or audit terminology there. Code will place those exact machine fields in a separate appendix.
 Use normal grammar rather than concatenating localized field values. In English, for example, write
 "a cold-shoulder design, a halter-style neckline, long sleeves, and a slim fit" rather than copying
 Title Case attribute labels into a sentence.
@@ -1793,8 +1801,18 @@ source values will not be published.
 """.strip()
     try:
         draft = client.chat_json(system, prompt)
-    except ApiError:
+    except ApiError as exc:
+        if trace:
+            trace.emit(
+                "copy.generation_failed",
+                language=language,
+                category=exc.category,
+                retryable=exc.retryable,
+                error=str(exc),
+            )
         return fallback, "deterministic-fallback"
+    if trace:
+        trace.emit("copy.draft", language=language, payload=draft)
 
     audit_system = f"""
 You are a native {locale["locale"]} factual copy auditor. Return JSON only.
@@ -1805,6 +1823,9 @@ the full fiber composition is unavailable; omit or explicitly qualify that mater
 Remove ratings, sales counts, urgency, promotions, shipping or return promises, endorsements,
 contact details, social handles and external links.
 Keep natural localized language, but prefer precise field-level facts over generic filler.
+Replace stock marketing phrases with product-specific syntax and vary sentence structure. Keep buyer
+copy free of IDs and raw field labels because code renders machine-oriented data in a separate appendix.
+Make each highlight serve a distinct purchase decision instead of repeating the overview.
 The result must contain exactly the requested six top-level keys and exactly the seven required media keys.
 Do not copy Chinese characters into any customer-facing value. The localized_terms keys are the sole
 exception: preserve those exact source keys, while translating every localized_terms value.
@@ -1831,9 +1852,24 @@ The video description may state the fixed 8-second duration. Output the correcte
     audit_applied = True
     try:
         audited = client.chat_json(audit_system, audit_prompt)
-    except ApiError:
+    except ApiError as exc:
         audited = draft
         audit_applied = False
+        if trace:
+            trace.emit(
+                "copy.audit_failed",
+                language=language,
+                category=exc.category,
+                retryable=exc.retryable,
+                error=str(exc),
+            )
+    if trace:
+        trace.emit(
+            "copy.audit",
+            language=language,
+            audit_applied=audit_applied,
+            payload=audited,
+        )
 
     payload = _normalize_auxiliary_fields(audited, fallback)
     expected_media = set(fallback["media_descriptions"])
@@ -1841,6 +1877,13 @@ The video description may state the fixed 8-second duration. Output the correcte
     validation_error = _payload_validation_error(
         language, payload, facts, taxonomy, expected_media, expected_terms
     )
+    if trace:
+        trace.emit(
+            "copy.validation",
+            language=language,
+            stage="audited",
+            validation_error=validation_error,
+        )
     repaired = False
     if validation_error == "numeric-fact-guard":
         payload = _repair_numeric_fields(
@@ -1867,7 +1910,16 @@ Verified source facts:
 """.strip()
         try:
             payload = client.chat_json(audit_system, repair_prompt)
-        except ApiError:
+        except ApiError as exc:
+            if trace:
+                trace.emit(
+                    "copy.repair_failed",
+                    language=language,
+                    validation_error=validation_error,
+                    category=exc.category,
+                    retryable=exc.retryable,
+                    error=str(exc),
+                )
             return fallback, validation_error
         payload = _normalize_auxiliary_fields(payload, fallback)
         validation_error = _payload_validation_error(
@@ -1881,6 +1933,14 @@ Verified source facts:
                 language, payload, facts, taxonomy, expected_media, expected_terms
             )
         if validation_error:
+            if trace:
+                trace.emit(
+                    "copy.validation",
+                    language=language,
+                    stage="repair",
+                    validation_error=validation_error,
+                    payload=payload,
+                )
             return fallback, validation_error
         repaired = True
 
@@ -1891,6 +1951,15 @@ Verified source facts:
         source += "-factual-audit"
     else:
         source += "-validated-draft"
+    if trace:
+        trace.emit(
+            "copy.complete",
+            language=language,
+            source=source,
+            repaired=repaired,
+            audit_applied=audit_applied,
+            payload=payload,
+        )
     return payload, source
 
 

@@ -216,6 +216,7 @@ class RunState:
     warnings: list[str] = field(default_factory=list)
     api_calls: list[dict[str, Any]] = field(default_factory=list)
     agent_plan: dict[str, Any] = field(default_factory=dict)
+    visual_set_review: dict[str, Any] = field(default_factory=dict)
     agent_evaluations: list[AgentEvaluation] = field(default_factory=list)
     agent_actions: list[AgentActionResult] = field(default_factory=list)
 

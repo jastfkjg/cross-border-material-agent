@@ -135,6 +135,32 @@ class ResilienceTests(unittest.TestCase):
         self.assertTrue(payload["recovered"])
         self.assertEqual(response.call_count, 2)
 
+    def test_review_model_uses_its_own_fallback_chain(self) -> None:
+        config = ApiConfig(
+            api_key="test",
+            dashscope_base_url=self.base + "/dash",
+            openai_base_url=self.base + "/openai",
+            chat_model="producer",
+            chat_fallback_model="producer-fallback",
+            review_model="reviewer",
+            review_fallback_model="reviewer-fallback",
+        )
+        client = QwenClient(config, self.logger, time.monotonic() + 300)
+        called_models: list[str] = []
+
+        def response(body):
+            called_models.append(body["model"])
+            if len(called_models) == 1:
+                raise ApiError("reviewer busy", retryable=True, category="queue")
+            return '{"ok": true}'
+
+        with mock.patch.object(client, "_chat_response", side_effect=response):
+            payload = client.chat_json(
+                "system", "prompt", model=config.review_model
+            )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(called_models, ["reviewer", "reviewer-fallback"])
+
     @unittest.skipIf(Image is None, "Pillow is required")
     def test_corrupt_image_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agent-corrupt-") as temporary:

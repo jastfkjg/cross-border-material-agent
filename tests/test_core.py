@@ -4,7 +4,9 @@ import logging
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from crossborder_agent.api import ApiError
@@ -18,6 +20,7 @@ from crossborder_agent.input_loader import (
     parse_prompt_paths,
 )
 from crossborder_agent.localization import generate_copy_payload, render_description
+from crossborder_agent.models import AssetResult
 from crossborder_agent.planning import fallback_creative_plan
 from crossborder_agent.pipeline import Pipeline, PipelineError
 from crossborder_agent.taxonomy import resolve_taxonomy
@@ -151,6 +154,69 @@ class ComplianceTests(unittest.TestCase):
 
 
 class VisualSelectionTests(unittest.TestCase):
+    def test_six_image_review_uses_platform_allowed_remote_urls(self) -> None:
+        facts = load_product_facts(
+            DATA / "product_info/product_9451226053560.json"
+        )
+
+        class Reviewer:
+            config = SimpleNamespace(review_model="test-reviewer")
+
+            def __init__(self):
+                self.generated_urls = []
+
+            def review_generated_images(
+                self, facts_json, source_urls, generated_urls, expected_assets
+            ):
+                self.generated_urls = list(generated_urls)
+                return {
+                    "assets": [
+                        {"index": index, "usable": True}
+                        for index in range(6)
+                    ],
+                    "set_usable": False,
+                    "usable_count": 6,
+                    "distinct_commercial_roles": 4,
+                    "coherent": True,
+                    "near_duplicate_pairs": [[1, 2]],
+                    "missing_roles": ["construction close-up"],
+                    "repair_targets": [2],
+                    "summary": "two detail slots repeat the same role",
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temp_dir),
+                logger=logging.getLogger("set-review-test"),
+                offline=True,
+            )
+            reviewer = Reviewer()
+            pipeline.client = reviewer
+            assets = [
+                AssetResult(
+                    name="main_image.jpeg",
+                    path="main_image.jpeg",
+                    source_url="https://example.test/main.jpeg",
+                    generated=True,
+                    description="hero",
+                )
+            ] + [
+                AssetResult(
+                    name=f"detail_image_{index}.jpeg",
+                    path=f"detail_image_{index}.jpeg",
+                    source_url=f"https://example.test/detail-{index}.jpeg",
+                    generated=True,
+                    description=f"detail role {index}",
+                )
+                for index in range(1, 6)
+            ]
+            result = pipeline._review_visual_set(facts, assets)
+
+        self.assertEqual(result["repair_targets"], [2])
+        self.assertTrue(all(url.startswith("https://") for url in reviewer.generated_urls))
+        self.assertTrue(any("语义重复" in item for item in pipeline.warnings))
+
     def test_non_offline_pipeline_requires_complete_model_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with mock.patch.dict(os.environ, {}, clear=True):
@@ -453,6 +519,24 @@ class VisualSelectionTests(unittest.TestCase):
 
 
 class FactAndTaxonomyTests(unittest.TestCase):
+    def test_hidden_category_ranking_uses_product_family_audience_and_specialization(self) -> None:
+        facts = load_product_facts(
+            DATA / "product_info/product_5681480836479.json"
+        )
+        hidden_facts = replace(
+            facts, source_category_id="", source_category_name=""
+        )
+        taxonomy = resolve_taxonomy(
+            hidden_facts,
+            load_json(DATA / "clothing_categories.json"),
+            load_json(DATA / "clothing_attributes.json"),
+        )
+        top = taxonomy.category.candidates[0]
+        self.assertIn("针织", top["name"] + top["path"])
+        self.assertIn("女", top["name"] + top["path"])
+        self.assertNotIn("女童", top["name"] + top["path"])
+        self.assertNotIn("运动", top["name"] + top["path"])
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.tree = load_json(DATA / "clothing_categories.json")

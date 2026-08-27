@@ -7,13 +7,13 @@ import os
 from pathlib import Path
 
 
-def configure_logging() -> logging.Logger:
+def configure_logging(*, debug: bool = False) -> logging.Logger:
     log_dir = Path(os.environ.get("AGENT_LOG_DIR", ".agent-logs")).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "agent.log"
 
     logger = logging.getLogger("crossborder_agent")
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG if debug else logging.INFO)
     logger.handlers.clear()
 
     formatter = logging.Formatter(
