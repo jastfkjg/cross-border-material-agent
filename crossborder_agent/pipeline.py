@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import concurrent.futures
 import json
 import logging
@@ -81,6 +82,13 @@ _VIDEO_NEGATIVE_PROMPT = (
     "product morphing, changed product construction, changed color, changed pattern, added or removed components, "
     "changed fastenings or trims, duplicate product, extra product, warped material, flicker, scene cut, camera shake, "
     "hands covering product, text, subtitles, watermark, logo animation, speech, music"
+)
+
+_AGENT_MIN_NEW_REPAIR_SECONDS = 8 * 60
+_AGENT_POST_REPAIR_REVIEW_RESERVE_SECONDS = 4 * 60
+_AGENT_FINAL_ARBITRATION_MIN_SECONDS = 150
+_AGENT_SNAPSHOT_FILES = tuple(
+    sorted(EXPECTED_FILES - {"strategy_document.md"})
 )
 
 
@@ -540,7 +548,6 @@ class Pipeline:
                 work_dir=work_dir,
                 downloads_dir=downloads_dir,
             )
-            post_review_action_start = len(state.agent_actions)
             if not self.fast_mode:
                 self._run_bounded_agent_loop(
                     tool_registry,
@@ -551,7 +558,6 @@ class Pipeline:
                     state=state,
                     localization_payloads=localization_payloads,
                     localization_sources=localization_sources,
-                    visual_set_review=state.visual_set_review,
                     work_dir=work_dir,
                 )
             else:
@@ -562,12 +568,6 @@ class Pipeline:
             # generation was unavailable from the outset; this is not an evaluator fallback.
             self._enhance_fallback_video(state.assets, work_dir)
             self._record_visual_delivery_quality(state.assets)
-            stale_review_assets = {
-                item.target
-                for item in state.agent_actions[post_review_action_start:]
-                if item.status == "completed"
-                and item.tool in {"regenerate_main_image", "regenerate_detail_image"}
-            }
             self._write_localized_descriptions(
                 facts,
                 taxonomy,
@@ -576,7 +576,7 @@ class Pipeline:
                 state.assets,
                 work_dir,
                 state.visual_set_review,
-                stale_review_assets,
+                set(),
             )
             if self.client is not None:
                 state.api_calls = self.client.metrics
@@ -916,6 +916,221 @@ class Pipeline:
             ),
         )
 
+    def _capture_agent_snapshot(
+        self,
+        *,
+        evaluation: Any,
+        state: RunState,
+        localization_payloads: dict[str, dict[str, Any]],
+        localization_sources: dict[str, str],
+        work_dir: Path,
+    ) -> dict[str, Any]:
+        """Save one fully evaluated delivery version and its in-memory state."""
+
+        snapshot_index = len(state.agent_snapshots)
+        snapshot_id = f"snapshot_{snapshot_index:02d}"
+        snapshot_dir = work_dir / ".agent-snapshots" / snapshot_id
+        snapshot_dir.mkdir(parents=True, exist_ok=False)
+        for filename in _AGENT_SNAPSHOT_FILES:
+            source = work_dir / filename
+            if not source.is_file():
+                raise PipelineError(
+                    f"无法保存 Agent 快照 {snapshot_id}，缺少文件: {filename}"
+                )
+            destination = snapshot_dir / filename
+            # Use independent copies: localized description rendering writes in
+            # place, so hard links would silently mutate older snapshots.
+            shutil.copy2(source, destination)
+
+        metadata = {
+            "snapshot_id": snapshot_id,
+            "after_repair_rounds": int(evaluation.round_index),
+            "weighted_score": float(evaluation.weighted_score),
+            "dimension_scores": dict(evaluation.dimension_scores),
+            "ready_for_delivery": bool(evaluation.ready_for_delivery),
+            "selected": False,
+        }
+        state.agent_snapshots.append(metadata)
+        self.trace.emit("agent.snapshot_saved", **metadata)
+        return {
+            "metadata": metadata,
+            "directory": snapshot_dir,
+            "assets": copy.deepcopy(state.assets),
+            "localization_payloads": copy.deepcopy(localization_payloads),
+            "localization_sources": copy.deepcopy(localization_sources),
+            "visual_set_review": copy.deepcopy(state.visual_set_review),
+        }
+
+    def _restore_agent_snapshot(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        state: RunState,
+        localization_payloads: dict[str, dict[str, Any]],
+        localization_sources: dict[str, str],
+        work_dir: Path,
+        mark_selected: bool,
+    ) -> None:
+        """Atomically restore files and mutable state from one delivery snapshot."""
+
+        snapshot_dir = snapshot["directory"]
+        for filename in _AGENT_SNAPSHOT_FILES:
+            source = snapshot_dir / filename
+            staged = work_dir / f".restore-{uuid.uuid4().hex}-{filename}"
+            shutil.copy2(source, staged)
+            os.replace(staged, work_dir / filename)
+        state.assets = copy.deepcopy(snapshot["assets"])
+        localization_payloads.clear()
+        localization_payloads.update(copy.deepcopy(snapshot["localization_payloads"]))
+        localization_sources.clear()
+        localization_sources.update(copy.deepcopy(snapshot["localization_sources"]))
+        state.visual_set_review = copy.deepcopy(snapshot["visual_set_review"])
+        if mark_selected:
+            for item in state.agent_snapshots:
+                item["selected"] = item is snapshot["metadata"]
+        self.trace.emit(
+            "agent.snapshot_restored",
+            snapshot_id=snapshot["metadata"]["snapshot_id"],
+            weighted_score=snapshot["metadata"]["weighted_score"],
+            selected=mark_selected,
+        )
+
+    @staticmethod
+    def _agent_snapshot_rank(snapshot: dict[str, Any]) -> tuple[float, float, int]:
+        metadata = snapshot["metadata"]
+        scores = metadata.get("dimension_scores") or {}
+        critical_score = sum(float(scores.get(key, 0.0)) for key in ("A1", "A2", "A5"))
+        return (
+            float(metadata.get("weighted_score", 0.0)),
+            critical_score,
+            int(metadata.get("after_repair_rounds", 0)),
+        )
+
+    def _rebuild_synchronized_catalog_video(
+        self,
+        assets: list[AssetResult],
+        work_dir: Path,
+    ) -> ToolExecution:
+        """Rebuild a local video from the current image set as a consistency fallback."""
+
+        video_asset = next(
+            (item for item in assets if item.name == "product_video.mp4"), None
+        )
+        if video_asset is None:
+            return ToolExecution("failed", "product video asset missing")
+        image_paths = [work_dir / "main_image.jpeg"] + [
+            work_dir / f"detail_image_{index}.jpeg" for index in range(1, 6)
+        ]
+        staged = work_dir / f".synchronized-video-{uuid.uuid4().hex}.mp4"
+        try:
+            create_catalog_video(image_paths, staged, duration=8)
+            inspect_video(staged)
+            os.replace(staged, Path(video_asset.path))
+        except (MediaError, OSError) as exc:
+            return ToolExecution("failed", f"catalog video synchronization failed: {exc}")
+        finally:
+            staged.unlink(missing_ok=True)
+        video_asset.source_url = ""
+        video_asset.model = "ffmpeg-catalog-synchronized"
+        video_asset.generated = False
+        video_asset.fallback_reason = "rebuilt after final image changes for cross-asset consistency"
+        video_asset.description = (
+            "Eight-second catalog video synchronized with the current final image set"
+        )
+        return ToolExecution("completed", "video rebuilt from the current final images")
+
+    def _synchronize_repair_dependencies(
+        self,
+        *,
+        round_index: int,
+        changed_targets: set[str],
+        registry: BoundedToolRegistry,
+        facts: ProductFacts,
+        taxonomy: TaxonomyResult,
+        creative_plan: CreativePlan,
+        state: RunState,
+        localization_payloads: dict[str, dict[str, Any]],
+        work_dir: Path,
+    ) -> bool:
+        """Refresh media descriptions, visual review and dependent video after repairs."""
+
+        changed_images = {
+            target for target in changed_targets if target.endswith(".jpeg")
+        }
+        if not changed_images:
+            return True
+
+        video_changed = "product_video.mp4" in changed_targets
+        main_changed = "main_image.jpeg" in changed_images
+        video_asset = next(
+            (item for item in state.assets if item.name == "product_video.mp4"), None
+        )
+        needs_catalog_refresh = bool(
+            video_asset is not None and not video_asset.generated and not video_changed
+        )
+        if main_changed and not video_changed:
+            result = registry.execute(
+                "regenerate_video",
+                "product_video.mp4",
+                "Synchronize every video frame with the newly accepted final hero while preserving exact source-backed product identity.",
+            )
+            state.agent_actions.append(
+                AgentActionResult(
+                    round_index=round_index,
+                    tool="regenerate_video",
+                    target="product_video.mp4",
+                    status=result.status,
+                    detail="automatic dependency repair: " + result.detail,
+                )
+            )
+            if result.status != "completed":
+                result = self._rebuild_synchronized_catalog_video(
+                    state.assets, work_dir
+                )
+                state.agent_actions.append(
+                    AgentActionResult(
+                        round_index=round_index,
+                        tool="synchronize_catalog_video",
+                        target="product_video.mp4",
+                        status=result.status,
+                        detail=result.detail,
+                    )
+                )
+            if result.status != "completed":
+                return False
+        elif needs_catalog_refresh:
+            result = self._rebuild_synchronized_catalog_video(state.assets, work_dir)
+            state.agent_actions.append(
+                AgentActionResult(
+                    round_index=round_index,
+                    tool="synchronize_catalog_video",
+                    target="product_video.mp4",
+                    status=result.status,
+                    detail=result.detail,
+                )
+            )
+            if result.status != "completed":
+                return False
+
+        refreshed_review = self._review_visual_set(facts, state.assets)
+        state.visual_set_review = refreshed_review or {}
+        self._write_localized_descriptions(
+            facts,
+            taxonomy,
+            creative_plan,
+            localization_payloads,
+            state.assets,
+            work_dir,
+            state.visual_set_review,
+        )
+        self.trace.emit(
+            "agent.dependencies_synchronized",
+            round_index=round_index,
+            changed_targets=sorted(changed_targets),
+            visual_review_refreshed=bool(refreshed_review),
+        )
+        return True
+
     def _run_bounded_agent_loop(
         self,
         registry: BoundedToolRegistry,
@@ -927,7 +1142,6 @@ class Pipeline:
         state: RunState,
         localization_payloads: dict[str, dict[str, Any]],
         localization_sources: dict[str, str],
-        visual_set_review: dict[str, Any],
         work_dir: Path,
     ) -> None:
         if self.client is None:
@@ -941,11 +1155,18 @@ class Pipeline:
                 reason="offline" if self.offline else "no-model-client",
             )
             return
-        max_repairs = int(agent_plan.get("max_repair_rounds", 1))
+        # Full mode has one deterministic upper bound. The manager may shape
+        # priorities and per-round actions, but cannot prematurely reduce the
+        # number of repair opportunities available to the runtime controller.
+        max_repairs = 3
         repairs_used = 0
         round_index = 0
+        snapshots: list[dict[str, Any]] = []
         while True:
-            if self.deadline - time.monotonic() <= 4 * 60:
+            if (
+                self.deadline - time.monotonic()
+                <= _AGENT_POST_REPAIR_REVIEW_RESERVE_SECONDS
+            ):
                 self.warnings.append("剩余时间不足，停止新的 Agent 评估轮次并保留当前版本")
                 self.trace.emit(
                     "agent.evaluation_skipped",
@@ -963,12 +1184,14 @@ class Pipeline:
                 assets=state.assets,
                 localization_payloads=localization_payloads,
                 localization_sources=localization_sources,
-                visual_set_review=visual_set_review,
+                visual_set_review=state.visual_set_review,
                 work_dir=work_dir,
                 tools=registry,
             )
             if evaluation is None:
-                self.warnings.append("LLM 全局评估未完成；不触发回退，保留当前已校验素材")
+                self.warnings.append(
+                    "LLM 全局评估未完成；未评分修复版本不参与最优选择"
+                )
                 self.trace.emit(
                     "agent.evaluation_failed",
                     round_index=round_index,
@@ -976,6 +1199,14 @@ class Pipeline:
                 )
                 break
             state.agent_evaluations.append(evaluation)
+            current_snapshot = self._capture_agent_snapshot(
+                evaluation=evaluation,
+                state=state,
+                localization_payloads=localization_payloads,
+                localization_sources=localization_sources,
+                work_dir=work_dir,
+            )
+            snapshots.append(current_snapshot)
             self.trace.emit(
                 "agent.evaluation",
                 round_index=round_index,
@@ -1006,17 +1237,44 @@ class Pipeline:
             if evaluation.ready_for_delivery or not evaluation.repair_actions:
                 break
             if repairs_used >= max_repairs:
-                self.warnings.append("已达到有界 Agent 修复轮次上限，保留最后成功版本")
+                self.warnings.append("已达到有界 Agent 修复轮次上限，进入最优快照选择")
+                break
+            if self.deadline - time.monotonic() <= _AGENT_MIN_NEW_REPAIR_SECONDS:
+                self.warnings.append(
+                    "剩余时间不足 8 分钟，不启动新的 Agent 修复轮次"
+                )
                 break
 
             completed = 0
-            for action in evaluation.repair_actions:
-                required = registry.estimated_seconds(action.tool) + 90
+            changed_targets: set[str] = set()
+            dependency_order = {
+                "regenerate_main_image": 0,
+                "regenerate_detail_image": 0,
+                "revise_localized_copy": 1,
+                "regenerate_video": 2,
+            }
+            ordered_actions = sorted(
+                evaluation.repair_actions,
+                key=lambda item: (dependency_order.get(item.tool, 1), item.priority),
+            )
+            for action in ordered_actions:
+                dependency_seconds = (
+                    registry.estimated_seconds("regenerate_video")
+                    if action.tool == "regenerate_main_image"
+                    else 60
+                    if action.tool == "regenerate_detail_image"
+                    else 0
+                )
+                required = (
+                    registry.estimated_seconds(action.tool)
+                    + dependency_seconds
+                    + _AGENT_POST_REPAIR_REVIEW_RESERVE_SECONDS
+                )
                 if self.deadline - time.monotonic() <= required:
                     self.warnings.append(
-                        f"剩余时间不足以安全执行 {action.tool} 并保留最终校验预算"
+                        f"剩余时间不足以执行 {action.tool}、同步依赖并重新评分"
                     )
-                    break
+                    continue
                 result = registry.execute(
                     action.tool, action.target, action.instruction
                 )
@@ -1042,6 +1300,7 @@ class Pipeline:
                 )
                 if result.status == "completed":
                     completed += 1
+                    changed_targets.add(action.target)
                     self.logger.info(
                         "Agent 修复完成: %s/%s", action.tool, action.target
                     )
@@ -1049,10 +1308,101 @@ class Pipeline:
                     self.warnings.append(
                         f"Agent 修复未替换现有素材 {action.target}: {result.detail[:300]}"
                     )
-            repairs_used += 1
-            round_index += 1
             if completed == 0:
                 break
+            synchronized = self._synchronize_repair_dependencies(
+                round_index=round_index,
+                changed_targets=changed_targets,
+                registry=registry,
+                facts=facts,
+                taxonomy=taxonomy,
+                creative_plan=creative_plan,
+                state=state,
+                localization_payloads=localization_payloads,
+                work_dir=work_dir,
+            )
+            if not synchronized:
+                self.warnings.append(
+                    f"第 {round_index + 1} 轮跨素材依赖同步失败，已恢复该轮修复前快照"
+                )
+                self._restore_agent_snapshot(
+                    current_snapshot,
+                    state=state,
+                    localization_payloads=localization_payloads,
+                    localization_sources=localization_sources,
+                    work_dir=work_dir,
+                    mark_selected=False,
+                )
+                break
+            repairs_used += 1
+            round_index += 1
+
+        if snapshots:
+            ranked_snapshots = sorted(
+                snapshots, key=self._agent_snapshot_rank, reverse=True
+            )
+            primary_best = ranked_snapshots[0]
+            best_snapshot = primary_best
+            shortlist = sorted(
+                ranked_snapshots[:2],
+                key=lambda item: item["metadata"]["snapshot_id"],
+            )
+            if (
+                len(shortlist) == 2
+                and self.deadline - time.monotonic()
+                > _AGENT_FINAL_ARBITRATION_MIN_SECONDS
+            ):
+                arbitration = self.agent.arbitrate_snapshots(
+                    facts=facts,
+                    taxonomy=taxonomy,
+                    snapshots=shortlist,
+                )
+                candidate_ids = [
+                    item["metadata"]["snapshot_id"] for item in shortlist
+                ]
+                state.agent_arbitration = {
+                    **arbitration,
+                    "candidate_snapshot_ids": candidate_ids,
+                    "primary_selected_snapshot_id": primary_best["metadata"][
+                        "snapshot_id"
+                    ],
+                }
+                selected_index = arbitration.get("selected_index")
+                if (
+                    arbitration.get("status") == "completed"
+                    and selected_index in {0, 1}
+                ):
+                    best_snapshot = shortlist[int(selected_index)]
+                self.trace.emit("agent.final_arbitration", **state.agent_arbitration)
+            else:
+                state.agent_arbitration = {
+                    "status": "skipped",
+                    "reason": (
+                        "fewer than two scored snapshots"
+                        if len(shortlist) < 2
+                        else "insufficient final arbitration budget"
+                    ),
+                    "model": (
+                        self.client.config.arbitration_model if self.client else ""
+                    ),
+                    "primary_selected_snapshot_id": primary_best["metadata"][
+                        "snapshot_id"
+                    ],
+                }
+            self._restore_agent_snapshot(
+                best_snapshot,
+                state=state,
+                localization_payloads=localization_payloads,
+                localization_sources=localization_sources,
+                work_dir=work_dir,
+                mark_selected=True,
+            )
+            self.logger.info(
+                "Agent 最终选择 %s，score=%.1f（共 %d 个已评分快照）",
+                best_snapshot["metadata"]["snapshot_id"],
+                best_snapshot["metadata"]["weighted_score"],
+                len(snapshots),
+            )
 
     @staticmethod
     def _find_asset(assets: list[AssetResult], name: str) -> AssetResult:
@@ -1359,10 +1709,13 @@ Candidate 1:
             else:
                 strip_video_audio(raw_video, staged)
             inspect_video(staged)
-            review_sources = self._source_urls_for_use(
-                self._fallback_source_urls(facts, asset_name="main_image.jpeg"),
-                use="reference",
-                preferred_roles=("hero", "front"),
+            review_sources = _unique(
+                [first_frame_url]
+                + self._source_urls_for_use(
+                    self._fallback_source_urls(facts, asset_name="main_image.jpeg"),
+                    use="reference",
+                    preferred_roles=("hero", "front"),
+                )
             )[:3]
             review = self.client.review_generated_video(
                 json.dumps(facts.compact_dict(), ensure_ascii=False),
@@ -3436,9 +3789,14 @@ Allowed leaf candidates:
             "",
             "交付管理器先依据事实账本、A1–A7 权重、源图观察和可用工具生成本次执行策略。初稿完成后，"
             "独立多模态评估器读取全套文案 payload、类目属性、素材清单、图片/视频及本地物理检查，输出逐维度"
-            "评分、证据化问题和白名单工具调用。控制循环最多执行两轮，只修改被点名的单个素材。",
+            "评分、证据化问题和白名单工具调用。Full 模式最多累计执行三轮修复；剩余时间不足 8 分钟时不再启动"
+            "新修复，并为修复后的依赖同步、重新评分和最终校验保留时间。",
             "所有修复均先写入临时文件，完成候选语义选优、文案事实/schema 校验或视频播放校验后才原子替换；"
             "修复失败会保留上一版，不会因为评估意见自动降级为源图或幻灯片。",
+            "每个完成全局评分的版本均保存完整文件与内存状态快照。图片变化后刷新六图复核与三语 Media Guide；"
+            "主图变化时同步视频，模型视频无法可靠同步则使用当前最终图片集重建一致的目录视频。最终按加权分、"
+            "A1/A2/A5 关键分筛出两个最佳版本，再由与生成模型不同的独立模型进行不含主评分和版本先后的盲评仲裁；"
+            "仲裁不可用时才恢复主评估最佳完整快照。",
             "- LLM 自由文本计划仅用于内部生成提示，不作为商品事实写入交付；策略文档只披露经过白名单筛选的控制参数。",
             f"- Agent 控制参数：{json.dumps(agent_plan_controls, ensure_ascii=False)}",
             f"- 已完成全局评估轮次：{len(state.agent_evaluations)}。",
@@ -3474,9 +3832,31 @@ Allowed leaf candidates:
         if state.agent_evaluations:
             lines.extend(["", "全局评估轨迹：", ""])
             lines.extend(
-                f"- 第 {item.round_index + 1} 轮：加权分 {item.weighted_score:.1f}；"
+                f"- 完成 {item.round_index} 轮修复后的评估：加权分 {item.weighted_score:.1f}；"
                 f"ready={item.ready_for_delivery}；{brief(item.summary)}"
                 for item in state.agent_evaluations
+            )
+        if state.agent_snapshots:
+            lines.extend(["", "版本快照与最终选择：", ""])
+            lines.extend(
+                f"- {item.get('snapshot_id')}：完成 {item.get('after_repair_rounds')} 轮修复；"
+                f"加权分 {float(item.get('weighted_score', 0.0)):.1f}；"
+                f"{'最终提交' if item.get('selected') else '保留备选'}。"
+                for item in state.agent_snapshots
+            )
+        if state.agent_arbitration:
+            arbitration = state.agent_arbitration
+            lines.extend(
+                [
+                    "",
+                    "独立最终仲裁：",
+                    "",
+                    f"- 状态：{arbitration.get('status', 'unknown')}。",
+                    f"- 模型：{arbitration.get('model') or '未执行'}。",
+                    f"- 候选快照：{json.dumps(arbitration.get('candidate_snapshot_ids', []), ensure_ascii=False)}。",
+                    f"- 主评估首选：{arbitration.get('primary_selected_snapshot_id', 'unknown')}。",
+                    f"- 仲裁结论：{brief(str(arbitration.get('comparison') or arbitration.get('reason') or '未提供'))}。",
+                ]
             )
         if state.agent_actions:
             lines.extend(["", "定向修复轨迹：", ""])

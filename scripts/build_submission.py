@@ -7,6 +7,7 @@ import argparse
 import compileall
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -101,8 +102,13 @@ def vendor_linux_dependencies() -> None:
 
 def validate_staging(skip_dependencies: bool) -> None:
     manifest = json.loads((STAGING / "agent.json").read_text(encoding="utf-8"))
-    if manifest != {"runtime": "python", "version": "2.3.0"}:
+    if not isinstance(manifest, dict) or set(manifest) != {"runtime", "version"}:
         raise RuntimeError(f"Unexpected agent.json: {manifest}")
+    if manifest["runtime"] != "python":
+        raise RuntimeError(f"Unexpected agent runtime: {manifest['runtime']}")
+    version = manifest["version"]
+    if not isinstance(version, str) or re.fullmatch(r"\d+\.\d+\.\d+", version) is None:
+        raise RuntimeError(f"Invalid agent version: {version!r}")
     if not skip_dependencies:
         pillow = STAGING / "vendor" / "PIL"
         imageio = STAGING / "vendor" / "imageio_ffmpeg"

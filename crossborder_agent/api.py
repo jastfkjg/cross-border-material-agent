@@ -77,6 +77,7 @@ class ApiConfig:
     chat_fallback_model: str = "qwen3.7-plus"
     review_model: str = "qwen3.8-max"
     review_fallback_model: str = "qwen3.7-plus"
+    arbitration_model: str = "qwen3.7-plus"
     visual_review_model: str = ""
     visual_review_fallback_model: str = ""
     image_model: str = "wan2.7-image-pro"
@@ -101,6 +102,9 @@ class ApiConfig:
             review_model=os.environ.get("AGENT_REVIEW_MODEL", "qwen3.8-max"),
             review_fallback_model=os.environ.get(
                 "AGENT_REVIEW_FALLBACK_MODEL", "qwen3.7-plus"
+            ),
+            arbitration_model=os.environ.get(
+                "AGENT_ARBITRATION_MODEL", "qwen3.7-plus"
             ),
             visual_review_model=os.environ.get(
                 "AGENT_VISUAL_REVIEW_MODEL",
@@ -418,6 +422,7 @@ class QwenClient:
             "chat": self.config.chat_model,
             "review": self.config.review_model,
             "review_fallback": self.config.review_fallback_model,
+            "arbitration": self.config.arbitration_model,
             "visual_review": self.visual_review_model,
             "visual_review_fallback": self.visual_review_fallback_model,
             "image": self.config.image_model,

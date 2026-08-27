@@ -73,7 +73,7 @@ class BoundedDeliveryAgent:
                 "fit or size guidance",
             ],
             "video_strategy": "stable product-led short presentation",
-            "max_repair_rounds": 1,
+            "max_repair_rounds": 3,
             "max_actions_per_round": 3,
             "minimum_weighted_score": 90,
         }
@@ -93,7 +93,8 @@ class BoundedDeliveryAgent:
         prompt = f"""
 Create an execution policy for one AliExpress-ready delivery under a 30-minute total limit.
 The initial production skeleton is fixed for reliability, but your plan controls creative emphasis,
-localization priorities, evaluation threshold and bounded repair budget.
+localization priorities, evaluation threshold and per-round action budget. The executor independently
+allows at most three cumulative repair rounds and may stop earlier based on score, actions and time.
 
 Return exactly these keys:
 - creative_direction: concise English direction that can be passed to creative models
@@ -101,7 +102,6 @@ Return exactly these keys:
 - risk_priorities: ordered array containing only A1 through A7
 - visual_sequence: exactly six concise slot objectives, main image first
 - video_strategy: concise English shot and motion strategy
-- max_repair_rounds: integer 1 or 2
 - max_actions_per_round: integer 1 through 4
 - minimum_weighted_score: integer 90 through 95
 
@@ -152,7 +152,6 @@ Available repair tools for later rounds:
         ):
             result["visual_sequence"] = [item.strip()[:500] for item in sequence]
         for key, minimum, maximum in (
-            ("max_repair_rounds", 1, 2),
             ("max_actions_per_round", 1, 4),
             ("minimum_weighted_score", 90, 95),
         ):
@@ -278,7 +277,191 @@ Available repair tools:
             round_index=round_index,
             tools=tools,
             action_limit=int(agent_plan.get("max_actions_per_round", 3)),
+            minimum_weighted_score=float(
+                agent_plan.get("minimum_weighted_score", 90)
+            ),
         )
+
+    def arbitrate_snapshots(
+        self,
+        *,
+        facts: ProductFacts,
+        taxonomy: TaxonomyResult,
+        snapshots: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Blindly compare two shortlisted versions with an independent model."""
+
+        if self.client is None or len(snapshots) != 2:
+            return {"status": "skipped", "reason": "two snapshots are required"}
+        model = self.client.config.arbitration_model.strip()
+        used_copy_sources = {
+            str(value)
+            for snapshot in snapshots
+            for value in snapshot.get("localization_sources", {}).values()
+        }
+        primary_generation_models = {
+            self.client.config.chat_model,
+            self.client.config.image_model,
+            self.client.config.image_fallback_model,
+            self.client.config.video_model,
+        }
+        if (
+            not model
+            or model in primary_generation_models
+            or any(value.startswith(model) for value in used_copy_sources)
+        ):
+            return {
+                "status": "skipped",
+                "model": model,
+                "reason": "configured arbitration model is not independent of generation",
+            }
+
+        all_images: list[str] = []
+        all_videos: list[str] = []
+        candidates: list[dict[str, Any]] = []
+        for index, snapshot in enumerate(snapshots):
+            directory = Path(snapshot["directory"])
+            assets = snapshot["assets"]
+            manifest, image_urls, video_urls = self._artifact_evidence(
+                facts, assets, directory
+            )
+            for url in image_urls:
+                if url not in all_images:
+                    all_images.append(url)
+            for url in video_urls:
+                if url not in all_videos:
+                    all_videos.append(url)
+            candidates.append(
+                {
+                    "index": index,
+                    "copy_evidence": self._copy_artifact_evidence(directory),
+                    "artifact_manifest": manifest,
+                    "visual_set_review": snapshot.get("visual_set_review") or {},
+                    "image_input_indices": [
+                        all_images.index(url) for url in image_urls if url in all_images
+                    ],
+                    "video_input_indices": [
+                        all_videos.index(url) for url in video_urls if url in all_videos
+                    ],
+                }
+            )
+
+        system = (
+            "You are the independent final arbiter for two complete cross-border commerce deliveries. "
+            "You did not produce either candidate and must return JSON only. Judge only supplied evidence. "
+            "Do not infer which candidate is newer or preferred, and do not reward verbosity or strategy claims."
+        )
+        prompt = f"""
+Blindly compare candidate 0 and candidate 1 against the same verified source facts and A1-A7 rubric.
+The candidates were shortlisted by another evaluator, but its scores and ordering are intentionally hidden.
+
+Return exactly:
+- selected_index: 0 or 1
+- candidates: exactly two objects, each containing:
+  - index: 0 or 1
+  - dimension_scores: complete numeric A1,A2,A3,A4,A5,A6,A7 scores from 0 to 100
+  - blocker: boolean
+  - major_critical_issue: boolean; true for a major A1, A2 or A5 defect
+  - reason: concise evidence-based diagnosis
+- comparison: concise explanation of the decisive differences
+
+Reject invented facts, product-identity drift, inconsistent image/video/copy claims, incomplete machine fields,
+locale contamination and unusable media. A deterministic local video without a remote visual input must be
+judged conservatively from its physical inspection and provenance; do not invent a defect merely because the
+remote video URL is unavailable. Select the stronger complete delivery, not the more ambitious one.
+
+Rubric weights:
+{json.dumps(_RUBRIC_WEIGHTS)}
+
+Verified product facts:
+{json.dumps(facts.compact_dict(), ensure_ascii=False)}
+
+Resolved platform result:
+{json.dumps({"category_id": taxonomy.category.category_id, "category": taxonomy.category.name, "path": taxonomy.category.path, "attributes": [{"id": item.attr_id, "name": item.name, "value_id": item.value_id, "value": item.platform_value} for item in taxonomy.attributes], "missing_required": taxonomy.missing_required}, ensure_ascii=False)}
+
+Blind candidate evidence:
+{json.dumps(candidates, ensure_ascii=False)}
+
+Visual input map:
+{json.dumps([{"input_index": index, "url": url} for index, url in enumerate(all_images)], ensure_ascii=False)}
+
+Video input map:
+{json.dumps([{"input_index": index, "url": url} for index, url in enumerate(all_videos)], ensure_ascii=False)}
+""".strip()
+        try:
+            payload = self.client.chat_json(
+                system,
+                prompt,
+                images=all_images,
+                videos=all_videos,
+                model=model,
+                fallback_model=model,
+            )
+        except ApiError as exc:
+            return {
+                "status": "failed",
+                "model": model,
+                "reason": str(exc)[:500],
+            }
+
+        rows = payload.get("candidates")
+        if not isinstance(rows, list) or len(rows) != 2:
+            return {
+                "status": "failed",
+                "model": model,
+                "reason": "invalid arbitration candidate schema",
+            }
+        normalized: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict) or row.get("index") not in {0, 1}:
+                continue
+            raw_scores = row.get("dimension_scores")
+            if not isinstance(raw_scores, dict):
+                continue
+            scores = {
+                key: max(0.0, min(100.0, float(raw_scores[key])))
+                for key in _RUBRIC_WEIGHTS
+                if isinstance(raw_scores.get(key), (int, float))
+            }
+            if len(scores) != len(_RUBRIC_WEIGHTS):
+                continue
+            weighted = sum(
+                scores[key] * weight / 100
+                for key, weight in _RUBRIC_WEIGHTS.items()
+            )
+            normalized[int(row["index"])] = {
+                "dimension_scores": scores,
+                "weighted_score": round(weighted, 3),
+                "blocker": row.get("blocker") is True,
+                "major_critical_issue": row.get("major_critical_issue") is True,
+                "reason": str(row.get("reason") or "")[:1000],
+            }
+        if set(normalized) != {0, 1}:
+            return {
+                "status": "failed",
+                "model": model,
+                "reason": "incomplete arbitration dimension scores",
+            }
+
+        eligible = [
+            index
+            for index, row in normalized.items()
+            if not row["blocker"] and not row["major_critical_issue"]
+        ]
+        selected = payload.get("selected_index")
+        if selected not in {0, 1}:
+            selected = max(normalized, key=lambda item: normalized[item]["weighted_score"])
+        if eligible and selected not in eligible:
+            selected = max(
+                eligible, key=lambda item: normalized[item]["weighted_score"]
+            )
+        return {
+            "status": "completed",
+            "model": model,
+            "selected_index": int(selected),
+            "candidates": normalized,
+            "comparison": str(payload.get("comparison") or "")[:2000],
+        }
 
     @staticmethod
     def _copy_artifact_evidence(work_dir: Path) -> list[dict[str, Any]]:
@@ -382,6 +565,7 @@ Available repair tools:
         round_index: int,
         tools: BoundedToolRegistry,
         action_limit: int,
+        minimum_weighted_score: float = 90,
     ) -> AgentEvaluation:
         raw_scores = payload.get("dimension_scores")
         scores: dict[str, float] = {}
@@ -390,12 +574,17 @@ Available repair tools:
                 value = raw_scores.get(dimension)
                 if isinstance(value, (int, float)):
                     scores[dimension] = max(0.0, min(100.0, float(value)))
-        weighted = payload.get("weighted_score")
-        if not isinstance(weighted, (int, float)):
+        complete_dimension_scores = len(scores) == len(_RUBRIC_WEIGHTS)
+        if complete_dimension_scores:
             weighted = sum(
                 scores.get(key, 0.0) * weight / 100
                 for key, weight in _RUBRIC_WEIGHTS.items()
             )
+        else:
+            # An incomplete rubric cannot be compared safely across snapshots.
+            # Keep it as a scored-but-ineligible zero rather than trusting a
+            # model-supplied aggregate that cannot be independently reproduced.
+            weighted = 0.0
         issues = payload.get("issues")
         clean_issues = [item for item in issues if isinstance(item, dict)] if isinstance(issues, list) else []
         actions: list[AgentAction] = []
@@ -426,9 +615,23 @@ Available repair tools:
                     )
                 )
         actions.sort(key=lambda item: item.priority)
+        hard_issue = any(
+            str(item.get("severity") or "") == "blocker"
+            or (
+                str(item.get("severity") or "") == "major"
+                and str(item.get("dimension") or "") in {"A1", "A2", "A5"}
+            )
+            for item in clean_issues
+        )
+        ready = bool(
+            payload.get("ready_for_delivery") is True
+            and complete_dimension_scores
+            and float(weighted) >= minimum_weighted_score
+            and not hard_issue
+        )
         return AgentEvaluation(
             round_index=round_index,
-            ready_for_delivery=payload.get("ready_for_delivery") is True,
+            ready_for_delivery=ready,
             weighted_score=max(0.0, min(100.0, float(weighted))),
             dimension_scores=scores,
             summary=str(payload.get("summary") or "")[:3000],

@@ -239,6 +239,8 @@ class RunState:
     visual_set_review: dict[str, Any] = field(default_factory=dict)
     agent_evaluations: list[AgentEvaluation] = field(default_factory=list)
     agent_actions: list[AgentActionResult] = field(default_factory=list)
+    agent_snapshots: list[dict[str, Any]] = field(default_factory=list)
+    agent_arbitration: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

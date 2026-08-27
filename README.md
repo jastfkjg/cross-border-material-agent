@@ -12,7 +12,7 @@ python agent.py --prompt "...input path...output path..."
 
 The agent discovers the product, category and attribute JSON files by schema; builds an evidence-backed fact ledger; resolves the AliExpress leaf category and enumerated attributes; creates English, Korean and Brazilian Portuguese descriptions; produces one main image, five deliberately distinct detail images and one video; then evaluates and validates the complete delivery before exiting.
 
-The runtime is a bounded agent rather than an unconstrained shell agent. An LLM manager first plans creative emphasis, locale priorities, rubric risks, acceptance score and a one- or two-round repair budget. After initial production, an independent multimodal evaluator scores A1-A7 and may invoke only four typed, target-restricted tools: regenerate the hero, regenerate one detail slot, revise one locale, or regenerate the video. Every repair is staged and atomically installed only after candidate selection plus physical/schema validation; failed repair attempts preserve the previous artifact and never trigger a reviewer-driven source fallback.
+The runtime is a bounded agent rather than an unconstrained shell agent. An LLM manager first plans creative emphasis, locale priorities, rubric risks, acceptance score and a per-round action budget. The Full runtime independently allows up to three cumulative repair rounds, stops starting repairs below an eight-minute reserve, scores and snapshots every complete version, synchronizes dependent copy/video after image changes, and restores the strongest evaluated snapshot. A separate blind arbitration model compares the two shortlisted final versions. The multimodal evaluator may invoke only four typed, target-restricted tools: regenerate the hero, regenerate one detail slot, revise one locale, or regenerate the video. Every repair is staged and atomically installed only after candidate selection plus physical/schema validation; failed repair attempts preserve the previous artifact.
 
 Localized copy uses a writer pass followed by a factual-auditor pass and locale guards for en-US, ko-KR and pt-BR. Every description leads with two substantive shopper-facing paragraphs and natural feature highlights, followed by compact localized listing tables. Category IDs, platform attribute/value IDs, SKU IDs and Spec IDs remain parseable; localized source labels distinguish seller facts from platform mappings, while raw Chinese values and JSON pointers stay in the private fact ledger. Legible source-image size charts are transcribed conservatively, checked against SKU labels, and deterministically converted into localized measurement tables and a clean detail image. Unsupported numeric fields are repaired independently so one bad number no longer discards an otherwise valid localized draft.
 
@@ -33,12 +33,15 @@ Optional model overrides:
 
 - `AGENT_CHAT_MODEL`
 - `AGENT_CHAT_FALLBACK_MODEL`
+- `AGENT_REVIEW_MODEL`
+- `AGENT_REVIEW_FALLBACK_MODEL`
+- `AGENT_ARBITRATION_MODEL`
 - `AGENT_IMAGE_MODEL`
 - `AGENT_IMAGE_FALLBACK_MODEL`
 - `AGENT_VIDEO_MODEL`
 - `AGENT_KEEP_VIDEO_AUDIO=1` to retain source audio explicitly; the default removes unreviewed audio
 
-Defaults are `qwen3.8-max` for planning, localization and multimodal QA, `wan2.7-image-pro` for source-guided image generation, `qwen-image-3.0-pro` as the cross-model image fallback, and `wan2.7-i2v-2026-04-25` for video.
+Defaults are `qwen3.8-max` for planning, localization and primary multimodal QA, `qwen3.7-plus` for independent final arbitration, `wan2.7-image-pro` for source-guided image generation, `qwen-image-3.0-pro` as the cross-model image fallback, and `wan2.7-i2v-2026-04-25` for video.
 
 The versioned local content policy distinguishes cited AliExpress platform obligations from conservative runtime guards. The sample taxonomy golden set freezes the expected category and selected key-attribute mappings for all eleven supplied records. Resilience tests cover rate limits, terminal client errors, malformed JSON, corrupt media, failed asynchronous tasks and deadline-aware fallback.
 
