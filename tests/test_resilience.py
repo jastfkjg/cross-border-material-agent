@@ -10,7 +10,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from PIL import Image
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 from crossborder_agent.api import ApiConfig, ApiError, HttpJsonClient, QwenClient
 from crossborder_agent.media import (
@@ -116,6 +119,23 @@ class ResilienceTests(unittest.TestCase):
         self.assertTrue(response["recovered"])
         self.assertEqual(self.handler.counters["/bad-json"], 2)
 
+    def test_chat_json_retries_malformed_model_content(self) -> None:
+        config = ApiConfig(
+            api_key="test",
+            dashscope_base_url=self.base + "/dash",
+            openai_base_url=self.base + "/openai",
+        )
+        client = QwenClient(config, self.logger, time.monotonic() + 300)
+        with mock.patch.object(
+            client,
+            "_chat_response",
+            side_effect=["not-json", '{"recovered": true}'],
+        ) as response:
+            payload = client.chat_json("system", "prompt")
+        self.assertTrue(payload["recovered"])
+        self.assertEqual(response.call_count, 2)
+
+    @unittest.skipIf(Image is None, "Pillow is required")
     def test_corrupt_image_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agent-corrupt-") as temporary:
             root = Path(temporary)
@@ -124,6 +144,7 @@ class ResilienceTests(unittest.TestCase):
             with self.assertRaises(MediaError):
                 normalize_image(source, root / "out.jpeg", canvas=(800, 800))
 
+    @unittest.skipIf(Image is None, "Pillow is required")
     def test_focus_crop_is_bounded_and_visually_distinct(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agent-focus-crop-") as temporary:
             root = Path(temporary)
@@ -152,6 +173,7 @@ class ResilienceTests(unittest.TestCase):
                 0,
             )
 
+    @unittest.skipIf(Image is None, "Pillow is required")
     def test_catalog_video_with_distinct_stills_decodes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agent-catalog-video-") as temporary:
             root = Path(temporary)

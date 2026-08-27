@@ -51,6 +51,14 @@ class PipelineError(RuntimeError):
     """Raised when the agent cannot produce a complete, validated delivery."""
 
 
+class SemanticRejection(ApiError):
+    """All candidates contain a concrete product-identity or compliance defect."""
+
+    def __init__(self, message: str, *, feedback: str = ""):
+        super().__init__(message, retryable=True, category="semantic_rejection")
+        self.feedback = feedback or message
+
+
 _IMAGE_NEGATIVE_PROMPT = (
     "written text, letters, numbers, watermark, logo, brand mark, price tag, promotional badge, "
     "unreadable typography, distorted anatomy, extra limbs, malformed hands, product deformation, "
@@ -244,7 +252,9 @@ class Pipeline:
             video_result: AssetResult | None = None
 
             with concurrent.futures.ThreadPoolExecutor(
-                max_workers=7, thread_name_prefix="asset"
+                # Keep enough parallelism to finish inside the evaluation window
+                # without bursting nine model jobs into provider rate/queue limits.
+                max_workers=4, thread_name_prefix="asset"
             ) as executor:
                 video_future = executor.submit(
                     self._build_video,
@@ -694,6 +704,7 @@ class Pipeline:
         source_urls = self._ordered_source_urls(facts, vision)
         if not source_urls:
             return ToolExecution("failed", "no trusted hero reference")
+        asset = self._find_asset(assets, target)
         staged = work_dir / f".repair-main-{uuid.uuid4().hex}.jpeg"
         prompt = (
             plan.main_prompt
@@ -702,16 +713,18 @@ class Pipeline:
             + "\nCorrect only the identified defect and preserve all verified product features."
         )
         try:
-            candidate_urls, model = self.client.generate_image_candidates(
+            selected, model = self._generate_main_with_semantic_retry(
+                facts,
                 prompt,
-                source_urls[:1],
-                size="1600*1600",
-                negative_prompt=_MAIN_NEGATIVE_PROMPT,
-                count=3,
+                generation_references=source_urls[:1],
+                review_references=source_urls[:3],
+                incumbent_url=asset.source_url,
+                minimum_improvement=6.0,
             )
-            selected = self._select_main_candidate(
-                facts, source_urls[:3], candidate_urls
-            )
+            if asset.source_url and selected == asset.source_url:
+                return ToolExecution(
+                    "skipped", "hero revision did not beat the current asset by 6 points"
+                )
             self._download_and_normalize(
                 selected,
                 staged,
@@ -719,7 +732,6 @@ class Pipeline:
                 canvas=(1600, 1600),
                 white_background=True,
             )
-            asset = self._find_asset(assets, target)
             os.replace(staged, Path(asset.path))
             asset.source_url = selected
             asset.model = f"{model}-agent-repair"
@@ -759,6 +771,7 @@ class Pipeline:
         )
         if not references:
             return ToolExecution("failed", "no trusted detail reference")
+        asset = self._find_asset(assets, target)
         staged = work_dir / f".repair-detail-{index}-{uuid.uuid4().hex}.jpeg"
         prompt = (
             plan.detail_prompts[index - 1]
@@ -767,16 +780,19 @@ class Pipeline:
             + "\nCorrect only the identified defect; keep the intended slot and exact product identity."
         )
         try:
-            candidate_urls, model = self.client.generate_image_candidates(
+            selected, model = self._generate_detail_with_semantic_retry(
+                index,
+                facts,
                 prompt,
-                references[:3],
-                size="1200*1500",
-                negative_prompt=_IMAGE_NEGATIVE_PROMPT,
-                count=2,
+                references=references[:3],
+                incumbent_url=asset.source_url,
+                minimum_improvement=6.0,
             )
-            selected = self._select_detail_candidate(
-                index, facts, references[:3], candidate_urls, prompt
-            )
+            if asset.source_url and selected == asset.source_url:
+                return ToolExecution(
+                    "skipped",
+                    f"detail slot {index} revision did not beat the current asset by 6 points",
+                )
             self._download_and_normalize(
                 selected,
                 staged,
@@ -784,7 +800,6 @@ class Pipeline:
                 canvas=(1200, 1500),
                 white_background=False,
             )
-            asset = self._find_asset(assets, target)
             os.replace(staged, Path(asset.path))
             asset.source_url = selected
             asset.model = f"{model}-agent-repair"
@@ -818,6 +833,9 @@ class Pipeline:
         language = target.removeprefix("product_description_").split(".", 1)[0]
         if language not in {"en", "ko", "pt"}:
             return ToolExecution("rejected", "unsupported locale target")
+        incumbent = payloads.get(language)
+        if not isinstance(incumbent, dict):
+            return ToolExecution("failed", "current localized payload unavailable")
         candidate, source = generate_copy_payload(
             language,
             facts,
@@ -839,6 +857,13 @@ class Pipeline:
                 "failed",
                 f"localized revision did not pass model/schema audit ({source}); prior copy preserved",
             )
+        if not self._copy_revision_improves(
+            language, facts, incumbent, candidate, minimum_improvement=6.0
+        ):
+            return ToolExecution(
+                "skipped",
+                f"{language} revision did not beat current copy by 6 points; prior copy preserved",
+            )
         try:
             rendered = render_description(language, candidate, facts, taxonomy)
             staged = work_dir / f".{target}.{uuid.uuid4().hex}.tmp"
@@ -849,6 +874,68 @@ class Pipeline:
         payloads[language] = candidate
         sources[language] = f"{source}-agent-repair"
         return ToolExecution("completed", f"{language} copy revision accepted")
+
+    def _copy_revision_improves(
+        self,
+        language: str,
+        facts: ProductFacts,
+        incumbent: dict[str, Any],
+        candidate: dict[str, Any],
+        *,
+        minimum_improvement: float,
+    ) -> bool:
+        if self.client is None:
+            return False
+        system = (
+            "You are a conservative cross-border listing A/B judge. Return JSON only. "
+            "Compare factual completeness, source support, shopper-facing fluency, title quality, "
+            "conversion usefulness and source-script contamination. Never reward invented claims."
+        )
+        prompt = f"""
+Language: {language}
+Candidate 0 is the current accepted copy. Candidate 1 is a proposed repair.
+Return selected_index plus exactly two candidates containing index, score (0-100),
+facts_supported, complete, native_and_natural, has_source_script_contamination, and reason.
+Select candidate 1 only when it improves by at least {minimum_improvement:.0f} points and all its facts are supported.
+
+Verified facts:
+{json.dumps(facts.compact_dict(), ensure_ascii=False)}
+
+Candidate 0:
+{json.dumps(incumbent, ensure_ascii=False)}
+
+Candidate 1:
+{json.dumps(candidate, ensure_ascii=False)}
+""".strip()
+        try:
+            review = self.client.chat_json(system, prompt)
+        except ApiError as exc:
+            self.logger.warning("%s 文案 A/B 评审不可用，保留旧文案: %s", language, exc)
+            return False
+        rows = review.get("candidates")
+        if not isinstance(rows, list):
+            return False
+        by_index = {
+            row.get("index"): row
+            for row in rows
+            if isinstance(row, dict) and isinstance(row.get("index"), int)
+        }
+        old = by_index.get(0)
+        new = by_index.get(1)
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            return False
+        old_score = old.get("score")
+        new_score = new.get("score")
+        return bool(
+            review.get("selected_index") == 1
+            and isinstance(old_score, (int, float))
+            and isinstance(new_score, (int, float))
+            and float(new_score) >= float(old_score) + minimum_improvement
+            and new.get("facts_supported") is True
+            and new.get("complete") is not False
+            and new.get("native_and_natural") is not False
+            and new.get("has_source_script_contamination") is not True
+        )
 
     def _repair_video(
         self,
@@ -873,6 +960,7 @@ class Pipeline:
             first_frame_url = candidates[0] if candidates else ""
         if not first_frame_url:
             return ToolExecution("failed", "no safe video first frame")
+        asset = self._find_asset(assets, target)
         raw_video = self._next_raw_path(downloads_dir, ".mp4")
         staged = work_dir / f".repair-video-{uuid.uuid4().hex}.mp4"
         prompt = (
@@ -895,7 +983,24 @@ class Pipeline:
             else:
                 strip_video_audio(raw_video, staged)
             inspect_video(staged)
-            asset = self._find_asset(assets, target)
+            review_sources = self._source_urls_for_use(
+                self._fallback_source_urls(facts, asset_name="main_image.jpeg"),
+                use="reference",
+                preferred_roles=("hero", "front"),
+            )[:3]
+            review = self.client.review_generated_video(
+                json.dumps(facts.compact_dict(), ensure_ascii=False),
+                review_sources,
+                video_url,
+                current_video_url=(
+                    asset.source_url if asset.generated and asset.source_url else ""
+                ),
+            )
+            if not self._video_revision_improves(review, has_incumbent=asset.generated):
+                return ToolExecution(
+                    "skipped",
+                    "video revision did not pass semantic A/B improvement gate; prior video preserved",
+                )
             os.replace(staged, Path(asset.path))
             asset.source_url = video_url
             asset.model = f"{model}-agent-repair"
@@ -910,6 +1015,46 @@ class Pipeline:
         finally:
             raw_video.unlink(missing_ok=True)
             staged.unlink(missing_ok=True)
+
+    @staticmethod
+    def _video_revision_improves(
+        review: dict[str, Any], *, has_incumbent: bool
+    ) -> bool:
+        if has_incumbent:
+            rows = review.get("candidates")
+            if not isinstance(rows, list):
+                return False
+            by_index = {
+                row.get("index"): row
+                for row in rows
+                if isinstance(row, dict) and isinstance(row.get("index"), int)
+            }
+            old = by_index.get(0)
+            new = by_index.get(1)
+            if not isinstance(old, dict) or not isinstance(new, dict):
+                return False
+            old_score = old.get("score")
+            new_score = new.get("score")
+            if (
+                review.get("selected_index") != 1
+                or not isinstance(old_score, (int, float))
+                or not isinstance(new_score, (int, float))
+                or float(new_score) < float(old_score) + 6.0
+            ):
+                return False
+            candidate = new
+        else:
+            candidate = review
+        return bool(
+            candidate.get("usable") is True
+            and candidate.get("identity_consistent") is not False
+            and candidate.get("construction_consistent") is not False
+            and candidate.get("color_and_pattern_consistent") is not False
+            and candidate.get("motion_stable") is not False
+            and candidate.get("unwanted_text") is not True
+            and candidate.get("prohibited_visual") is not True
+            and candidate.get("major_artifacts") is not True
+        )
 
     def _adjudicate_taxonomy(
         self,
@@ -1468,6 +1613,78 @@ Allowed leaf candidates:
                 candidate_destination.unlink(missing_ok=True)
         raise PipelineError("所有源图片回退均失败: " + "; ".join(errors[-3:]))
 
+    @staticmethod
+    def _candidate_soft_score(
+        item: dict[str, Any], *, selected_index: Any
+    ) -> float:
+        raw_score = item.get("score")
+        score = float(raw_score) if isinstance(raw_score, (int, float)) else 70.0
+        if item.get("index") == selected_index:
+            score += 2.0
+        if item.get("usable") is False:
+            score -= 8.0
+        coverage = str(item.get("product_coverage") or "").casefold()
+        if coverage == "low":
+            score -= 10.0
+        elif coverage == "medium":
+            score -= 3.0
+        return max(0.0, min(100.0, score))
+
+    def _choose_monotonic_candidate(
+        self,
+        label: str,
+        candidate_urls: list[str],
+        ranked: list[tuple[float, int, dict[str, Any]]],
+        *,
+        incumbent_index: int | None,
+        minimum_improvement: float,
+        hard_reasons: list[str],
+    ) -> str:
+        incumbent_valid = (
+            isinstance(incumbent_index, int)
+            and 0 <= incumbent_index < len(candidate_urls)
+        )
+        if not ranked:
+            if incumbent_valid:
+                self.logger.warning(
+                    "%s 新候选均有语义硬伤，保留当前资产", label
+                )
+                return candidate_urls[incumbent_index]
+            feedback = "; ".join(hard_reasons[:4]) or "评审未返回可比较候选"
+            raise SemanticRejection(
+                f"{label} 候选均未通过语义质检（存在硬伤）", feedback=feedback
+            )
+
+        best_score, best_index, _ = max(ranked, key=lambda row: (row[0], -row[1]))
+        if incumbent_valid:
+            incumbent_row = next(
+                (row for row in ranked if row[1] == incumbent_index), None
+            )
+            # If the judge omitted or hard-rejected the incumbent, the old artifact
+            # is still safer than an unproven replacement unless a new candidate is
+            # clearly acceptable at a high absolute score.
+            incumbent_score = incumbent_row[0] if incumbent_row else 80.0
+            if best_index == incumbent_index:
+                return candidate_urls[incumbent_index]
+            required = incumbent_score + max(0.0, minimum_improvement)
+            if best_score < required:
+                self.logger.info(
+                    "%s 修复候选提升不足: old=%.1f new=%.1f required=%.1f，保留旧资产",
+                    label,
+                    incumbent_score,
+                    best_score,
+                    required,
+                )
+                return candidate_urls[incumbent_index]
+        self.logger.info(
+            "%s 候选选优: 选择 %d/%d，软评分 %.1f",
+            label,
+            best_index + 1,
+            len(candidate_urls),
+            best_score,
+        )
+        return candidate_urls[best_index]
+
     def _build_main_image(
         self,
         facts: ProductFacts,
@@ -1485,23 +1702,41 @@ Allowed leaf candidates:
         )
         if self.client is not None and source_urls:
             try:
-                candidate_urls, model = self.client.generate_image_candidates(
+                generated_url, model = self._generate_main_with_semantic_retry(
+                    facts,
                     plan.main_prompt,
-                    source_urls[:1],
-                    size="1600*1600",
-                    negative_prompt=_MAIN_NEGATIVE_PROMPT,
-                    count=3,
+                    generation_references=source_urls[:1],
+                    review_references=source_urls[:3],
                 )
-                generated_url = self._select_main_candidate(
-                    facts, source_urls[:3], candidate_urls
-                )
-                self._download_and_normalize(
-                    generated_url,
-                    destination,
-                    downloads_dir,
-                    canvas=(1600, 1600),
-                    white_background=True,
-                )
+                try:
+                    self._download_and_normalize(
+                        generated_url,
+                        destination,
+                        downloads_dir,
+                        canvas=(1600, 1600),
+                        white_background=True,
+                    )
+                except (ApiError, MediaError) as download_error:
+                    if self.deadline - time.monotonic() < 360:
+                        raise
+                    self.logger.warning(
+                        "主图候选下载或物理校验失败，重新生成一次而非直接回退: %s",
+                        download_error,
+                    )
+                    generated_url, model = self._generate_main_with_semantic_retry(
+                        facts,
+                        plan.main_prompt
+                        + "\nThe previous output URL or file failed physical validation. Produce a fresh clean asset.",
+                        generation_references=source_urls[:1],
+                        review_references=source_urls[:3],
+                    )
+                    self._download_and_normalize(
+                        generated_url,
+                        destination,
+                        downloads_dir,
+                        canvas=(1600, 1600),
+                        white_background=True,
+                    )
                 return (
                     AssetResult(
                         name="main_image.jpeg",
@@ -1537,11 +1772,64 @@ Allowed leaf candidates:
             fallback_url,
         )
 
+    def _generate_main_with_semantic_retry(
+        self,
+        facts: ProductFacts,
+        prompt: str,
+        *,
+        generation_references: list[str],
+        review_references: list[str],
+        incumbent_url: str = "",
+        minimum_improvement: float = 0.0,
+    ) -> tuple[str, str]:
+        if self.client is None:
+            raise ApiError("image model unavailable")
+        active_prompt = prompt
+        last_rejection: SemanticRejection | None = None
+        for semantic_attempt in range(2):
+            candidate_urls, model = self.client.generate_image_candidates(
+                active_prompt,
+                generation_references,
+                size="1600*1600",
+                negative_prompt=_MAIN_NEGATIVE_PROMPT,
+                count=3,
+            )
+            reviewed_urls = (
+                [incumbent_url, *candidate_urls] if incumbent_url else candidate_urls
+            )
+            try:
+                selected = self._select_main_candidate(
+                    facts,
+                    review_references,
+                    reviewed_urls,
+                    incumbent_index=0 if incumbent_url else None,
+                    minimum_improvement=minimum_improvement,
+                )
+                return selected, model
+            except SemanticRejection as exc:
+                last_rejection = exc
+                if semantic_attempt > 0 or self.deadline - time.monotonic() < 420:
+                    raise
+                self.logger.warning(
+                    "主图存在明确语义硬伤，携带质检反馈重新生成一次: %s",
+                    exc.feedback[:500],
+                )
+                active_prompt = (
+                    prompt
+                    + "\nMandatory correction after semantic rejection: "
+                    + exc.feedback[:1200]
+                    + "\nPreserve exact product identity and correct only these hard defects."
+                )
+        raise last_rejection or SemanticRejection("主图语义纠错失败")
+
     def _select_main_candidate(
         self,
         facts: ProductFacts,
         source_urls: list[str],
         candidate_urls: list[str],
+        *,
+        incumbent_index: int | None = None,
+        minimum_improvement: float = 0.0,
     ) -> str:
         if not candidate_urls:
             raise ApiError("主图模型未返回候选")
@@ -1557,44 +1845,65 @@ Allowed leaf candidates:
                 candidate_urls,
             )
         except ApiError as exc:
-            self.logger.warning("主图候选自动选优不可用，拒绝未经语义验收的候选: %s", exc)
-            self.warnings.append(f"主图候选自动选优不可用: {exc}")
-            raise ApiError("主图候选无法完成语义验收") from exc
+            keep = (
+                incumbent_index
+                if isinstance(incumbent_index, int)
+                and 0 <= incumbent_index < len(candidate_urls)
+                else 0
+            )
+            self.logger.warning(
+                "主图语义评审不可用，保留确定性安全候选 %d，避免误回退: %s",
+                keep,
+                exc,
+            )
+            self.warnings.append(f"主图候选评审不可用，保留候选: {exc}")
+            return candidate_urls[keep]
 
         candidates = review.get("candidates")
         selected = review.get("selected_index")
-        if isinstance(candidates, list):
-            usable_indices = {
-                item.get("index")
-                for item in candidates
-                if isinstance(item, dict)
-                and isinstance(item.get("index"), int)
-                and 0 <= item["index"] < len(candidate_urls)
-                and item.get("usable") is True
-                and item.get("identity_consistent") is True
-                and item.get("construction_consistent") is True
-                and item.get("correct_color") is True
-                and item.get("single_product") is True
-                and item.get("product_complete") is True
-                and item.get("clean_neutral_background") is True
-                and item.get("has_person") is not True
-                and item.get("has_unrelated_props") is not True
-                and item.get("unwanted_text") is not True
-                and item.get("unwanted_brand_or_logo") is not True
-                and item.get("major_artifacts") is not True
+        if not isinstance(candidates, list):
+            keep = incumbent_index if incumbent_index is not None else 0
+            self.warnings.append("主图语义评审结构不完整，采用确定性候选")
+            return candidate_urls[keep]
+        ranked: list[tuple[float, int, dict[str, Any]]] = []
+        hard_reasons: list[str] = []
+        for item in candidates:
+            if not isinstance(item, dict) or not isinstance(item.get("index"), int):
+                continue
+            index = item["index"]
+            if not 0 <= index < len(candidate_urls):
+                continue
+            hard_fields = {
+                "identity_consistent": False,
+                "construction_consistent": False,
+                "correct_color": False,
+                "single_product": False,
+                "product_complete": False,
+                "has_person": True,
+                "unwanted_text": True,
+                "unwanted_brand_or_logo": True,
+                "major_artifacts": True,
             }
-        else:
-            usable_indices = set()
-        if isinstance(selected, int) and selected in usable_indices:
-            if 0 <= selected < len(candidate_urls):
-                self.logger.info(
-                    "主图候选自动选优: 选择 %d/%d", selected + 1, len(candidate_urls)
+            failed = [key for key, value in hard_fields.items() if item.get(key) is value]
+            if failed:
+                hard_reasons.append(
+                    f"candidate {index}: {','.join(failed)}; {item.get('reason', '')}"
                 )
-                return candidate_urls[selected]
-        if usable_indices:
-            fallback_index = min(usable_indices)
-            return candidate_urls[fallback_index]
-        raise ApiError("主图候选均未通过商品身份与结构一致性质检")
+                continue
+            score = self._candidate_soft_score(item, selected_index=selected)
+            if item.get("clean_neutral_background") is False:
+                score -= 8
+            if item.get("has_unrelated_props") is True:
+                score -= 5
+            ranked.append((score, index, item))
+        return self._choose_monotonic_candidate(
+            "主图",
+            candidate_urls,
+            ranked,
+            incumbent_index=incumbent_index,
+            minimum_improvement=minimum_improvement,
+            hard_reasons=hard_reasons,
+        )
 
     def _build_detail_image(
         self,
@@ -1629,30 +1938,42 @@ Allowed leaf candidates:
         )
         if self.client is not None and reference_selection:
             try:
-                # Every generated slot gets model-ranked alternatives. This moves
-                # semantic acceptance to the LLM instead of accepting a lone output.
-                candidate_count = 2
-                candidate_urls, model = self.client.generate_image_candidates(
-                    plan.detail_prompts[index - 1],
-                    reference_selection[:3],
-                    size="1200*1500",
-                    negative_prompt=_IMAGE_NEGATIVE_PROMPT,
-                    count=candidate_count,
-                )
-                generated_url = self._select_detail_candidate(
+                generated_url, model = self._generate_detail_with_semantic_retry(
                     index,
                     facts,
-                    reference_selection[:3],
-                    candidate_urls,
                     plan.detail_prompts[index - 1],
+                    references=reference_selection[:3],
                 )
-                self._download_and_normalize(
-                    generated_url,
-                    destination,
-                    downloads_dir,
-                    canvas=(1200, 1500),
-                    white_background=False,
-                )
+                try:
+                    self._download_and_normalize(
+                        generated_url,
+                        destination,
+                        downloads_dir,
+                        canvas=(1200, 1500),
+                        white_background=False,
+                    )
+                except (ApiError, MediaError) as download_error:
+                    if self.deadline - time.monotonic() < 300:
+                        raise
+                    self.logger.warning(
+                        "详情图 %d 候选下载或物理校验失败，重新生成一次: %s",
+                        index,
+                        download_error,
+                    )
+                    generated_url, model = self._generate_detail_with_semantic_retry(
+                        index,
+                        facts,
+                        plan.detail_prompts[index - 1]
+                        + "\nThe previous output URL or file failed physical validation. Produce a fresh asset.",
+                        references=reference_selection[:3],
+                    )
+                    self._download_and_normalize(
+                        generated_url,
+                        destination,
+                        downloads_dir,
+                        canvas=(1200, 1500),
+                        white_background=False,
+                    )
                 return AssetResult(
                     name=destination.name,
                     path=str(destination),
@@ -1692,6 +2013,59 @@ Allowed leaf candidates:
             description=fallback_description,
         )
 
+    def _generate_detail_with_semantic_retry(
+        self,
+        index: int,
+        facts: ProductFacts,
+        prompt: str,
+        *,
+        references: list[str],
+        incumbent_url: str = "",
+        minimum_improvement: float = 0.0,
+    ) -> tuple[str, str]:
+        if self.client is None:
+            raise ApiError("image model unavailable")
+        active_prompt = prompt
+        last_rejection: SemanticRejection | None = None
+        for semantic_attempt in range(2):
+            candidate_urls, model = self.client.generate_image_candidates(
+                active_prompt,
+                references,
+                size="1200*1500",
+                negative_prompt=_IMAGE_NEGATIVE_PROMPT,
+                count=2,
+            )
+            reviewed_urls = (
+                [incumbent_url, *candidate_urls] if incumbent_url else candidate_urls
+            )
+            try:
+                selected = self._select_detail_candidate(
+                    index,
+                    facts,
+                    references,
+                    reviewed_urls,
+                    active_prompt,
+                    incumbent_index=0 if incumbent_url else None,
+                    minimum_improvement=minimum_improvement,
+                )
+                return selected, model
+            except SemanticRejection as exc:
+                last_rejection = exc
+                if semantic_attempt > 0 or self.deadline - time.monotonic() < 360:
+                    raise
+                self.logger.warning(
+                    "详情图 %d 存在明确语义硬伤，携带质检反馈重新生成一次: %s",
+                    index,
+                    exc.feedback[:500],
+                )
+                active_prompt = (
+                    prompt
+                    + "\nMandatory correction after semantic rejection: "
+                    + exc.feedback[:1200]
+                    + "\nPreserve exact product identity and storyboard purpose."
+                )
+        raise last_rejection or SemanticRejection(f"详情图 {index} 语义纠错失败")
+
     def _select_detail_candidate(
         self,
         index: int,
@@ -1699,6 +2073,9 @@ Allowed leaf candidates:
         source_urls: list[str],
         candidate_urls: list[str],
         purpose: str,
+        *,
+        incumbent_index: int | None = None,
+        minimum_improvement: float = 0.0,
     ) -> str:
         if not candidate_urls:
             raise ApiError(f"详情图 {index} 模型未返回候选")
@@ -1706,44 +2083,73 @@ Allowed leaf candidates:
         # otherwise structure drift can pass just because there is no alternative.
         if self.client is None:
             return candidate_urls[0]
-        review = self.client.select_best_detail_image(
-            json.dumps(facts.compact_dict(), ensure_ascii=False),
-            source_urls,
-            candidate_urls,
-            asset_name=f"detail_image_{index}.jpeg",
-            purpose=purpose,
-        )
+        try:
+            review = self.client.select_best_detail_image(
+                json.dumps(facts.compact_dict(), ensure_ascii=False),
+                source_urls,
+                candidate_urls,
+                asset_name=f"detail_image_{index}.jpeg",
+                purpose=purpose,
+            )
+        except ApiError as exc:
+            keep = (
+                incumbent_index
+                if isinstance(incumbent_index, int)
+                and 0 <= incumbent_index < len(candidate_urls)
+                else 0
+            )
+            self.logger.warning(
+                "详情图 %d 语义评审不可用，保留确定性安全候选 %d: %s",
+                index,
+                keep,
+                exc,
+            )
+            self.warnings.append(f"详情图 {index} 评审不可用，保留候选: {exc}")
+            return candidate_urls[keep]
         candidates = review.get("candidates")
         selected = review.get("selected_index")
-        usable: set[int] = set()
-        if isinstance(candidates, list):
-            for item in candidates:
-                if not isinstance(item, dict) or not isinstance(item.get("index"), int):
-                    continue
-                candidate_index = item["index"]
-                if not 0 <= candidate_index < len(candidate_urls):
-                    continue
-                if (
-                    item.get("usable") is True
-                    and item.get("identity_consistent") is not False
-                    and item.get("construction_consistent") is not False
-                    and item.get("color_consistent") is not False
-                    and item.get("pattern_consistent") is not False
-                    and item.get("slot_match") is True
-                    and item.get("critical_structure_unambiguous") is not False
-                    and item.get("anatomy_natural") is not False
-                    and item.get("unwanted_text") is not True
-                    and item.get("unwanted_brand_or_logo") is not True
-                    and item.get("prohibited_visual") is not True
-                    and item.get("major_artifacts") is not True
-                    and str(item.get("product_coverage") or "").lower() != "low"
-                ):
-                    usable.add(candidate_index)
-        if isinstance(selected, int) and selected in usable:
-            return candidate_urls[selected]
-        if usable:
-            return candidate_urls[min(usable)]
-        raise ApiError(f"详情图 {index} 候选均未通过语义质检")
+        if not isinstance(candidates, list):
+            keep = incumbent_index if incumbent_index is not None else 0
+            self.warnings.append(f"详情图 {index} 评审结构不完整，采用确定性候选")
+            return candidate_urls[keep]
+        ranked: list[tuple[float, int, dict[str, Any]]] = []
+        hard_reasons: list[str] = []
+        for item in candidates:
+            if not isinstance(item, dict) or not isinstance(item.get("index"), int):
+                continue
+            candidate_index = item["index"]
+            if not 0 <= candidate_index < len(candidate_urls):
+                continue
+            hard_fields = {
+                "identity_consistent": False,
+                "construction_consistent": False,
+                "color_consistent": False,
+                "pattern_consistent": False,
+                "critical_structure_unambiguous": False,
+                "anatomy_natural": False,
+                "unwanted_text": True,
+                "unwanted_brand_or_logo": True,
+                "prohibited_visual": True,
+                "major_artifacts": True,
+            }
+            failed = [key for key, value in hard_fields.items() if item.get(key) is value]
+            if failed:
+                hard_reasons.append(
+                    f"candidate {candidate_index}: {','.join(failed)}; {item.get('reason', '')}"
+                )
+                continue
+            score = self._candidate_soft_score(item, selected_index=selected)
+            if item.get("slot_match") is False:
+                score -= 12
+            ranked.append((score, candidate_index, item))
+        return self._choose_monotonic_candidate(
+            f"详情图 {index}",
+            candidate_urls,
+            ranked,
+            incumbent_index=incumbent_index,
+            minimum_improvement=minimum_improvement,
+            hard_reasons=hard_reasons,
+        )
 
     def _detail_reference_selection(
         self, index: int, facts: ProductFacts, main_reference_url: str

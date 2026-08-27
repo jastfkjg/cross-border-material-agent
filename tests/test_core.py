@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from crossborder_agent.api import ApiError
 from crossborder_agent.compliance import (
     generated_copy_violations,
     normalize_source_image_observations,
@@ -235,6 +236,220 @@ class VisualSelectionTests(unittest.TestCase):
                     ["https://example.test/candidate.jpg"],
                     "four-color variant lineup",
                 )
+
+    def test_detail_selector_keeps_candidate_when_judge_is_unavailable(self) -> None:
+        class FailingSelectorClient:
+            @staticmethod
+            def select_best_detail_image(*args, **kwargs):
+                raise ApiError(
+                    "429 after retries", retryable=True, category="rate_limit"
+                )
+
+        facts = load_product_facts(
+            DATA / "product_info/product_5681480836479.json"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temp_dir),
+                logger=logging.getLogger("judge-unavailable-test"),
+                offline=True,
+            )
+            pipeline.client = FailingSelectorClient()
+            selected = pipeline._select_detail_candidate(
+                2,
+                facts,
+                ["https://example.test/source.jpg"],
+                [
+                    "https://example.test/candidate-a.jpg",
+                    "https://example.test/candidate-b.jpg",
+                ],
+                "construction close-up",
+            )
+        self.assertEqual(selected, "https://example.test/candidate-a.jpg")
+
+    def test_soft_quality_issues_rank_candidate_without_forcing_fallback(self) -> None:
+        class SoftIssueSelectorClient:
+            @staticmethod
+            def select_best_detail_image(*args, **kwargs):
+                return {
+                    "selected_index": -1,
+                    "candidates": [
+                        {
+                            "index": 0,
+                            "usable": False,
+                            "identity_consistent": True,
+                            "construction_consistent": True,
+                            "color_consistent": True,
+                            "pattern_consistent": True,
+                            "slot_match": False,
+                            "critical_structure_unambiguous": True,
+                            "anatomy_natural": True,
+                            "unwanted_text": False,
+                            "unwanted_brand_or_logo": False,
+                            "prohibited_visual": False,
+                            "major_artifacts": False,
+                            "product_coverage": "low",
+                            "score": 72,
+                        }
+                    ],
+                }
+
+        facts = load_product_facts(
+            DATA / "product_info/product_5681480836479.json"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temp_dir),
+                logger=logging.getLogger("soft-quality-test"),
+                offline=True,
+            )
+            pipeline.client = SoftIssueSelectorClient()
+            selected = pipeline._select_detail_candidate(
+                2,
+                facts,
+                ["https://example.test/source.jpg"],
+                ["https://example.test/candidate.jpg"],
+                "construction close-up",
+            )
+        self.assertEqual(selected, "https://example.test/candidate.jpg")
+
+    def test_repair_keeps_incumbent_without_six_point_improvement(self) -> None:
+        class ComparisonSelectorClient:
+            @staticmethod
+            def select_best_detail_image(*args, **kwargs):
+                return {
+                    "selected_index": 1,
+                    "candidates": [
+                        {
+                            "index": 0,
+                            "usable": True,
+                            "identity_consistent": True,
+                            "construction_consistent": True,
+                            "color_consistent": True,
+                            "pattern_consistent": True,
+                            "slot_match": True,
+                            "critical_structure_unambiguous": True,
+                            "anatomy_natural": True,
+                            "unwanted_text": False,
+                            "unwanted_brand_or_logo": False,
+                            "prohibited_visual": False,
+                            "major_artifacts": False,
+                            "product_coverage": "high",
+                            "score": 88,
+                        },
+                        {
+                            "index": 1,
+                            "usable": True,
+                            "identity_consistent": True,
+                            "construction_consistent": True,
+                            "color_consistent": True,
+                            "pattern_consistent": True,
+                            "slot_match": True,
+                            "critical_structure_unambiguous": True,
+                            "anatomy_natural": True,
+                            "unwanted_text": False,
+                            "unwanted_brand_or_logo": False,
+                            "prohibited_visual": False,
+                            "major_artifacts": False,
+                            "product_coverage": "high",
+                            "score": 91,
+                        },
+                    ],
+                }
+
+        facts = load_product_facts(
+            DATA / "product_info/product_5681480836479.json"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temp_dir),
+                logger=logging.getLogger("monotonic-repair-test"),
+                offline=True,
+            )
+            pipeline.client = ComparisonSelectorClient()
+            selected = pipeline._select_detail_candidate(
+                2,
+                facts,
+                ["https://example.test/source.jpg"],
+                [
+                    "https://example.test/incumbent.jpg",
+                    "https://example.test/revision.jpg",
+                ],
+                "construction close-up",
+                incumbent_index=0,
+                minimum_improvement=6,
+            )
+        self.assertEqual(selected, "https://example.test/incumbent.jpg")
+
+    def test_explicit_semantic_rejection_regenerates_once_with_feedback(self) -> None:
+        class RetryClient:
+            def __init__(self):
+                self.generate_prompts = []
+                self.review_calls = 0
+
+            def generate_image_candidates(self, prompt, *args, **kwargs):
+                self.generate_prompts.append(prompt)
+                prefix = "first" if len(self.generate_prompts) == 1 else "retry"
+                return (
+                    [
+                        f"https://example.test/{prefix}-a.jpg",
+                        f"https://example.test/{prefix}-b.jpg",
+                    ],
+                    "image-model",
+                )
+
+            def select_best_detail_image(self, *args, **kwargs):
+                self.review_calls += 1
+                rejected = self.review_calls == 1
+                return {
+                    "selected_index": 0,
+                    "candidates": [
+                        {
+                            "index": index,
+                            "usable": not rejected,
+                            "identity_consistent": not rejected,
+                            "construction_consistent": True,
+                            "color_consistent": True,
+                            "pattern_consistent": True,
+                            "slot_match": True,
+                            "critical_structure_unambiguous": True,
+                            "anatomy_natural": True,
+                            "unwanted_text": False,
+                            "unwanted_brand_or_logo": False,
+                            "prohibited_visual": False,
+                            "major_artifacts": False,
+                            "product_coverage": "high",
+                            "score": 90,
+                            "reason": "wrong product identity" if rejected else "fixed",
+                        }
+                        for index in range(2)
+                    ],
+                }
+
+        facts = load_product_facts(
+            DATA / "product_info/product_5681480836479.json"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temp_dir),
+                logger=logging.getLogger("semantic-retry-test"),
+                offline=True,
+            )
+            client = RetryClient()
+            pipeline.client = client
+            selected, _ = pipeline._generate_detail_with_semantic_retry(
+                2,
+                facts,
+                "initial detail prompt",
+                references=["https://example.test/source.jpg"],
+            )
+        self.assertEqual(selected, "https://example.test/retry-a.jpg")
+        self.assertEqual(len(client.generate_prompts), 2)
+        self.assertIn("identity_consistent", client.generate_prompts[1])
 
 
 class FactAndTaxonomyTests(unittest.TestCase):
