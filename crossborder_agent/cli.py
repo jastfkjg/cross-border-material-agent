@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="write structured, redacted TRACE_JSON events to agent.log (local diagnostics)",
+        help="write structured, redacted TRACE_JSON events to agent_debug.jsonl (local diagnostics)",
     )
     parser.add_argument(
         "--timeout-seconds",

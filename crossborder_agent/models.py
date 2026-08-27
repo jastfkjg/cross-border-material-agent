@@ -154,6 +154,10 @@ class CreativePlan:
     detail_prompts: list[str]
     video_prompt: str
     market_angles: dict[str, str] = field(default_factory=dict)
+    # Stable machine-readable jobs for the five detail slots.  Prompts may be
+    # rewritten by a model, but downstream review and localized media captions
+    # must continue to use these canonical roles as their contract.
+    detail_roles: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

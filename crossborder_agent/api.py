@@ -77,6 +77,8 @@ class ApiConfig:
     chat_fallback_model: str = "qwen3.7-plus"
     review_model: str = "qwen3.8-max"
     review_fallback_model: str = "qwen3.7-plus"
+    visual_review_model: str = ""
+    visual_review_fallback_model: str = ""
     image_model: str = "wan2.7-image-pro"
     image_fallback_model: str = "qwen-image-3.0-pro"
     video_model: str = "wan2.7-i2v-2026-04-25"
@@ -99,6 +101,14 @@ class ApiConfig:
             review_model=os.environ.get("AGENT_REVIEW_MODEL", "qwen3.8-max"),
             review_fallback_model=os.environ.get(
                 "AGENT_REVIEW_FALLBACK_MODEL", "qwen3.7-plus"
+            ),
+            visual_review_model=os.environ.get(
+                "AGENT_VISUAL_REVIEW_MODEL",
+                os.environ.get("AGENT_REVIEW_MODEL", "qwen3.8-max"),
+            ),
+            visual_review_fallback_model=os.environ.get(
+                "AGENT_VISUAL_REVIEW_FALLBACK_MODEL",
+                os.environ.get("AGENT_REVIEW_FALLBACK_MODEL", "qwen3.7-plus"),
             ),
             image_model=os.environ.get("AGENT_IMAGE_MODEL", "wan2.7-image-pro"),
             image_fallback_model=os.environ.get(
@@ -408,10 +418,23 @@ class QwenClient:
             "chat": self.config.chat_model,
             "review": self.config.review_model,
             "review_fallback": self.config.review_fallback_model,
+            "visual_review": self.visual_review_model,
+            "visual_review_fallback": self.visual_review_fallback_model,
             "image": self.config.image_model,
             "image_fallback": self.config.image_fallback_model,
             "video": self.config.video_model,
         }
+
+    @property
+    def visual_review_model(self) -> str:
+        return self.config.visual_review_model or self.config.review_model
+
+    @property
+    def visual_review_fallback_model(self) -> str:
+        return (
+            self.config.visual_review_fallback_model
+            or self.config.review_fallback_model
+        )
 
     def _chat_response(self, body: dict[str, Any]) -> str:
         started = time.monotonic()
@@ -462,6 +485,7 @@ class QwenClient:
         images: Iterable[str] = (),
         videos: Iterable[str] = (),
         model: str = "",
+        fallback_model: str = "",
     ) -> dict[str, Any]:
         user_content: list[dict[str, Any]] = []
         for url in images:
@@ -494,13 +518,15 @@ class QwenClient:
             "enable_thinking": False,
         }
         models = [selected_model]
-        fallback_model = (
-            self.config.review_fallback_model
-            if selected_model == self.config.review_model
-            else self.config.chat_fallback_model
-        )
-        if fallback_model not in models:
-            models.append(fallback_model)
+        selected_fallback = fallback_model
+        if not selected_fallback:
+            selected_fallback = (
+                self.config.review_fallback_model
+                if selected_model == self.config.review_model
+                else self.config.chat_fallback_model
+            )
+        if selected_fallback not in models:
+            models.append(selected_fallback)
         last_error: ApiError | None = None
         with self._chat_slots:
             for candidate_model in models:
@@ -630,7 +656,8 @@ Verified source facts:
             system,
             prompt,
             images=image_urls[:12],
-            model=self.config.review_model,
+            model=self.visual_review_model,
+            fallback_model=self.visual_review_fallback_model,
         )
 
     def review_generated_images(
@@ -690,7 +717,8 @@ Expected asset purposes in generated-image order:
             system,
             prompt,
             images=[*source_image_urls, *generated_image_urls],
-            model=self.config.review_model,
+            model=self.visual_review_model,
+            fallback_model=self.visual_review_fallback_model,
         )
 
     def select_best_generated_image(
@@ -728,7 +756,8 @@ Verified facts:
             system,
             prompt,
             images=[*source_image_urls, *candidate_urls],
-            model=self.config.review_model,
+            model=self.visual_review_model,
+            fallback_model=self.visual_review_fallback_model,
         )
 
     def select_best_detail_image(
@@ -756,7 +785,8 @@ Return JSON with:
 - selected_index: zero-based candidate index, or -1 if every candidate is unusable
 - candidates: exactly {len(candidate_urls)} objects, each containing index, usable,
   identity_consistent, construction_consistent, color_consistent, pattern_consistent,
-  slot_match, critical_structure_unambiguous, anatomy_natural, unwanted_text,
+  slot_match, critical_structure_unambiguous, anatomy_natural, single_composition,
+  unexpected_collage, unwanted_text,
   unwanted_brand_or_logo, prohibited_visual, major_artifacts,
   product_coverage (high/medium/low), score (0-100), and reason.
 
@@ -766,6 +796,10 @@ recognize the verified product, such as sleeve/leg length, neckline, closures or
 variant lineup, each item must remain unambiguously the same product; folded long sleeves must still
 be visibly present rather than making the item appear sleeveless.
 For a wearer scene, reject malformed hands, limbs, faces, garment fit or body proportions.
+Every non-variant detail must use one coherent full-frame composition. Mark unexpected_collage true
+for a montage, grid, split screen, inset, repeated panel, or a hybrid close-up/full-product layout.
+The variant slot may show several complete verified variants in one physical catalog composition, but
+must not use dividers, inset panels, duplicated views, or unrelated close-ups.
 Reject copied background/styling brands, characters, store text or logos unrelated to the product.
 
 Verified facts:
@@ -775,7 +809,8 @@ Verified facts:
             system,
             prompt,
             images=[*source_image_urls, *candidate_urls],
-            model=self.config.review_model,
+            model=self.visual_review_model,
+            fallback_model=self.visual_review_fallback_model,
         )
 
     def review_generated_video(
@@ -828,7 +863,8 @@ Verified facts:
             prompt,
             images=source_image_urls,
             videos=videos,
-            model=self.config.review_model,
+            model=self.visual_review_model,
+            fallback_model=self.visual_review_fallback_model,
         )
 
     def generate_image(

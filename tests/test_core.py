@@ -19,9 +19,13 @@ from crossborder_agent.input_loader import (
     load_product_facts,
     parse_prompt_paths,
 )
-from crossborder_agent.localization import generate_copy_payload, render_description
+from crossborder_agent.localization import (
+    _localized_concept_is_mentioned,
+    generate_copy_payload,
+    render_description,
+)
 from crossborder_agent.models import AssetResult
-from crossborder_agent.planning import fallback_creative_plan
+from crossborder_agent.planning import create_creative_plan, fallback_creative_plan
 from crossborder_agent.pipeline import Pipeline, PipelineError
 from crossborder_agent.taxonomy import resolve_taxonomy
 
@@ -334,7 +338,7 @@ class VisualSelectionTests(unittest.TestCase):
             )
         self.assertEqual(selected, "https://example.test/candidate-a.jpg")
 
-    def test_soft_quality_issues_rank_candidate_without_forcing_fallback(self) -> None:
+    def test_all_slot_mismatches_trigger_targeted_regeneration(self) -> None:
         class SoftIssueSelectorClient:
             @staticmethod
             def select_best_detail_image(*args, **kwargs):
@@ -372,14 +376,59 @@ class VisualSelectionTests(unittest.TestCase):
                 offline=True,
             )
             pipeline.client = SoftIssueSelectorClient()
-            selected = pipeline._select_detail_candidate(
-                2,
-                facts,
-                ["https://example.test/source.jpg"],
-                ["https://example.test/candidate.jpg"],
-                "construction close-up",
+            with self.assertRaisesRegex(Exception, "候选均未通过语义质检"):
+                pipeline._select_detail_candidate(
+                    2,
+                    facts,
+                    ["https://example.test/source.jpg"],
+                    ["https://example.test/candidate.jpg"],
+                    "construction close-up",
+                )
+
+    def test_unexpected_collage_is_a_hard_detail_defect(self) -> None:
+        class CollageSelectorClient:
+            @staticmethod
+            def select_best_detail_image(*args, **kwargs):
+                return {
+                    "selected_index": 0,
+                    "candidates": [{
+                        "index": 0,
+                        "usable": True,
+                        "identity_consistent": True,
+                        "construction_consistent": True,
+                        "color_consistent": True,
+                        "pattern_consistent": True,
+                        "slot_match": True,
+                        "critical_structure_unambiguous": True,
+                        "anatomy_natural": True,
+                        "single_composition": False,
+                        "unexpected_collage": True,
+                        "unwanted_text": False,
+                        "unwanted_brand_or_logo": False,
+                        "prohibited_visual": False,
+                        "major_artifacts": False,
+                        "product_coverage": "high",
+                        "score": 96,
+                    }],
+                }
+
+        facts = load_product_facts(DATA / "product_info/product_9493156931235.json")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temp_dir),
+                logger=logging.getLogger("collage-selection-test"),
+                offline=True,
             )
-        self.assertEqual(selected, "https://example.test/candidate.jpg")
+            pipeline.client = CollageSelectorClient()
+            with self.assertRaisesRegex(Exception, "候选均未通过语义质检"):
+                pipeline._select_detail_candidate(
+                    2,
+                    facts,
+                    ["https://example.test/source.jpg"],
+                    ["https://example.test/candidate.jpg"],
+                    "waistband close-up",
+                )
 
     def test_repair_keeps_incumbent_without_six_point_improvement(self) -> None:
         class ComparisonSelectorClient:
@@ -536,6 +585,106 @@ class FactAndTaxonomyTests(unittest.TestCase):
         self.assertIn("女", top["name"] + top["path"])
         self.assertNotIn("女童", top["name"] + top["path"])
         self.assertNotIn("运动", top["name"] + top["path"])
+
+    def test_hidden_shorts_ranking_enforces_length_and_avoids_unverified_specialization(self) -> None:
+        facts = load_product_facts(
+            DATA / "product_info/product_9493156931235.json"
+        )
+        hidden_facts = replace(facts, source_category_id="", source_category_name="")
+        taxonomy = resolve_taxonomy(
+            hidden_facts,
+            load_json(DATA / "clothing_categories.json"),
+            load_json(DATA / "clothing_attributes.json"),
+        )
+        self.assertEqual(taxonomy.category.candidates[0]["category_id"], "30341")
+        self.assertNotIn("长裤", taxonomy.category.candidates[0]["path"])
+
+    def test_canonical_storyboard_cannot_be_overridden_by_model_slots(self) -> None:
+        facts = load_product_facts(DATA / "product_info/product_9493156931235.json")
+        taxonomy = resolve_taxonomy(
+            facts,
+            load_json(DATA / "clothing_categories.json"),
+            load_json(DATA / "clothing_attributes.json"),
+        )
+
+        class ConflictingPlanner:
+            config = SimpleNamespace(chat_model="planner")
+
+            @staticmethod
+            def chat_json(*args, **kwargs):
+                base = "Use source-faithful commercial styling with neutral light and no text. " * 2
+                return {
+                    "visual_theme": "neutral daylight, ivory and charcoal",
+                    "main_prompt": base,
+                    "detail_prompts": [
+                        base + "FOCUS EXCLUSIVELY ON WAISTBAND CLOSEUP"
+                        for _ in range(5)
+                    ],
+                    "video_prompt": base,
+                    "market_angles": {"en": "clarity", "ko": "명확성", "pt": "clareza"},
+                }
+
+        plan, _ = create_creative_plan(facts, taxonomy, {}, ConflictingPlanner())
+        self.assertNotIn("FOCUS EXCLUSIVELY", " ".join(plan.detail_prompts))
+        self.assertEqual(
+            plan.detail_roles,
+            [
+                "overall_silhouette",
+                "waistband_closure_pockets",
+                "leg_seam_hem",
+                "verified_variants",
+                "wearer_fit_context",
+            ],
+        )
+
+    def test_copy_concept_gate_accepts_natural_synonyms(self) -> None:
+        text = "A straight-leg silhouette finishes at a knee-length hem."
+        self.assertTrue(_localized_concept_is_mentioned("en", "Straight Fit", text))
+        self.assertTrue(
+            _localized_concept_is_mentioned("en", "Knee-Length Shorts", text)
+        )
+
+    def test_natural_copy_is_not_discarded_for_canonical_wording_difference(self) -> None:
+        facts = load_product_facts(DATA / "product_info/product_9493156931235.json")
+        taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
+        plan = fallback_creative_plan(facts, taxonomy)
+        fallback, _ = generate_copy_payload("en", facts, taxonomy, plan, None)
+        draft = dict(fallback)
+        draft.update(
+            {
+                "title": "Men's Solid-Color Drawstring Knee-Length Shorts",
+                "overview": (
+                    "A straight-leg silhouette and knee-length hem define these solid-color shorts, "
+                    "finished with a drawstring waist and polyester fabric.\n\n"
+                    "Seven seller-listed colors and sizes M through 5XL are shown in the option tables below."
+                ),
+                "highlights": [
+                    "Straight-leg silhouette",
+                    "Knee-length hem",
+                    "Solid-color finish",
+                    "Polyester fabric",
+                ],
+            }
+        )
+
+        class CopyClient:
+            config = SimpleNamespace(chat_model="copy-model")
+            trace = None
+
+            def __init__(self):
+                self.calls = 0
+
+            def chat_json(self, *args, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return draft
+                raise ApiError("auditor unavailable", retryable=True, category="queue")
+
+        payload, source = generate_copy_payload(
+            "en", facts, taxonomy, plan, CopyClient()
+        )
+        self.assertEqual(payload["title"], draft["title"])
+        self.assertEqual(source, "copy-model-validated-draft")
 
     @classmethod
     def setUpClass(cls) -> None:

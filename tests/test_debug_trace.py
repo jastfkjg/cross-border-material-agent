@@ -34,6 +34,7 @@ class DebugTraceTests(unittest.TestCase):
                 trace = DebugTrace(logger, enabled=True)
                 trace.emit(
                     "unit.event",
+                    elapsed_seconds=1.25,
                     api_key="do-not-log",
                     request={
                         "authorization": "Bearer secret",
@@ -43,15 +44,19 @@ class DebugTraceTests(unittest.TestCase):
                 )
                 for handler in logger.handlers:
                     handler.flush()
-                text = (Path(temporary) / "agent.log").read_text(encoding="utf-8")
+                text = (Path(temporary) / "agent_debug.jsonl").read_text(encoding="utf-8")
+                normal_log = (Path(temporary) / "agent.log").read_text(encoding="utf-8")
 
         self.assertIn("TRACE_JSON", text)
         self.assertIn('"event":"unit.event"', text)
         self.assertIn('"selected_index":2', text)
+        self.assertIn('"run_elapsed_seconds":', text)
+        self.assertIn('"operation_duration_seconds":1.25', text)
         self.assertIn("[redacted]", text)
         self.assertNotIn("do-not-log", text)
         self.assertNotIn("Bearer secret", text)
         self.assertNotIn("signature=private", text)
+        self.assertNotIn("TRACE_JSON", normal_log)
 
 
 if __name__ == "__main__":

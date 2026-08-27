@@ -164,6 +164,7 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "女装半身裙": "Women's skirt",
         "男装休闲衬衫": "Men's casual shirt",
         "男士无褶短裤": "Men's flat-front shorts",
+        "服装、鞋靴和珠宝饰品/男士时尚/男装/男装短裤/男士无褶短裤": "Apparel, Shoes & Jewelry/Men's Fashion/Men's Clothing/Men's Shorts/Men's Flat-front Shorts",
         "T恤": "T-shirt",
         "女式毛呢外套": "Women's wool-blend coats",
         "男式夹克": "Men's jackets",
@@ -198,6 +199,7 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "裤型": "Pant shape",
         "裤长": "Pant length",
         "腰型": "Waist rise",
+        "腰线": "Waist rise",
         "裙型": "Skirt shape",
         "裙长": "Skirt length",
         "裙类别": "Skirt type",
@@ -344,6 +346,7 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "女装半身裙": "여성 스커트",
         "男装休闲衬衫": "남성 캐주얼 셔츠",
         "男士无褶短裤": "남성 플랫 프런트 쇼츠",
+        "服装、鞋靴和珠宝饰品/男士时尚/男装/男装短裤/男士无褶短裤": "의류·신발·주얼리/남성 패션/남성 의류/남성 쇼츠/남성 플랫 프런트 쇼츠",
         "T恤": "티셔츠",
         "女式毛呢外套": "여성 울 혼방 코트",
         "男式夹克": "남성 재킷",
@@ -378,6 +381,7 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "裤型": "바지 핏",
         "裤长": "바지 길이",
         "腰型": "허리선",
+        "腰线": "허리선",
         "裙型": "스커트 형태",
         "裙长": "스커트 길이",
         "裙类别": "스커트 유형",
@@ -521,6 +525,7 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "女装半身裙": "Saia feminina",
         "男装休闲衬衫": "Camisa casual masculina",
         "男士无褶短裤": "Bermuda masculina sem pregas",
+        "服装、鞋靴和珠宝饰品/男士时尚/男装/男装短裤/男士无褶短裤": "Roupas, calçados e joias/Moda masculina/Roupas masculinas/Bermudas masculinas/Bermuda masculina sem pregas",
         "T恤": "Camiseta",
         "女式毛呢外套": "Casacos femininos de mistura de lã",
         "男式夹克": "Jaquetas masculinas",
@@ -555,6 +560,7 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "裤型": "Modelagem da calça",
         "裤长": "Comprimento da calça",
         "腰型": "Altura da cintura",
+        "腰线": "Altura da cintura",
         "裙型": "Modelagem da saia",
         "裙长": "Comprimento da saia",
         "裙类别": "Tipo de saia",
@@ -781,8 +787,13 @@ def _source_terms(facts: ProductFacts, taxonomy: TaxonomyResult) -> set[str]:
         taxonomy.category.name,
         taxonomy.category.path,
     }
+    # Translate only facts that can actually be rendered into the buyer copy or
+    # machine appendix.  Sending supply-chain flags and unused source metadata
+    # made the copy response needlessly large and allowed one missed translation
+    # to invalidate otherwise strong prose.
     for item in facts.attributes:
-        terms.update((item.name, item.value))
+        if item.name in _PUBLIC_ATTRIBUTE_NAMES or item.name in _MARKETING_ATTRIBUTE_NAMES:
+            terms.update((item.name, item.value))
     for item in taxonomy.attributes:
         terms.update(
             (item.name, item.source_name, item.source_value, item.platform_value)
@@ -889,6 +900,7 @@ def _fallback_term_map(
 
 def _allowed_numbers(facts: ProductFacts, taxonomy: TaxonomyResult) -> set[str]:
     material = [
+        facts.platform,
         facts.offer_id,
         facts.source_title,
         facts.source_category_id,
@@ -999,6 +1011,98 @@ def _verified_fit_note(language: str, facts: ProductFacts, fallback_note: str) -
     }[language]
 
 
+def _salvage_copy_payload(
+    language: str,
+    payload: Any,
+    fallback: dict[str, Any],
+    facts: ProductFacts,
+    taxonomy: TaxonomyResult,
+    expected_media: set[str],
+    expected_terms: set[str],
+) -> tuple[dict[str, Any], str]:
+    """Keep independently safe model fields instead of discarding the payload.
+
+    The machine translation map is intentionally deterministic here. Buyer prose
+    remains model-authored when it passes its own structural and factual guards.
+    """
+
+    candidate = payload if isinstance(payload, dict) else {}
+    merged = dict(fallback)
+    for key in ("title", "overview", "fit_note"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value.strip() and not re.search(r"[\u4e00-\u9fff]", value):
+            merged[key] = value.strip()
+    highlights = candidate.get("highlights")
+    if (
+        isinstance(highlights, list)
+        and 3 <= len(highlights) <= 5
+        and all(
+            isinstance(item, str)
+            and item.strip()
+            and not re.search(r"[\u4e00-\u9fff]", item)
+            for item in highlights
+        )
+    ):
+        merged["highlights"] = [item.strip() for item in highlights]
+    normalized = _normalize_auxiliary_fields(candidate, fallback)
+    if isinstance(normalized, dict):
+        merged["media_descriptions"] = normalized.get(
+            "media_descriptions", fallback["media_descriptions"]
+        )
+    # IDs, category labels, platform attributes and SKU values are a machine
+    # layer. Their deterministic map must not depend on buyer-copy generation.
+    merged["localized_terms"] = dict(fallback["localized_terms"])
+
+    for _ in range(5):
+        error = _payload_validation_error(
+            language, merged, facts, taxonomy, expected_media, expected_terms
+        )
+        if not error:
+            return merged, "field-level-salvage"
+        if error in {
+            "shopper-overview-needs-two-paragraphs",
+            "shopper-overview-paragraph-too-short",
+        }:
+            merged["overview"] = fallback["overview"]
+        elif error == "localized-title-guard":
+            merged["title"] = fallback["title"]
+        elif error == "numeric-fact-guard":
+            merged = _repair_numeric_fields(
+                merged, fallback, _allowed_numbers(facts, taxonomy)
+            )
+        elif error == "unsupported-fit-guidance-guard":
+            unsafe = {
+                "en": ("true to size", "usual size", "size up", "size down"),
+                "ko": ("정사이즈", "평소 사이즈", "한 사이즈"),
+                "pt": ("tamanho normal", "tamanho habitual", "tamanho maior", "tamanho menor"),
+            }[language]
+            for key in ("title", "overview", "fit_note"):
+                if any(token in str(merged[key]).casefold() for token in unsafe):
+                    merged[key] = fallback[key]
+            if any(
+                any(token in str(item).casefold() for token in unsafe)
+                for item in merged["highlights"]
+            ):
+                merged["highlights"] = fallback["highlights"]
+        elif error == "insufficient-verified-details":
+            # Preserve the model title and overview, but inject fact-led fallback
+            # bullets until the deterministic concept coverage gate is satisfied.
+            combined = list(merged["highlights"])
+            for item in fallback["highlights"]:
+                if item not in combined:
+                    combined.append(item)
+                if len(combined) >= 5:
+                    break
+            merged["highlights"] = combined[:5]
+            if combined == candidate.get("highlights"):
+                break
+        else:
+            break
+    return fallback, _payload_validation_error(
+        language, merged, facts, taxonomy, expected_media, expected_terms
+    ) or "unsafe-field-salvage"
+
+
 def _payload_validation_error(
     language: str,
     payload: Any,
@@ -1097,6 +1201,24 @@ def _payload_validation_error(
         for phrase in _PROCESS_FILLER_PATTERNS[language]
     ):
         return "process-language-in-shopper-copy"
+    unsupported_fit_claims = {
+        "en": (
+            "true to size",
+            "select your usual size",
+            "choose your usual size",
+            "size up",
+            "size down",
+        ),
+        "ko": ("정사이즈", "평소 사이즈", "한 사이즈 크게", "한 사이즈 작게"),
+        "pt": (
+            "tamanho normal",
+            "seu tamanho habitual",
+            "um tamanho maior",
+            "um tamanho menor",
+        ),
+    }
+    if any(phrase in natural_text.casefold() for phrase in unsupported_fit_claims[language]):
+        return "unsupported-fit-guidance-guard"
     incomplete_main_material = any(
         item.name == "主面料成分含量" and item.value == "30%以下"
         for item in facts.attributes
@@ -1113,7 +1235,7 @@ def _payload_validation_error(
     ):
         return "incomplete-composition-marketing-guard"
     localized_feature_values = {
-        str(localized_terms.get(item.value) or "").strip().casefold()
+        str(localized_terms.get(item.value) or "").strip()
         for item in facts.attributes
         if item.name in _MARKETING_ATTRIBUTE_NAMES
     }
@@ -1125,9 +1247,9 @@ def _payload_validation_error(
             "valor informado pelo vendedor",
         }
     )
-    natural_folded = natural_text.casefold()
     matched_features = sum(
-        value in natural_folded for value in localized_feature_values
+        _localized_concept_is_mentioned(language, value, natural_text)
+        for value in localized_feature_values
     )
     if matched_features < min(3, len(localized_feature_values)):
         return "insufficient-verified-details"
@@ -1136,6 +1258,38 @@ def _payload_validation_error(
     if generated_copy_violations(language, payload):
         return "content-compliance-guard"
     return ""
+
+
+_GENERIC_FEATURE_TOKENS = {
+    "en": {"style", "design", "product", "garment", "material", "fabric", "fit", "type"},
+    "ko": {"스타일", "디자인", "상품", "제품", "소재", "원단", "핏"},
+    "pt": {"estilo", "design", "produto", "peça", "material", "tecido", "corte", "tipo"},
+}
+
+
+def _localized_concept_is_mentioned(
+    language: str, localized_value: str, natural_text: str
+) -> bool:
+    """Accept natural synonyms without weakening the factual concept gate.
+
+    Model copy commonly turns canonical labels such as ``Straight Fit`` into
+    ``straight-leg silhouette``. Exact-substring matching rejected that valid
+    wording and discarded the entire draft. We first accept the full normalized
+    phrase, then require one distinctive content token from the canonical value.
+    """
+
+    value = re.sub(r"[^\w\uac00-\ud7a3]+", " ", localized_value.casefold()).strip()
+    text = re.sub(r"[^\w\uac00-\ud7a3]+", " ", natural_text.casefold()).strip()
+    if not value:
+        return False
+    if value in text:
+        return True
+    tokens = {
+        token
+        for token in value.split()
+        if len(token) >= 3 and token not in _GENERIC_FEATURE_TOKENS[language]
+    }
+    return any(token in text for token in tokens)
 
 
 def _natural_join(language: str, values: list[str]) -> str:
@@ -1318,7 +1472,9 @@ def _benefit_led_highlight(
             return value + ("으로" if has_batchim else "로")
 
         if source_name == "设计":
-            return f"{localized_value}을 주요 디자인 디테일로 적용했습니다"
+            final = ord(localized_value[-1]) - 0xAC00 if localized_value else -1
+            particle = "을" if 0 <= final <= 11171 and final % 28 != 0 else "를"
+            return f"{localized_value}{particle} 주요 디자인 디테일로 적용했습니다"
         if source_name == "领型":
             return (
                 "브이넥으로 열린 목선 형태를 보여 줍니다"
@@ -1513,8 +1669,16 @@ def _fallback_payload(
             feature_phrases = [
                 phrase_overrides.get(phrase, phrase) for phrase in feature_phrases
             ]
+            plural_bottom = bool(
+                re.search(r"\b(?:shorts|pants|trousers)\b", base_title, re.IGNORECASE)
+            )
+            subject = (
+                f"This pair of {base_title.lower()}"
+                if plural_bottom
+                else f"This {base_title.lower()}"
+            )
             first = (
-                f"This {base_title.lower()} combines "
+                f"{subject} combines "
                 f"{_natural_join('en', feature_phrases)}."
                 if feature_phrases
                 else f"A {base_title.lower()} with a clean, product-focused silhouette."
@@ -1669,9 +1833,13 @@ def _fallback_payload(
         "product_video.mp4": "Eight-second product presentation showing the silhouette and key design details.",
     }
     if language == "ko":
+        feature_object = feature_summary
+        if feature_object:
+            final = ord(feature_object[-1]) - 0xAC00
+            feature_object += "을" if 0 <= final <= 11171 and final % 28 != 0 else "를"
         payload["media_descriptions"] = {
             "main_image.jpeg": f"{base_title}의 전체 형태를 보여 주는 대표 이미지입니다.",
-            "detail_image_1.jpeg": f"{feature_summary or '전체 실루엣'}을 강조한 상품 전체 이미지입니다.",
+            "detail_image_1.jpeg": f"{feature_object or '전체 실루엣을'} 강조한 상품 전체 이미지입니다.",
             "detail_image_2.jpeg": "짜임과 눈에 보이는 디자인 디테일을 가까이 보여 줍니다.",
             "detail_image_3.jpeg": "실루엣과 소매 구조를 보여 주는 다른 각도의 상품 이미지입니다.",
             "detail_image_4.jpeg": (
@@ -1920,6 +2088,17 @@ Verified source facts:
                     retryable=exc.retryable,
                     error=str(exc),
                 )
+            salvaged, salvage_source = _salvage_copy_payload(
+                language,
+                payload,
+                fallback,
+                facts,
+                taxonomy,
+                expected_media,
+                expected_terms,
+            )
+            if salvaged is not fallback:
+                return salvaged, f"{client.config.chat_model}-{salvage_source}"
             return fallback, validation_error
         payload = _normalize_auxiliary_fields(payload, fallback)
         validation_error = _payload_validation_error(
@@ -1941,6 +2120,17 @@ Verified source facts:
                     validation_error=validation_error,
                     payload=payload,
                 )
+            salvaged, salvage_source = _salvage_copy_payload(
+                language,
+                payload,
+                fallback,
+                facts,
+                taxonomy,
+                expected_media,
+                expected_terms,
+            )
+            if salvaged is not fallback:
+                return salvaged, f"{client.config.chat_model}-{salvage_source}"
             return fallback, validation_error
         repaired = True
 
@@ -1980,6 +2170,22 @@ def _localized_display(language: str, value: str, term_map: dict[str, Any]) -> s
     if language == "en":
         rendered = _append_us_length_conversion(raw, rendered)
     if rendered in _UNTRANSLATED_VALUES:
+        if "/" in raw:
+            localized_parts = [
+                _static_localize_term(language, part.strip())
+                for part in raw.split("/")
+                if part.strip()
+            ]
+            localized_parts = [
+                part for part in localized_parts if part not in _UNTRANSLATED_VALUES
+            ]
+            if localized_parts:
+                return "/".join(localized_parts)
+            return {
+                "en": "Marketplace category",
+                "ko": "마켓플레이스 카테고리",
+                "pt": "Categoria do marketplace",
+            }[language]
         return "—"
     return rendered
 

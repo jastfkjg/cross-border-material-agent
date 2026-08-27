@@ -177,6 +177,18 @@ _SPECIALIZED_CATEGORY_MARKERS = (
     "配饰",
     "舞台",
     "制服",
+    "体育专用",
+    "足球",
+    "篮球",
+    "棒球",
+    "曲棍球",
+    "橄榄球",
+    "瑜伽",
+    "舞蹈",
+    "工装",
+    "打褶",
+    "牛仔",
+    "新奇",
 )
 
 
@@ -262,7 +274,22 @@ def _category_score(facts: ProductFacts, candidate: dict[str, Any]) -> float:
     candidate_audiences = _semantic_groups(raw_candidate, _CATEGORY_AUDIENCES)
     if source_audiences and candidate_audiences:
         score += 16 if source_audiences & candidate_audiences else -52
-    normalized_evidence = normalize_label(raw_source_evidence)
+    # Specialised leaves need direct intent evidence from the title/category or
+    # an explicit use/sport field. Generic source fields named "类别" often carry
+    # loose supplier tags such as 运动休闲裤 and must not route an everyday item
+    # into a sport-specific taxonomy subtree.
+    specialization_evidence = " ".join(
+        [
+            facts.source_title,
+            facts.source_category_name,
+            *[
+                item.value
+                for item in facts.attributes
+                if any(marker in item.name for marker in ("适用场景", "用途", "运动项目"))
+            ],
+        ]
+    )
+    normalized_evidence = normalize_label(specialization_evidence)
     normalized_candidate = normalize_label(raw_candidate)
     for marker in _SPECIALIZED_CATEGORY_MARKERS:
         normalized_marker = normalize_label(marker)
@@ -271,6 +298,41 @@ def _category_score(facts: ProductFacts, candidate: dict[str, Any]) -> float:
             and normalized_marker not in normalized_evidence
         ):
             score -= 34
+
+    length_evidence = " ".join(
+        [
+            facts.source_title,
+            *[
+                item.value
+                for item in facts.attributes
+                if any(marker in item.name for marker in ("裤长", "裙长", "衣长"))
+            ],
+        ]
+    )
+    source_length = _semantic_groups(length_evidence, {
+        "shorts": ("短裤", "五分裤", "三分裤", "七分裤", "裤衩", "shorts"),
+        "long_pants": ("长裤", "九分裤", "pants", "trousers"),
+    })
+    candidate_length = _semantic_groups(raw_candidate, {
+        "shorts": ("短裤", "五分裤", "shorts"),
+        "long_pants": ("长裤", "pants", "trousers"),
+    })
+    if "shorts" in source_length and "long_pants" in candidate_length and "shorts" not in candidate_length:
+        score -= 120
+    if "long_pants" in source_length and "shorts" in candidate_length and "long_pants" not in candidate_length:
+        score -= 120
+
+    # When no specialised purpose is verified, prefer the ordinary apparel
+    # subtree over otherwise lexically similar sport/uniform leaves.
+    if (
+        source_length & candidate_length
+        and "男装短裤" in raw_candidate
+        and not any(
+            normalize_label(marker) in normalized_evidence
+            for marker in _SPECIALIZED_CATEGORY_MARKERS
+        )
+    ):
+        score += 24
 
     normalized_source_category = normalize_label(facts.source_category_name)
     if normalized_source_category and normalized_source_category == name:

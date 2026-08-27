@@ -76,13 +76,19 @@ class DebugTrace:
         with self._lock:
             self._sequence += 1
             sequence = self._sequence
+        # Event producers historically used ``elapsed_seconds`` for operation
+        # duration, which overwrote the run timeline field during ``**fields``
+        # expansion. Keep the two clocks explicit and collision-free.
+        operation_elapsed = fields.pop("elapsed_seconds", None)
         payload = {
             "run_id": self.run_id,
             "seq": sequence,
-            "elapsed_seconds": round(time.monotonic() - self.started, 3),
+            "run_elapsed_seconds": round(time.monotonic() - self.started, 3),
             "event": event,
             **fields,
         }
+        if operation_elapsed is not None:
+            payload["operation_duration_seconds"] = operation_elapsed
         self.logger.debug(
             "TRACE_JSON %s",
             json.dumps(_sanitize(payload), ensure_ascii=False, separators=(",", ":")),

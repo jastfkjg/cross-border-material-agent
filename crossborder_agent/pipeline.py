@@ -66,6 +66,10 @@ _IMAGE_NEGATIVE_PROMPT = (
     "changed buttons, changed fasteners, changed pattern, changed color, blur, low resolution"
 )
 
+_SINGLE_COMPOSITION_NEGATIVE_PROMPT = (
+    ", split screen, inset panel, repeated panel, mixed close-up and full-product composition"
+)
+
 _MAIN_NEGATIVE_PROMPT = (
     _IMAGE_NEGATIVE_PROMPT
     + ", collage, montage, split screen, inset, duplicate garment, multiple products, multiple colorways, "
@@ -371,6 +375,31 @@ class Pipeline:
                         detail_assets[index] = future.result()
                     except Exception as exc:
                         raise PipelineError(f"详情图 {index} 构建失败: {exc}") from exc
+
+                # The six-image collection is complete now. Review it immediately
+                # while copy/video futures continue in parallel, so a slow text or
+                # video call cannot consume the semantic image-QA budget.
+                for index in range(1, 6):
+                    state.assets.append(detail_assets[index])
+                self._install_size_chart_detail(facts, state.assets, work_dir)
+                self._repair_duplicate_fallback_details(
+                    state.assets,
+                    main_reference_url=main_reference_url,
+                    work_dir=work_dir,
+                    downloads_dir=downloads_dir,
+                )
+                self._record_visual_delivery_quality(state.assets)
+                state.visual_set_review = self._review_visual_set(
+                    facts, state.assets
+                )
+                state.visual_set_review = self._repair_visual_set_once(
+                    facts=facts,
+                    creative_plan=creative_plan,
+                    state=state,
+                    review=state.visual_set_review,
+                    work_dir=work_dir,
+                    downloads_dir=downloads_dir,
+                )
                 for future, language in copy_futures.items():
                     try:
                         payload, source = future.result()
@@ -383,8 +412,6 @@ class Pipeline:
                 except Exception as exc:
                     raise PipelineError(f"视频构建失败: {exc}") from exc
 
-            for index in range(1, 6):
-                state.assets.append(detail_assets[index])
             if video_result:
                 state.assets.append(video_result)
             self.trace.emit(
@@ -407,20 +434,15 @@ class Pipeline:
             # Initial generation failures may use deterministic emergency assets so the
             # delivery remains complete. Evaluation never replaces an accepted artifact
             # with a fallback: it selects a targeted, non-destructive repair tool below.
-            self._install_size_chart_detail(facts, state.assets, work_dir)
-            self._repair_duplicate_fallback_details(
-                state.assets,
-                main_reference_url=main_reference_url,
-                work_dir=work_dir,
-                downloads_dir=downloads_dir,
-            )
             self._enhance_fallback_video(state.assets, work_dir)
             self._record_visual_delivery_quality(state.assets)
-            state.visual_set_review = self._review_visual_set(
-                facts, state.assets
-            )
             self._write_localized_descriptions(
-                facts, taxonomy, localization_payloads, state.assets, work_dir
+                facts,
+                taxonomy,
+                creative_plan,
+                localization_payloads,
+                state.assets,
+                work_dir,
             )
             self._bind_repair_tools(
                 tool_registry,
@@ -452,7 +474,12 @@ class Pipeline:
             self._enhance_fallback_video(state.assets, work_dir)
             self._record_visual_delivery_quality(state.assets)
             self._write_localized_descriptions(
-                facts, taxonomy, localization_payloads, state.assets, work_dir
+                facts,
+                taxonomy,
+                creative_plan,
+                localization_payloads,
+                state.assets,
+                work_dir,
             )
             if self.client is not None:
                 state.api_calls = self.client.metrics
@@ -476,9 +503,17 @@ class Pipeline:
             final_report = validate_delivery(self.output_dir, facts, taxonomy)
             self.trace.emit(
                 "run.complete",
-                valid=final_report.valid,
+                contract_valid=final_report.valid,
                 errors=final_report.errors,
-                warnings=final_report.warnings,
+                contract_warnings=final_report.warnings,
+                pipeline_warnings=list(dict.fromkeys(self.warnings)),
+                visual_set_review_status=(
+                    "completed" if state.visual_set_review else "not-completed"
+                ),
+                global_evaluation_status=(
+                    "completed" if state.agent_evaluations else "not-completed"
+                ),
+                localization_sources=localization_sources,
                 assets=[
                     {
                         "name": item.name,
@@ -509,6 +544,7 @@ class Pipeline:
         self,
         facts: ProductFacts,
         taxonomy: TaxonomyResult,
+        creative_plan: CreativePlan,
         payloads: dict[str, dict[str, Any]],
         assets: list[AssetResult],
         work_dir: Path,
@@ -576,6 +612,82 @@ class Pipeline:
                 "size_chart": "Tabela com as medidas da peça e o peso indicados pelo vendedor.",
             },
         }
+        generated_templates = {
+            "en": {
+                "main": "Clean studio hero showing one complete product.",
+                "video": "Eight-second product presentation based on the final hero image.",
+                "roles": {
+                    "overall_silhouette": "Complete three-quarter view showing the overall silhouette.",
+                    "waistband_closure_pockets": "Close view of the verified waistband, closure and pocket construction.",
+                    "leg_seam_hem": "Close view of the verified leg shape, side seam and hem.",
+                    "neckline_closure": "Close view of the verified neckline and closure construction.",
+                    "neckline_bodice_closure": "Close view of the verified neckline, bodice and closure construction.",
+                    "sleeve_cuff_hem": "Close view of the verified sleeve, cuff, drape and hem.",
+                    "waist_drape_hem": "View of the verified waist transition, drape and hem.",
+                    "verified_variants": "Catalog view comparing only seller-verified color variants.",
+                    "back_construction": "Back view showing the verified rear construction and hem.",
+                    "wearer_fit_context": "Wearer view showing the product's visible fit and proportions.",
+                    "product_styling_context": "Product-only styling view showing practical outfit context.",
+                },
+            },
+            "ko": {
+                "main": "상품 한 개의 전체 형태를 보여 주는 깔끔한 스튜디오 대표 이미지입니다.",
+                "video": "최종 대표 이미지를 바탕으로 제작한 8초 상품 영상입니다.",
+                "roles": {
+                    "overall_silhouette": "전체 실루엣을 보여 주는 완전한 3/4 각도 이미지입니다.",
+                    "waistband_closure_pockets": "확인된 허리밴드와 여밈, 포켓 구조를 가까이 보여 줍니다.",
+                    "leg_seam_hem": "확인된 다리 라인과 옆선, 밑단을 가까이 보여 줍니다.",
+                    "neckline_closure": "확인된 네크라인과 여밈 구조를 가까이 보여 줍니다.",
+                    "neckline_bodice_closure": "확인된 네크라인과 몸판, 여밈 구조를 가까이 보여 줍니다.",
+                    "sleeve_cuff_hem": "확인된 소매와 커프스, 드레이프, 밑단을 가까이 보여 줍니다.",
+                    "waist_drape_hem": "확인된 허리선과 드레이프, 밑단을 보여 줍니다.",
+                    "verified_variants": "판매자 원본에서 확인된 색상 옵션만 비교한 카탈로그 이미지입니다.",
+                    "back_construction": "확인된 뒷면 구조와 밑단을 보여 주는 후면 이미지입니다.",
+                    "wearer_fit_context": "착용 시 보이는 핏과 비율을 보여 주는 이미지입니다.",
+                    "product_styling_context": "실용적인 코디 맥락을 보여 주는 상품 전용 이미지입니다.",
+                },
+            },
+            "pt": {
+                "main": "Imagem principal de estúdio mostrando uma única peça por inteiro.",
+                "video": "Apresentação de 8 segundos baseada na imagem principal final.",
+                "roles": {
+                    "overall_silhouette": "Vista completa em três quartos mostrando a silhueta geral.",
+                    "waistband_closure_pockets": "Close do cós, do fechamento e dos bolsos confirmados.",
+                    "leg_seam_hem": "Close do formato das pernas, da costura lateral e da barra.",
+                    "neckline_closure": "Close do decote e do fechamento confirmados.",
+                    "neckline_bodice_closure": "Close do decote, do corpo e do fechamento confirmados.",
+                    "sleeve_cuff_hem": "Close da manga, do punho, do caimento e da barra confirmados.",
+                    "waist_drape_hem": "Vista da transição da cintura, do caimento e da barra.",
+                    "verified_variants": "Vista de catálogo comparando apenas cores confirmadas pelo vendedor.",
+                    "back_construction": "Vista traseira mostrando a construção e a barra confirmadas.",
+                    "wearer_fit_context": "Vista no corpo mostrando o caimento e as proporções visíveis.",
+                    "product_styling_context": "Composição sem modelo mostrando um contexto prático de uso.",
+                },
+            },
+        }
+        bottom_crop_templates = {
+            "en": {
+                "upper": "Seller-source close-up showing the waistband, closure and upper pocket construction.",
+                "lower": "Seller-source close-up showing the leg shape, side seam and hem.",
+                "left": "Seller-source close-up showing the left pocket, side seam and leg construction.",
+                "right": "Seller-source close-up showing the right pocket, side seam and leg construction.",
+                "center": "Seller-source close-up showing the waistband and front construction.",
+            },
+            "ko": {
+                "upper": "판매자 원본에서 허리밴드와 여밈, 상단 포켓 구조를 확대한 이미지입니다.",
+                "lower": "판매자 원본에서 다리 라인과 옆선, 밑단을 확대한 이미지입니다.",
+                "left": "판매자 원본에서 왼쪽 포켓과 옆선, 다리 구조를 확대한 이미지입니다.",
+                "right": "판매자 원본에서 오른쪽 포켓과 옆선, 다리 구조를 확대한 이미지입니다.",
+                "center": "판매자 원본에서 허리밴드와 전면 구조를 확대한 이미지입니다.",
+            },
+            "pt": {
+                "upper": "Close da foto do vendedor mostrando o cós, o fechamento e os bolsos superiores.",
+                "lower": "Close da foto do vendedor mostrando as pernas, a costura lateral e a barra.",
+                "left": "Close da foto do vendedor mostrando o bolso esquerdo, a lateral e a perna.",
+                "right": "Close da foto do vendedor mostrando o bolso direito, a lateral e a perna.",
+                "center": "Close da foto do vendedor mostrando o cós e a construção frontal.",
+            },
+        }
         for language, payload in payloads.items():
             media = payload.get("media_descriptions")
             if not isinstance(media, dict):
@@ -591,7 +703,29 @@ class Pipeline:
                 "product_video.mp4",
             ):
                 asset = asset_by_name.get(name)
-                if asset is None or asset.generated:
+                if asset is None:
+                    continue
+                if asset.generated:
+                    if name == "main_image.jpeg":
+                        media[name] = generated_templates[language]["main"]
+                    elif name == "product_video.mp4":
+                        media[name] = generated_templates[language]["video"]
+                    else:
+                        try:
+                            detail_index = int(
+                                name.removeprefix("detail_image_").split(".", 1)[0]
+                            )
+                        except ValueError:
+                            detail_index = 1
+                        role = (
+                            creative_plan.detail_roles[detail_index - 1]
+                            if detail_index <= len(creative_plan.detail_roles)
+                            else "overall_silhouette"
+                        )
+                        media[name] = generated_templates[language]["roles"].get(
+                            role,
+                            generated_templates[language]["roles"]["overall_silhouette"],
+                        )
                     continue
                 if asset.model == "deterministic-size-chart":
                     kind = "size_chart"
@@ -619,7 +753,11 @@ class Pipeline:
                         "",
                     )
                     media[name] = (
-                        fallback_templates[language]["crops"][crop_kind]
+                        (
+                            bottom_crop_templates[language][crop_kind]
+                            if "waistband_closure_pockets" in creative_plan.detail_roles
+                            else fallback_templates[language]["crops"][crop_kind]
+                        )
                         if crop_kind
                         else fallback_templates[language]["details"][
                             max(0, min(4, detail_index - 1))
@@ -719,6 +857,10 @@ class Pipeline:
                 if self.offline
                 else "模型配置不可用，跳过有界 Agent 全局评估循环"
             )
+            self.trace.emit(
+                "agent.evaluation_skipped",
+                reason="offline" if self.offline else "no-model-client",
+            )
             return
         max_repairs = int(agent_plan.get("max_repair_rounds", 1))
         repairs_used = 0
@@ -726,6 +868,12 @@ class Pipeline:
         while True:
             if self.deadline - time.monotonic() <= 4 * 60:
                 self.warnings.append("剩余时间不足，停止新的 Agent 评估轮次并保留当前版本")
+                self.trace.emit(
+                    "agent.evaluation_skipped",
+                    reason="insufficient-stage-budget",
+                    round_index=round_index,
+                    remaining_seconds=round(self.deadline - time.monotonic(), 1),
+                )
                 break
             evaluation = self.agent.evaluate_delivery(
                 round_index=round_index,
@@ -742,6 +890,11 @@ class Pipeline:
             )
             if evaluation is None:
                 self.warnings.append("LLM 全局评估未完成；不触发回退，保留当前已校验素材")
+                self.trace.emit(
+                    "agent.evaluation_failed",
+                    round_index=round_index,
+                    reason="reviewer-unavailable-or-invalid-response",
+                )
                 break
             state.agent_evaluations.append(evaluation)
             self.trace.emit(
@@ -947,7 +1100,8 @@ class Pipeline:
             asset.generated = True
             asset.fallback_reason = ""
             asset.description = (
-                f"Agent-repaired detail storyboard slot {index}: {instruction[:240]}"
+                "Canonical detail role: "
+                f"{plan.detail_roles[index - 1] if index <= len(plan.detail_roles) else f'slot_{index}'}"
             )
             return ToolExecution("completed", f"detail slot {index} revision accepted")
         except (ApiError, MediaError, OSError, PipelineError) as exc:
@@ -2171,8 +2325,8 @@ Allowed leaf candidates:
                     model=model,
                     generated=True,
                     description=(
-                        f"Detail storyboard slot {index}: "
-                        f"{plan.detail_prompts[index - 1][:240]}"
+                        f"Canonical detail role: "
+                        f"{plan.detail_roles[index - 1] if index <= len(plan.detail_roles) else f'slot_{index}'}"
                     ),
                 )
             except (ApiError, MediaError) as exc:
@@ -2222,7 +2376,15 @@ Allowed leaf candidates:
                 active_prompt,
                 references,
                 size="1200*1500",
-                negative_prompt=_IMAGE_NEGATIVE_PROMPT,
+                negative_prompt=(
+                    _IMAGE_NEGATIVE_PROMPT
+                    + _SINGLE_COMPOSITION_NEGATIVE_PROMPT
+                    + (
+                        ""
+                        if index == 4
+                        else ", collage, montage, grid, duplicate product, multiple views"
+                    )
+                ),
                 count=2,
             )
             reviewed_urls = (
@@ -2332,6 +2494,8 @@ Allowed leaf candidates:
                 "unwanted_brand_or_logo": True,
                 "prohibited_visual": True,
                 "major_artifacts": True,
+                "unexpected_collage": True,
+                "single_composition": False,
             }
             failed = [key for key, value in hard_fields.items() if item.get(key) is value]
             if failed:
@@ -2339,10 +2503,19 @@ Allowed leaf candidates:
                     f"candidate {candidate_index}: {','.join(failed)}; {item.get('reason', '')}"
                 )
                 continue
-            score = self._candidate_soft_score(item, selected_index=selected)
             if item.get("slot_match") is False:
-                score -= 12
+                hard_reasons.append(
+                    f"candidate {candidate_index}: slot_match; {item.get('reason', '')}"
+                )
+                continue
+            score = self._candidate_soft_score(item, selected_index=selected)
             ranked.append((score, candidate_index, item))
+        if incumbent_index is None and ranked and max(row[0] for row in ranked) < 65:
+            hard_reasons.extend(
+                f"candidate {candidate_index}: quality score {score:.1f} below 65; {item.get('reason', '')}"
+                for score, candidate_index, item in ranked
+            )
+            ranked = []
         return self._choose_monotonic_candidate(
             f"详情图 {index}",
             candidate_urls,
@@ -2700,9 +2873,16 @@ Allowed leaf candidates:
         """Judge hero + five details as one set, without mutating accepted files."""
 
         if self.client is None:
+            self.trace.emit("image.set_review_skipped", reason="offline-or-no-review-client")
             return {}
-        if self.deadline - time.monotonic() <= 6 * 60:
-            self.warnings.append("剩余时间不足，跳过六图集合语义评审并保留全局评估预算")
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 3 * 60:
+            self.warnings.append("剩余时间不足，跳过六图集合语义评审")
+            self.trace.emit(
+                "image.set_review_skipped",
+                reason="insufficient-stage-budget",
+                remaining_seconds=round(remaining, 1),
+            )
             return {}
         ordered_names = ["main_image.jpeg"] + [
             f"detail_image_{index}.jpeg" for index in range(1, 6)
@@ -2710,10 +2890,12 @@ Allowed leaf candidates:
         by_name = {asset.name: asset for asset in assets}
         if any(name not in by_name for name in ordered_names):
             self.warnings.append("六图集合不完整，无法执行集合级语义评审")
+            self.trace.emit("image.set_review_skipped", reason="incomplete-image-set")
             return {}
         review_inputs = [by_name[name].source_url for name in ordered_names]
         if any(not url for url in review_inputs):
             self.warnings.append("六图集合缺少平台允许的远程评审 URL，跳过集合级模型评审")
+            self.trace.emit("image.set_review_skipped", reason="missing-review-url")
             return {}
 
         source_references = _unique(
@@ -2773,7 +2955,11 @@ Allowed leaf candidates:
             normalized_rows.append({"name": name, **item})
         review["assets"] = normalized_rows
         review["reviewed_names"] = ordered_names
-        review["review_model"] = self.client.config.review_model
+        review["review_model"] = getattr(
+            self.client,
+            "visual_review_model",
+            self.client.config.review_model,
+        )
 
         duplicate_pairs = review.get("near_duplicate_pairs")
         if isinstance(duplicate_pairs, list) and duplicate_pairs:
@@ -2800,6 +2986,91 @@ Allowed leaf candidates:
             )
         self.trace.emit("image.set_review", review=review)
         return review
+
+    def _repair_visual_set_once(
+        self,
+        *,
+        facts: ProductFacts,
+        creative_plan: CreativePlan,
+        state: RunState,
+        review: dict[str, Any],
+        work_dir: Path,
+        downloads_dir: Path,
+    ) -> dict[str, Any]:
+        """Repair at most one detail whose replacement improves the whole set."""
+
+        if not review or review.get("set_usable") is True:
+            return review
+        if self.deadline - time.monotonic() <= 6 * 60:
+            self.trace.emit(
+                "image.set_repair_skipped",
+                reason="insufficient-stage-budget",
+                remaining_seconds=round(self.deadline - time.monotonic(), 1),
+            )
+            return review
+        targets = review.get("repair_targets")
+        if not isinstance(targets, list):
+            return review
+        target_index = next(
+            (
+                item
+                for item in targets
+                if isinstance(item, int)
+                and 1 <= item <= 5
+                and not (item == 5 and facts.size_chart_rows)
+            ),
+            None,
+        )
+        if target_index is None:
+            return review
+        rows = review.get("assets") if isinstance(review.get("assets"), list) else []
+        row = next(
+            (
+                item
+                for item in rows
+                if isinstance(item, dict) and item.get("index") == target_index
+            ),
+            {},
+        )
+        instruction = "; ".join(
+            item
+            for item in (
+                str(row.get("reason") or "").strip(),
+                str(review.get("summary") or "").strip(),
+                "Restore the canonical slot role and remove semantic duplication, split panels, or low product coverage.",
+            )
+            if item
+        )[:1400]
+        target = f"detail_image_{target_index}.jpeg"
+        result = self._repair_detail_image(
+            target,
+            instruction,
+            facts,
+            creative_plan,
+            state.assets,
+            work_dir,
+            downloads_dir,
+        )
+        state.agent_actions.append(
+            AgentActionResult(
+                round_index=-1,
+                tool="regenerate_detail_image",
+                target=target,
+                status=result.status,
+                detail=result.detail,
+            )
+        )
+        self.trace.emit(
+            "image.set_repair_result",
+            target=target,
+            instruction=instruction,
+            status=result.status,
+            detail=result.detail,
+        )
+        if result.status != "completed":
+            return review
+        refreshed = self._review_visual_set(facts, state.assets)
+        return refreshed or review
 
     def _write_strategy_document(
         self,

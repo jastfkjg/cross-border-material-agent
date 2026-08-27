@@ -52,9 +52,9 @@ def _product_family(taxonomy: TaxonomyResult) -> str:
     return "top"
 
 
-def _detail_slot_directives(
+def _detail_slot_specs(
     taxonomy: TaxonomyResult, facts: ProductFacts | None = None
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, str], ...]:
     family = _product_family(taxonomy)
     category_id = taxonomy.category.category_id
     wearer = (
@@ -77,47 +77,53 @@ def _detail_slot_directives(
     )
     if family == "bottom":
         return (
-            slot_1,
-            "This is detail slot 2: make a tight but readable close-up centered on the verified waistband, "
+            ("overall_silhouette", slot_1),
+            ("waistband_closure_pockets", "This is detail slot 2: make a tight but readable close-up centered on the verified waistband, "
             "front closure and pocket construction. Use restrained Korean commerce styling with pale neutral tones, "
-            "precise spacing and diffused light. Do not invent a fly, drawstring, belt loop or pocket.",
-            "This is detail slot 3: make a distinct close-up of the verified leg shape, side seam and hem, "
+            "precise spacing and diffused light. Do not invent a fly, drawstring, belt loop or pocket."),
+            ("leg_seam_hem", "This is detail slot 3: make a distinct close-up of the verified leg shape, side seam and hem, "
             "while keeping enough of the product visible to identify it. Use warm natural daylight and a subtle "
-            "contemporary Brazilian marketplace mood without flags, landmarks, stereotypes or written text.",
-            slot_4,
-            f"This is detail slot 5: show {wearer} in a restrained everyday styling context, with the waistband, "
+            "contemporary Brazilian marketplace mood without flags, landmarks, stereotypes or written text."),
+            (("verified_variants" if len(verified_colors) > 1 else "back_construction"), slot_4),
+            ("wearer_fit_context", f"This is detail slot 5: show {wearer} in a restrained everyday styling context, with the waistband, "
             "both legs and hem visible and unobstructed. Use inclusive cross-market styling appropriate to the US, "
-            "South Korea and Brazil. Keep anatomy, body proportions and garment length natural; do not reshape the body.",
+            "South Korea and Brazil. Keep anatomy, body proportions and garment length natural; do not reshape the body."),
         )
     if family == "children":
         return (
-            slot_1,
-            _BASE_DETAIL_SLOT_DIRECTIVES[1],
-            _BASE_DETAIL_SLOT_DIRECTIVES[2],
-            slot_4,
-            "This is detail slot 5: create a product-only, age-appropriate outfit flat lay. Keep the item complete "
+            ("overall_silhouette", slot_1),
+            ("neckline_closure", _BASE_DETAIL_SLOT_DIRECTIVES[1]),
+            ("sleeve_cuff_hem", _BASE_DETAIL_SLOT_DIRECTIVES[2]),
+            (("verified_variants" if len(verified_colors) > 1 else "back_construction"), slot_4),
+            ("product_styling_context", "This is detail slot 5: create a product-only, age-appropriate outfit flat lay. Keep the item complete "
             "and unobstructed, use only neutral unbranded props with inclusive cross-market styling, and do not depict "
-            "a child or adult wearer.",
+            "a child or adult wearer."),
         )
     if family == "dress":
         return (
-            slot_1,
-            "This is detail slot 2: make a tight but readable close-up centered on the verified neckline, bodice "
+            ("overall_silhouette", slot_1),
+            ("neckline_bodice_closure", "This is detail slot 2: make a tight but readable close-up centered on the verified neckline, bodice "
             "and closure construction. Use restrained Korean commerce styling with pale neutral tones, precise spacing "
-            "and diffused light. Do not invent buttons, a zipper, belt or trim.",
-            "This is detail slot 3: show the verified waist transition, skirt drape and hem while keeping enough "
+            "and diffused light. Do not invent buttons, a zipper, belt or trim."),
+            ("waist_drape_hem", "This is detail slot 3: show the verified waist transition, skirt drape and hem while keeping enough "
             "of the dress visible to identify its silhouette and length. Use warm natural daylight and a subtle "
-            "contemporary Brazilian marketplace mood without flags, landmarks, stereotypes or written text.",
-            slot_4,
-            _BASE_DETAIL_SLOT_DIRECTIVES[4].replace("one adult wearer", wearer),
+            "contemporary Brazilian marketplace mood without flags, landmarks, stereotypes or written text."),
+            (("verified_variants" if len(verified_colors) > 1 else "back_construction"), slot_4),
+            ("wearer_fit_context", _BASE_DETAIL_SLOT_DIRECTIVES[4].replace("one adult wearer", wearer)),
         )
     return (
-        _BASE_DETAIL_SLOT_DIRECTIVES[0],
-        _BASE_DETAIL_SLOT_DIRECTIVES[1],
-        _BASE_DETAIL_SLOT_DIRECTIVES[2],
-        slot_4,
-        _BASE_DETAIL_SLOT_DIRECTIVES[4].replace("one adult wearer", wearer),
+        ("overall_silhouette", _BASE_DETAIL_SLOT_DIRECTIVES[0]),
+        ("neckline_closure", _BASE_DETAIL_SLOT_DIRECTIVES[1]),
+        ("sleeve_cuff_hem", _BASE_DETAIL_SLOT_DIRECTIVES[2]),
+        (("verified_variants" if len(verified_colors) > 1 else "back_construction"), slot_4),
+        ("wearer_fit_context", _BASE_DETAIL_SLOT_DIRECTIVES[4].replace("one adult wearer", wearer)),
     )
+
+
+def _detail_slot_directives(
+    taxonomy: TaxonomyResult, facts: ProductFacts | None = None
+) -> tuple[str, ...]:
+    return tuple(directive for _, directive in _detail_slot_specs(taxonomy, facts))
 
 
 def _video_guard(taxonomy: TaxonomyResult) -> str:
@@ -178,7 +184,8 @@ def fallback_creative_plan(
     if verified:
         identity += f" Verified visible source attributes: {verified}."
     identity += " When text facts and reference pixels appear to conflict, preserve the reference product pixels."
-    slot_directives = _detail_slot_directives(taxonomy, facts)
+    slot_specs = _detail_slot_specs(taxonomy, facts)
+    slot_directives = tuple(item[1] for item in slot_specs)
     return CreativePlan(
         visual_theme=(
             "Campaign Style Lock: pure white primary, warm ivory secondary, and one accent sampled from the verified "
@@ -240,6 +247,7 @@ def fallback_creative_plan(
             "ko": "accurate options and restrained marketplace presentation",
             "pt": "clear variation guidance and practical styling",
         },
+        detail_roles=[item[0] for item in slot_specs],
     )
 
 
@@ -310,6 +318,10 @@ neckline or closure, sleeve/cuff/material detail, back/hem construction or only 
 and practical context. A perceptually different pose is not sufficient if it repeats another slot's job.
 Do not request measurements, care instructions, material performance, certification, price, discount or brand claims.
 
+The five slot jobs are fixed by code and cannot be reordered or redefined. Your detail_prompts are optional
+styling proposals only; they will not replace the canonical storyboard contract:
+{json.dumps([{"slot": index + 1, "role": role, "directive": directive} for index, (role, directive) in enumerate(_detail_slot_specs(taxonomy, facts))], ensure_ascii=False)}
+
 Verified facts:
 {json.dumps(facts.compact_dict(), ensure_ascii=False)}
 
@@ -335,7 +347,13 @@ Bounded manager guidance:
     ]
     if any(visual_prompt_violations(prompt) for prompt in all_prompts):
         return fallback, "content-compliance-guard"
-    slot_directives = _detail_slot_directives(taxonomy, facts)
+    # A previous implementation concatenated the model's independently planned
+    # storyboard with a second fixed storyboard.  Contradictory commands (for
+    # example, close-up + complete product) predictably produced split screens.
+    # The deterministic storyboard is now the single structural source of truth;
+    # the model contributes the campaign theme, hero/video treatment and market
+    # angles, but cannot silently reassign a detail slot.
+    canonical = fallback.detail_prompts
     plan = CreativePlan(
         visual_theme=payload["visual_theme"].strip(),
         main_prompt=(
@@ -346,16 +364,16 @@ Bounded manager guidance:
             + _PRESERVATION
         ),
         detail_prompts=[
-            item.strip()
-            + " "
-            + slot_directives[index]
-            + " "
-            + _PRESERVATION
-            for index, item in enumerate(payload["detail_prompts"])
+            item
+            + " Campaign styling lock: "
+            + payload["visual_theme"].strip()
+            + " The assigned slot has exactly one commercial job; do not add panels, insets, grids, or a second view."
+            for item in canonical
         ],
         video_prompt=payload["video_prompt"].strip() + " " + _video_guard(taxonomy),
         market_angles={
             key: str(value) for key, value in payload["market_angles"].items()
         },
+        detail_roles=list(fallback.detail_roles),
     )
     return plan, client.config.chat_model
