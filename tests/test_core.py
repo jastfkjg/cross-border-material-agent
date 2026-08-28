@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 import unittest
 from dataclasses import replace
@@ -34,7 +35,7 @@ from crossborder_agent.pipeline import (
     _merge_source_vision_batches,
 )
 from crossborder_agent.qa import _description_language_surfaces
-from crossborder_agent.taxonomy import resolve_taxonomy
+from crossborder_agent.taxonomy import category_leaf_candidates, resolve_taxonomy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -178,6 +179,44 @@ class ComplianceTests(unittest.TestCase):
 
 
 class VisualSelectionTests(unittest.TestCase):
+    def test_detail_four_uses_safe_product_reference_when_skus_are_not_visual_variants(
+        self,
+    ) -> None:
+        facts = load_product_facts(
+            DATA / "product_info/product_6786311895552.json"
+        )
+        safe_hero = facts.product_image_urls[-1]
+        unsafe_urls = set(facts.sku_image_urls + facts.product_image_urls[:-1])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temp_dir),
+                logger=logging.getLogger("detail-four-reference-selection-test"),
+                offline=True,
+            )
+            pipeline._source_image_observations = {
+                url: {
+                    "inspection_complete": True,
+                    "safe_for_generation_reference": False,
+                    "role": "lifestyle",
+                }
+                for url in unsafe_urls
+            }
+            pipeline._source_image_observations[safe_hero] = {
+                "inspection_complete": True,
+                "safe_for_generation_reference": True,
+                "role": "hero",
+            }
+
+            references = pipeline._detail_reference_selection(
+                4,
+                facts,
+                "https://example.test/generated-main.png",
+            )
+
+        self.assertEqual(references, [safe_hero])
+
     def test_hero_wearer_requires_trusted_adult_source_support(self) -> None:
         class WearerSelectorClient:
             @staticmethod
@@ -294,6 +333,99 @@ class VisualSelectionTests(unittest.TestCase):
         self.assertEqual(result["repair_targets"], [2])
         self.assertTrue(all(url.startswith("https://") for url in reviewer.generated_urls))
         self.assertTrue(any("语义重复" in item for item in pipeline.warnings))
+
+    def test_six_image_review_never_substitutes_local_provenance_pixels(self) -> None:
+        facts = load_product_facts(
+            DATA / "product_info/product_9451226053560.json"
+        )
+
+        class Reviewer:
+            config = SimpleNamespace(review_model="test-reviewer")
+
+            def __init__(self):
+                self.generated_urls = []
+
+            def review_generated_images(
+                self, facts_json, source_urls, generated_urls, expected_assets
+            ):
+                self.generated_urls = list(generated_urls)
+                return {
+                    "assets": [
+                        {
+                            "index": index,
+                            "usable": True,
+                            "actual_role": f"remote-role-{index}",
+                        }
+                        for index in range(len(generated_urls))
+                    ],
+                    "set_usable": True,
+                    "coherent": True,
+                    "near_duplicate_pairs": [],
+                    "missing_roles": [],
+                    "repair_targets": [],
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temp_dir),
+                logger=logging.getLogger("mixed-set-review-test"),
+                offline=True,
+            )
+            reviewer = Reviewer()
+            pipeline.client = reviewer
+            assets = [
+                AssetResult(
+                    name="main_image.jpeg",
+                    path="main_image.jpeg",
+                    source_url="https://example.test/generated-main.jpeg",
+                    generated=True,
+                    description="hero",
+                ),
+                AssetResult(
+                    name="detail_image_1.jpeg",
+                    path="detail_image_1.jpeg",
+                    source_url="https://example.test/generated-detail.jpeg",
+                    generated=True,
+                    description="detail",
+                ),
+            ] + [
+                AssetResult(
+                    name=f"detail_image_{index}.jpeg",
+                    path=f"detail_image_{index}.jpeg",
+                    source_url=f"https://example.test/provenance-only-{index}.jpeg",
+                    generated=False,
+                    description=f"local detail {index}",
+                )
+                for index in range(2, 6)
+            ]
+            with mock.patch.object(
+                pipeline,
+                "_local_visual_review_row",
+                side_effect=lambda asset, *, index: {
+                    "index": index,
+                    "name": asset.name,
+                    "usable": True,
+                    "actual_role": f"local-role-{index}",
+                    "evidence_mode": "local-final-inspection",
+                },
+            ):
+                result = pipeline._review_visual_set(facts, assets)
+
+        self.assertEqual(
+            reviewer.generated_urls,
+            [
+                "https://example.test/generated-main.jpeg",
+                "https://example.test/generated-detail.jpeg",
+            ],
+        )
+        self.assertEqual(len(result["assets"]), 6)
+        self.assertTrue(
+            all(
+                row.get("evidence_mode") == "local-final-inspection"
+                for row in result["assets"][2:]
+            )
+        )
 
     def test_non_offline_pipeline_requires_complete_model_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -504,7 +636,7 @@ class VisualSelectionTests(unittest.TestCase):
                     "waistband close-up",
                 )
 
-    def test_repair_keeps_incumbent_without_six_point_improvement(self) -> None:
+    def test_repair_accepts_any_strict_score_improvement(self) -> None:
         class ComparisonSelectorClient:
             @staticmethod
             def select_best_detail_image(*args, **kwargs):
@@ -569,9 +701,9 @@ class VisualSelectionTests(unittest.TestCase):
                 ],
                 "construction close-up",
                 incumbent_index=0,
-                minimum_improvement=6,
+                minimum_improvement=0,
             )
-        self.assertEqual(selected, "https://example.test/incumbent.jpg")
+        self.assertEqual(selected, "https://example.test/revision.jpg")
 
     def test_explicit_semantic_rejection_regenerates_once_with_feedback(self) -> None:
         class RetryClient:
@@ -676,7 +808,7 @@ class VisualSelectionTests(unittest.TestCase):
 
 
 class FactAndTaxonomyTests(unittest.TestCase):
-    def test_hidden_category_ranking_uses_product_family_audience_and_specialization(self) -> None:
+    def test_hidden_category_local_fallback_is_generic_and_leaf_constrained(self) -> None:
         facts = load_product_facts(
             DATA / "product_info/product_5681480836479.json"
         )
@@ -688,13 +820,15 @@ class FactAndTaxonomyTests(unittest.TestCase):
             load_json(DATA / "clothing_categories.json"),
             load_json(DATA / "clothing_attributes.json"),
         )
-        top = taxonomy.category.candidates[0]
-        self.assertIn("针织", top["name"] + top["path"])
-        self.assertIn("女", top["name"] + top["path"])
-        self.assertNotIn("女童", top["name"] + top["path"])
-        self.assertNotIn("运动", top["name"] + top["path"])
+        leaf_ids = {
+            item["category_id"] for item in category_leaf_candidates(self.tree)
+        }
+        self.assertEqual(taxonomy.category.method, "local-lexical-ranking")
+        self.assertIn(taxonomy.category.category_id, leaf_ids)
+        scores = [item["score"] for item in taxonomy.category.candidates]
+        self.assertEqual(scores, sorted(scores, reverse=True))
 
-    def test_hidden_shorts_ranking_enforces_length_and_avoids_unverified_specialization(self) -> None:
+    def test_local_fallback_does_not_require_source_category_or_product_id(self) -> None:
         facts = load_product_facts(
             DATA / "product_info/product_9493156931235.json"
         )
@@ -704,8 +838,9 @@ class FactAndTaxonomyTests(unittest.TestCase):
             load_json(DATA / "clothing_categories.json"),
             load_json(DATA / "clothing_attributes.json"),
         )
-        self.assertEqual(taxonomy.category.candidates[0]["category_id"], "30341")
-        self.assertNotIn("长裤", taxonomy.category.candidates[0]["path"])
+        self.assertTrue(taxonomy.category.candidates)
+        self.assertNotEqual(taxonomy.category.category_id, facts.offer_id)
+        self.assertNotIn(facts.offer_id, repr(taxonomy.category.candidates))
 
     def test_canonical_storyboard_cannot_be_overridden_by_model_slots(self) -> None:
         facts = load_product_facts(DATA / "product_info/product_9493156931235.json")
@@ -1040,20 +1175,7 @@ Natural localized overview.
         buyer, _ = _description_language_surfaces(contaminated, "en")
         self.assertRegex(buyer, r"[\u4e00-\u9fff]")
 
-    def test_sample_categories_resolve_to_leaf_nodes(self) -> None:
-        expected = {
-            "3887087154767": "29073",
-            "5681480836479": "28951",
-            "5758364264251": "29069",
-            "5977010166484": "28976",
-            "6786311895552": "39107",
-            "6837006744133": "30408",
-            "8409262509816": "39107",
-            "8688570444629": "30843",
-            "8822221153828": "39153",
-            "9451226053560": "30471",
-            "9493156931235": "30341",
-        }
+    def test_every_input_resolves_to_a_leaf_without_sample_lookup(self) -> None:
         leaf_ids = {
             str(node["catId"])
             for node in _walk_objects(self.tree)
@@ -1062,34 +1184,102 @@ Natural localized overview.
         for product_path in sorted((DATA / "product_info").glob("*.json")):
             facts = load_product_facts(product_path)
             result = resolve_taxonomy(facts, self.tree, self.attributes)
-            self.assertEqual(result.category.category_id, expected[facts.offer_id])
             self.assertIn(result.category.category_id, leaf_ids)
 
-    def test_sample_taxonomy_and_key_attributes_match_golden_set(self) -> None:
+    def test_constrained_model_choice_accepts_any_supplied_golden_leaf(self) -> None:
         golden = load_json(ROOT / "rules/sample_taxonomy_gold_v1.json")
         for offer_id, expected in golden["products"].items():
             facts = load_product_facts(
                 DATA / f"product_info/product_{offer_id}.json"
             )
-            result = resolve_taxonomy(facts, self.tree, self.attributes)
-            self.assertEqual(result.category.category_id, expected["category_id"])
-            actual = {
-                (
-                    item.source_name,
-                    item.source_value,
-                    item.attr_id,
-                    item.value_id,
-                )
-                for item in result.attributes
-            }
-            for mapping in expected["key_mappings"]:
-                self.assertIn(tuple(mapping), actual, (offer_id, mapping))
-            self.assertEqual(
-                sum(item.sales_attribute for item in result.attributes),
-                expected["sales_mapping_count"],
-                offer_id,
+            result = resolve_taxonomy(
+                facts,
+                self.tree,
+                self.attributes,
+                preferred_category_id=expected["category_id"],
             )
-            self.assertEqual(result.missing_required, expected["missing_required"])
+            self.assertEqual(result.category.category_id, expected["category_id"])
+            self.assertEqual(
+                result.category.method, "model-constrained-all-leaves"
+            )
+
+    def test_online_taxonomy_considers_every_leaf_and_validates_model_mapping(self) -> None:
+        target_id = "30408"
+
+        class FullLeafClient:
+            def __init__(self) -> None:
+                self.prompts: list[str] = []
+
+            def chat_json(self, _system, prompt):
+                self.prompts.append(prompt)
+                if "LEAF BATCH" in prompt:
+                    batch_ids = re.findall(r"(?m)^(\d+) \|", prompt)
+                    selected = target_id if target_id in batch_ids else batch_ids[0]
+                    return {"selected_category_ids": [selected]}
+                if "Map source facts" in prompt:
+                    return {
+                        "mappings": [
+                            {
+                                "scope": "product",
+                                "platform_attr_id": "100157",
+                                "platform_value_id": "1000011",
+                                "source_kind": "product",
+                                "source_name": "主面料成分",
+                                "source_value": "聚酯纤维（涤纶）",
+                            }
+                        ]
+                    }
+                return {
+                    "selected_category_id": target_id,
+                    "selected_attribute_schema_category_id": "39107",
+                    "evidence": "title, source category and attributes",
+                }
+
+        facts = load_product_facts(
+            DATA / "product_info/product_6837006744133.json"
+        )
+        initial = resolve_taxonomy(facts, self.tree, self.attributes)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=Path(temp_dir),
+                logger=logging.getLogger("full-leaf-taxonomy-test"),
+                offline=True,
+            )
+            client = FullLeafClient()
+            pipeline.client = client
+            result = pipeline._adjudicate_taxonomy(
+                facts, initial, self.tree, self.attributes
+            )
+
+        all_leaf_ids = {
+            item["category_id"] for item in category_leaf_candidates(self.tree)
+        }
+        screened_ids = {
+            item
+            for prompt in client.prompts
+            if "LEAF BATCH" in prompt
+            for item in re.findall(r"(?m)^(\d+) \|", prompt)
+        }
+        self.assertEqual(screened_ids, all_leaf_ids)
+        self.assertEqual(result.category.category_id, target_id)
+        self.assertEqual(result.attribute_schema_category_id, "39107")
+        self.assertEqual(len(result.attributes), 1)
+        self.assertEqual(result.attributes[0].source_name, "主面料成分")
+
+    def test_runtime_has_no_benchmark_offer_id_lookup(self) -> None:
+        offer_ids = {
+            load_product_facts(path).offer_id
+            for path in (DATA / "product_info").glob("*.json")
+        }
+        runtime_source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "crossborder_agent").glob("*.py")
+        )
+        for offer_id in offer_ids:
+            self.assertNotIn(offer_id, runtime_source)
+        self.assertNotIn("_SOURCE_CATEGORY_IDS", runtime_source)
+        self.assertNotIn("_METADATA_SCHEMA_FALLBACKS", runtime_source)
 
     def test_rendered_copy_contains_every_required_identifier(self) -> None:
         facts = load_product_facts(DATA / "product_info/product_3887087154767.json")
@@ -1124,8 +1314,7 @@ Natural localized overview.
                 language, payload, facts, taxonomy
             )
 
-        self.assertIn("Halter neck", rendered["en"].splitlines()[0])
-        self.assertIn("Cold-shoulder", rendered["en"].splitlines()[0])
+        self.assertNotRegex(rendered["en"].splitlines()[0], r"[\u4e00-\u9fff]")
         self.assertIn("| Product | 100157 | Material | 1001111 | Viscose |", rendered["en"])
         self.assertIn("Listed material", rendered["en"])
         self.assertNotIn("| Main material | Viscose |", rendered["en"])
@@ -1154,7 +1343,7 @@ Natural localized overview.
         shorts = load_product_facts(DATA / "product_info/product_9493156931235.json")
         shorts_taxonomy = resolve_taxonomy(shorts, self.tree, self.attributes)
         shorts_plan = fallback_creative_plan(shorts, shorts_taxonomy)
-        self.assertIn("do not introduce a wearer", shorts_plan.main_prompt)
+        self.assertIn("do not introduce a person", shorts_plan.main_prompt)
         self.assertIn("source-visible", shorts_plan.detail_prompts[1])
         self.assertNotIn("waistband", " ".join(shorts_plan.detail_prompts))
         self.assertNotIn("both legs", shorts_plan.video_prompt)
@@ -1230,10 +1419,9 @@ Natural localized overview.
         payload, _ = generate_copy_payload("en", facts, taxonomy, plan, None)
         rendered = render_description("en", payload, facts, taxonomy)
 
-        self.assertEqual(
-            rendered.splitlines()[0],
-            "# Women's T-Shirt with a vintage floral print, a V-neck, long sleeves, and a relaxed fit",
-        )
+        self.assertTrue(rendered.splitlines()[0].startswith("# "))
+        self.assertNotIn("Seller-declared source value", rendered.splitlines()[0])
+        self.assertNotRegex(rendered.splitlines()[0], r"[\u4e00-\u9fff]")
         self.assertIn("V-neckline creates a clean, open shape", rendered)
         self.assertIn("Relaxed fit leaves room through the body", rendered)
         self.assertIn(
@@ -1247,10 +1435,10 @@ Natural localized overview.
 
     def test_category_titles_generalize_without_product_or_category_id_branches(self) -> None:
         cases = {
-            "8688570444629": ("Boys' T-shirt with short sleeves", "Cotton"),
-            "9493156931235": ("Men's flat-front shorts", "Straight cut"),
+            "8688570444629": "Cotton",
+            "9493156931235": "Straight cut",
         }
-        for product_id, (title_fragment, feature_fragment) in cases.items():
+        for product_id, feature_fragment in cases.items():
             with self.subTest(product_id=product_id):
                 facts = load_product_facts(
                     DATA / f"product_info/product_{product_id}.json"
@@ -1261,10 +1449,9 @@ Natural localized overview.
                     "en", facts, taxonomy, plan, None
                 )
                 rendered = render_description("en", payload, facts, taxonomy)
-                self.assertIn(title_fragment, rendered.splitlines()[0])
                 self.assertIn(feature_fragment, rendered)
                 self.assertNotIn("Seller-declared source value", rendered)
-                self.assertNotIn("MenChildren", rendered)
+                self.assertNotRegex(rendered.splitlines()[0], r"[\u4e00-\u9fff]")
 
 
 def _walk_objects(value):

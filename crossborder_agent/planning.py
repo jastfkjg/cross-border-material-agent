@@ -95,24 +95,23 @@ def _main_presentation(
     facts: ProductFacts, taxonomy: TaxonomyResult, vision: dict[str, Any] | None
 ) -> str:
     common = (
-        "Show one sellable product in one verified colorway as the single dominant subject. The complete garment "
+        "Show one sellable product in one verified variant as the single dominant subject. The complete product "
         "must be visible from its highest to lowest product edge, with every source-visible section unobstructed. "
-        "No colorway lineup, "
-        "duplicate garment, inset, split screen, montage or collage. "
+        "No unsupported variant lineup, duplicate product, inset, split screen, montage or collage. "
     )
     if _is_children_product(facts, taxonomy):
         return common + (
-            "Use a product-only studio presentation such as a clean flat lay, hanger or invisible form; do not "
+            "Use a clean product-only studio presentation on an appropriate neutral support or surface; do not "
             "add a child, adult, hands, toys or character props."
         )
     if _source_supports_wearer(vision):
         return common + (
-            "Prefer a product-only flat lay, hanger or invisible-form presentation. A single naturally proportioned, "
-            "fully clothed adult wearer is optional because a trusted source already shows a wearer; keep the product "
+            "Prefer a product-only presentation on an appropriate neutral support or surface. A single naturally "
+            "proportioned, fully clothed adult user is optional because a trusted source already shows a person; keep the product "
             "unobstructed and the background clean."
         )
     return common + (
-        "Use a product-only flat lay, hanger or invisible-form presentation; do not introduce a wearer that is absent "
+        "Use a product-only presentation on an appropriate neutral support or surface; do not introduce a person that is absent "
         "from the inspected source references."
     )
 
@@ -146,8 +145,8 @@ def _detail_slot_specs(
         "This is detail slot 5: show one naturally proportioned, fully clothed adult in the kind of restrained use "
         "context already supported by a trusted source. Keep the complete product unobstructed and do not alter fit."
         if wearer_supported
-        else "This is detail slot 5: create a product-only practical context using a clean flat lay, hanger or "
-        "invisible form. Do not introduce a wearer, body, hand or product accessory absent from trusted references."
+        else "This is detail slot 5: create a product-only practical context using an appropriate clean surface, stand "
+        "or support. Do not introduce a person, body, hand or accessory absent from trusted references."
     )
     return (
         (
@@ -163,7 +162,7 @@ def _detail_slot_specs(
         ),
         (
             "secondary_verified_detail",
-            "This is detail slot 3: show a different source-visible construction, edge, drape, texture or surface-design "
+            "This is detail slot 3: show a different source-visible construction, edge, geometry, texture or surface-design "
             "feature while retaining enough product context for identification. It must not repeat slot 2."
             + evidence_clause,
         ),
@@ -251,8 +250,8 @@ def fallback_creative_plan(
     slot_directives = tuple(item[1] for item in slot_specs)
     return CreativePlan(
         visual_theme=(
-            "Campaign Style Lock: restrained styling coordinated with every seller-verified product color; realistic "
-            "fabric rendering and role-appropriate variation in background, lighting and framing; coherence comes "
+            "Campaign Style Lock: restrained styling coordinated with every seller-verified product variant; realistic "
+            "material and surface rendering with role-appropriate variation in background, lighting and framing; coherence comes "
             "from product identity rather than identical treatment; no typography, invented logos, or style drift"
         ),
         main_prompt=(
@@ -356,7 +355,7 @@ def create_creative_plan(
         return fallback, "deterministic-fallback"
 
     system = (
-        "You are an expert cross-border fashion e-commerce creative director. Return JSON only. "
+        "You are an expert cross-border marketplace creative director. Return JSON only. "
         "Your plan must prioritize product identity preservation, factual accuracy, AliExpress-ready composition, "
         "cultural neutrality, and a coherent visual set. Generated images must contain no written text."
         + ("\n\n" + skill_instructions if skill_instructions else "")
@@ -380,7 +379,7 @@ and product coverage may vary by commercial role and target-market context; do n
 color count, background system or coverage percentage.
 Details: vertical 4:5; assign exactly one primary commercial job to each slot. Cover the complete product,
 two distinct source-visible details, one verified alternate view or genuinely verified variant comparison,
-and a source-supported practical context. Never name a garment part merely because it is common for the category.
+and a source-supported practical context. Never name a component merely because it is common for the category.
 A perceptually different pose is not sufficient if it repeats another slot's job.
 Do not request measurements, care instructions, material performance, certification, price, discount or brand claims.
 

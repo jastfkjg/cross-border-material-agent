@@ -12,9 +12,9 @@ description: Generate and review localized marketplace copy, hero/detail images 
 - [copy][hard] Use en-US spelling with useful deterministic imperial conversions, natural ko-KR with metric units, and pt-BR vocabulary with metric units; never invent regional size equivalence.
 - [copy][hard] Exclude contact solicitation, promotional links, prices, discounts, urgency, ratings, review counts, unsupported certifications, body-transformation claims and unrelated brands from buyer prose.
 - [copy][soft] Write a natural product-led title, concise overview and distinct source-backed highlights; paragraph and bullet counts are preferences, not reasons to discard otherwise valid copy.
-- [creative-plan][hard] The hero keeps one sellable product as the single dominant subject, complete and unobstructed on a clean near-white background with no added text, watermark, badge, inset or duplicate garment.
-- [creative-plan][soft] Prefer a product-only flat lay, hanger or invisible-form hero. For adult apparel, one natural adult wearer is optional only when a trusted source already supports a wearer; children's products remain product-only.
-- [creative-plan][hard] Each detail has one evidence-supported commercial role; judge a close-up by its assigned local structure and identity anchors rather than requiring the complete garment in every frame.
+- [creative-plan][hard] The hero keeps one sellable product as the single dominant subject, complete and unobstructed on a clean near-white background with no added text, watermark, badge, inset or duplicate product.
+- [creative-plan][soft] Prefer a product-only studio presentation on an appropriate clean support or surface. Include a person, hand or use context only when trusted source evidence supports it.
+- [creative-plan][hard] Each detail has one evidence-supported commercial role; judge a close-up by its assigned local structure and identity anchors rather than requiring the complete product in every frame.
 - [creative-plan][hard] A variant view may show every verified seller color needed for the role; never cap genuine variants to an arbitrary campaign-palette count or invent a color.
 - [creative-plan][hard] Generated images and video contain no added text, price, promotion, contact detail, QR code, platform mark, watermark or invented logo.
 - [creative-plan][hard] The eight-second video may use one continuous move or a coherent multi-shot sequence; in either case identity and temporal stability matter more than a prescribed shot count.

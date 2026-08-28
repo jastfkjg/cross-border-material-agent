@@ -627,7 +627,7 @@ class QwenClient:
             )
         system = (
             "You are a conservative e-commerce visual inspector. Return JSON only. "
-            "Never infer fabric composition, performance, measurements, brand authorization, or care instructions "
+            "Never infer material composition, performance, measurements, brand authorization, or care instructions "
             "from appearance. Separate direct observations from uncertain impressions."
             + ("\n\n" + skill_instructions if skill_instructions else "")
         )
@@ -682,14 +682,14 @@ Return a JSON object with keys:
   - risk_reasons: string[]
 
 Read all visible text as carefully as possible. A product's own sewn label or print still counts as
-has_text and has_intrinsic_product_text, but not has_overlay_text. Marketing captions around the garment
+has_text and has_intrinsic_product_text, but not has_overlay_text. Marketing captions around the product
 count as has_overlay_text. Contact details, QR codes, marketplace marks, watermarks, price/discount badges,
 review graphics, certification seals and sensitive/prohibited content make safe_for_generation_reference false.
 A person, ordinary prop, background text or suspected third-party styling mark makes the source unsuitable
 for direct listing, but it may remain a generation reference when the product is clear and the final generated
 asset removes those elements.
 For size_chart_rows, transcribe only complete, clearly legible rows. Do not estimate obscured digits, convert
-units, rename size codes, or infer measurements from the garment. Return an empty array when no table is legible.
+units, rename size codes, or infer measurements from the product. Return an empty array when no table is legible.
 For a marketplace hero, a person, unrelated prop, multiple products, incomplete product or lifestyle
 background makes the source unsuitable even when it remains usable as a detail reference.
 
@@ -800,9 +800,9 @@ fastening or trim count where visible, surface design and any product logo. Do n
 merely because it is common for the resolved category.
 Reject any candidate that reproduces a background/styling brand, character, store text or logo
 that is not intrinsic to the sellable product.
-Prefer a product-only hero. For adult apparel, a single fully clothed adult wearer is acceptable only
-when a trusted source already shows a wearer, the garment remains complete and unobstructed, anatomy is
-natural, and the clean near-white hero composition is preserved. Never add a wearer for children's goods.
+Prefer a product-only hero. A person or hand is acceptable only when a trusted source already shows that
+kind of use context, the product remains complete and unobstructed, anatomy is natural, and the clean
+near-white hero composition is preserved. Never invent an unsupported person or use scenario.
 
 Verified facts:
 {facts_json}
@@ -847,13 +847,13 @@ Return JSON with:
 
 For a variant lineup, every shown variant must be visibly supported by a source reference.
 Evaluate critical_structure_unambiguous as a quality signal relative to the intended storyboard
-purpose, not as an automatic rejection. A close-up does not need to show the complete garment: it must
+purpose, not as an automatic rejection. A close-up does not need to show the complete product: it must
 clearly show its assigned local feature plus enough identity anchors to connect it to the verified
 product. Reject only when the crop causes actual product-identity drift or fails the assigned slot.
-Full-view, variant and wearer slots should keep every source-visible category-defining section recognizable.
+Full-view, variant and person-context slots should keep every source-visible category-defining section recognizable.
 For a variant lineup, each item must remain unambiguously the same product; a folded, occluded or cropped
 source-visible component must not make the candidate appear to have different construction.
-For a wearer scene, reject malformed hands, limbs, faces, garment fit or body proportions.
+For a person-context scene, reject malformed hands, limbs, faces, product interaction or body proportions.
 Every non-variant detail must use one coherent full-frame composition. Mark unexpected_collage true
 for a montage, grid, split screen, inset, repeated panel, or a hybrid close-up/full-product layout.
 The variant slot may show several complete verified variants in one physical catalog composition, but
@@ -907,7 +907,7 @@ Compare the proposed combination with current_selection. Return JSON with exactl
 - summary: concise string
 
 Each slot must select only a candidate generated for that same slot. Optimize the combination jointly:
-cover distinct shopper decisions across the hero plus five details; avoid repeated full-product views, repeated crops, repeated wearer
+cover distinct shopper decisions across the hero plus five details; avoid repeated full-product views, repeated crops, repeated person-context
 scenes and semantically duplicated backgrounds. Never trade product identity, construction, color,
 pattern, anatomy, compliance or the assigned slot purpose for visual variety. Mark
 selection_improves_current_set true only if the chosen combination is materially better than the
@@ -941,7 +941,7 @@ Current selection by slot:
         system = (
             "You are a strict e-commerce product-video quality gate. Return JSON only. "
             "Compare the generated video with the trusted source product images. Reject identity drift, "
-            "changed color or construction, morphing, duplicated limbs or garments, unreadable or unwanted "
+            "changed color or construction, morphing, duplicated limbs or products, unreadable or unwanted "
             "text, watermarks, violent camera motion, severe flicker, and frames where the product is obscured."
         )
         if current_video_url:
@@ -1058,6 +1058,26 @@ Verified facts:
     def _model_disabled(self, model: str) -> bool:
         with self._disabled_models_lock:
             return model in self._disabled_models
+
+    def model_available(self, model: str) -> bool:
+        """Expose the run-local model circuit breaker to bounded tool planning."""
+
+        return bool(model and not self._model_disabled(model))
+
+    def operation_available(self, operation: str) -> bool:
+        if operation == "image":
+            return any(
+                self.model_available(model)
+                for model in (
+                    self.config.image_model,
+                    self.config.image_fallback_model,
+                )
+            )
+        if operation == "video":
+            return self.model_available(self.config.video_model)
+        if operation in {"chat", "review"}:
+            return True
+        return False
 
     def _disable_model_on_configuration_error(
         self, model: str, error: ApiError
@@ -1186,6 +1206,12 @@ Verified facts:
     def generate_video(
         self, prompt: str, first_frame_url: str, *, negative_prompt: str = ""
     ) -> tuple[str, str]:
+        if not self.model_available(self.config.video_model):
+            raise ApiError(
+                f"video model {self.config.video_model} is disabled for this run",
+                retryable=False,
+                category="model_configuration",
+            )
         body = {
             "model": self.config.video_model,
             "input": {
@@ -1226,6 +1252,9 @@ Verified facts:
                     break
                 except ApiError as exc:
                     last_error = exc
+                    self._disable_model_on_configuration_error(
+                        self.config.video_model, exc
+                    )
                     transient = exc.retryable is True or exc.category in {
                         "rate_limit",
                         "queue",

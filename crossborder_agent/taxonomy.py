@@ -1,4 +1,4 @@
-"""Deterministic-first AliExpress category and attribute resolution."""
+"""Constrained model-first marketplace category and attribute resolution."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from typing import Any, Iterable
 from .models import (
     CategoryChoice,
     MappedAttribute,
-    ProductAttribute,
     ProductFacts,
     TaxonomyResult,
 )
@@ -20,15 +19,17 @@ _SPACE_PUNCT_RE = re.compile(r"[\s、，。,/&（）()\-_]+")
 
 def normalize_label(value: str) -> str:
     normalized = _SPACE_PUNCT_RE.sub("", value or "").lower()
+    # Keep only spelling-level normalization here. Product-family rewrites (for
+    # example treating every short-sleeve item as a T-shirt) silently bake a
+    # benchmark taxonomy into the resolver and can prevent the correct unseen
+    # leaf from ever reaching the model classifier.
     replacements = (
         ("女式", "女士"),
         ("男式", "男士"),
         ("t恤衫", "t恤"),
-        ("短袖", "t恤"),
         ("聚酯纤维", "涤纶"),
         ("图案花纹", "图案"),
         ("材质", "面料成分"),
-        ("服装", "装"),
     )
     for source, target in replacements:
         normalized = normalized.replace(source, target)
@@ -82,62 +83,88 @@ def _metadata_categories(data: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
-_SOURCE_CATEGORY_IDS = {
-    "女式衬衫": "29073",
-    "女式针织衫": "28951",
-    "女式t恤": "29069",
-    "女式毛呢外套": "28976",
-    "连衣裙": "39107",
-    "半身裙": "39153",
-    "男式夹克": "30408",
-    "男式衬衫": "30471",
-}
+def category_leaf_candidates(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every selectable leaf from the supplied taxonomy snapshot."""
+
+    return _flatten_category_tree(data)
 
 
-# The supplied platform dump omits metadata rows for both child T-shirt leaves,
-# while the equivalent T-shirt attribute IDs and enums are stable in the same
-# taxonomy snapshot. Reuse that schema only for mapping fields; the selected
-# child leaf category itself is never changed.
-_METADATA_SCHEMA_FALLBACKS = {
-    "30843": "29069",  # boys' T-shirts -> generic T-shirt field schema
-    "29553": "29069",  # girls' T-shirts -> generic T-shirt field schema
-}
+def attribute_schema_candidates(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return compact, model-safe metadata rows without benchmark-specific IDs."""
 
+    result: list[dict[str, Any]] = []
+    for item in _metadata_categories(data):
+        config = (item.get("raw") or {}).get("categoryMetadata") or {}
 
-def _source_values(facts: ProductFacts, name_fragment: str) -> list[str]:
-    result: list[str] = []
-    for item in facts.attributes:
-        if name_fragment in item.name and item.value not in result:
-            result.append(item.value)
+        def names(field: str) -> list[str]:
+            return [
+                str(definition.get("attributeNameAlias") or definition.get("name") or "")
+                for definition in config.get(field) or []
+                if isinstance(definition, dict)
+            ]
+
+        result.append(
+            {
+                "category_id": item["category_id"],
+                "name": item["name"],
+                "name_chinese": item["name_chinese"],
+                "path": item["path"],
+                "product_attributes": names("categoryProductAttrList"),
+                "sales_attributes": names("categorySaleAttrList"),
+            }
+        )
     return result
 
 
-def _explicit_category_id(facts: ProductFacts) -> str:
-    source_normalized = normalize_label(facts.source_category_name)
-    for name, category_id in _SOURCE_CATEGORY_IDS.items():
-        if normalize_label(name) == source_normalized:
-            return category_id
+def attribute_schema_definition(
+    data: dict[str, Any], schema_category_id: str
+) -> dict[str, Any]:
+    """Return one complete schema in a compact form suitable for model mapping."""
 
-    if (
-        "男式休闲裤" in facts.source_category_name
-        or "男士休闲裤" in facts.source_category_name
-    ):
-        short_markers = ("短裤", "五分", "沙滩裤", "裤衩")
-        return (
-            "30341"
-            if any(marker in facts.source_title for marker in short_markers)
-            else "30335"
-        )
+    selected = _find_category(schema_category_id, _metadata_categories(data))
+    if not selected:
+        return {}
+    config = ((selected.get("raw") or {}).get("categoryMetadata") or {})
 
-    if (
-        "童" in facts.source_category_name
-        and "t恤" in facts.source_category_name.lower()
-    ):
-        genders = " ".join(_source_values(facts, "适用性别") + [facts.source_title])
-        if "女童" in genders and "男童" not in genders and "男女" not in genders:
-            return "29553"
-        return "30843"
-    return ""
+    def simplify(definitions: Any, *, sales: bool) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for definition in definitions or []:
+            if not isinstance(definition, dict):
+                continue
+            result.append(
+                {
+                    "scope": "sales" if sales else "product",
+                    "attr_id": str(definition.get("attrId") or ""),
+                    "name": str(
+                        definition.get("attributeNameAlias")
+                        or definition.get("name")
+                        or ""
+                    ),
+                    "required": bool(definition.get("isMandatory")),
+                    "multiple": bool(definition.get("isMultipleSelected")),
+                    "values": [
+                        {
+                            "value_id": str(value.get("id") or ""),
+                            "name": str(
+                                value.get("valueNameAlias")
+                                or value.get("name")
+                                or ""
+                            ),
+                        }
+                        for value in definition.get("values") or []
+                        if isinstance(value, dict)
+                    ],
+                }
+            )
+        return result
+
+    return {
+        "category_id": schema_category_id,
+        "attributes": [
+            *simplify(config.get("categoryProductAttrList"), sales=False),
+            *simplify(config.get("categorySaleAttrList"), sales=True),
+        ],
+    }
 
 
 def _char_overlap(left: str, right: str) -> float:
@@ -147,210 +174,38 @@ def _char_overlap(left: str, right: str) -> float:
     return len(a & b) / len(a | b)
 
 
-_CATEGORY_FAMILIES = {
-    "tshirt": ("t恤", "tee", "t-shirt", "t shirt"),
-    "shirt": ("衬衫", "blouse", "shirt"),
-    "knit": ("针织衫", "毛衣", "sweater", "pullover", "knitwear"),
-    "coat": ("外套", "夹克", "大衣", "jacket", "coat"),
-    "dress": ("连衣裙", "dress"),
-    "skirt": ("半身裙", "skirt"),
-    "shorts": ("短裤", "五分裤", "shorts"),
-    "pants": ("休闲裤", "长裤", "裤子", "pants", "trousers"),
-}
-
-_CATEGORY_AUDIENCES = {
-    "girls": ("女童", "girls", "girl"),
-    "boys": ("男童", "boys", "boy"),
-    "women": ("女式", "女士", "女装", "women", "woman"),
-    "men": ("男式", "男士", "男装", "men", "man"),
-}
-
-_SPECIALIZED_CATEGORY_MARKERS = (
-    "大码",
-    "孕妇",
-    "户外",
-    "高尔夫",
-    "滑冰",
-    "运动",
-    "传统",
-    "民族",
-    "配饰",
-    "舞台",
-    "制服",
-    "体育专用",
-    "足球",
-    "篮球",
-    "棒球",
-    "曲棍球",
-    "橄榄球",
-    "瑜伽",
-    "舞蹈",
-    "工装",
-    "打褶",
-    "牛仔",
-    "新奇",
-)
-
-
-def _semantic_groups(text: str, groups: dict[str, tuple[str, ...]]) -> set[str]:
-    folded = normalize_label(text or "")
-    return {
-        name
-        for name, markers in groups.items()
-        if any(normalize_label(marker) in folded for marker in markers)
-    }
-
-
-def _source_audience_groups(facts: ProductFacts) -> set[str]:
-    """Infer audience from title/category plus explicit gender/age attributes."""
-
-    evidence = " ".join(
-        [
-            facts.source_title,
-            facts.source_category_name,
-            *[
-                item.value
-                for item in facts.attributes
-                if any(
-                    marker in item.name
-                    for marker in ("性别", "人群", "年龄", "童")
-                )
-            ],
-        ]
-    )
-    folded = normalize_label(evidence)
-    audiences = _semantic_groups(evidence, _CATEGORY_AUDIENCES)
-    child_context = any(marker in folded for marker in ("童", "儿童", "婴幼"))
-    if child_context:
-        if "女" in folded:
-            audiences.add("girls")
-        if "男" in folded:
-            audiences.add("boys")
-    else:
-        if "女" in folded:
-            audiences.add("women")
-        if "男" in folded:
-            audiences.add("men")
-    return audiences
-
-
 def _category_score(facts: ProductFacts, candidate: dict[str, Any]) -> float:
+    """Generic lexical recall score; the model makes the final online decision.
+
+    The score deliberately contains no product-family, audience, category-ID or
+    benchmark-value branches. Its job is to provide an offline fallback and a
+    diagnostic ordering, not to encode the correct leaf answer.
+    """
+
     source = normalize_label(facts.source_category_name)
     title = normalize_label(facts.source_title)
     name = normalize_label(
         candidate.get("name", "") + candidate.get("name_chinese", "")
     )
     path = normalize_label(candidate.get("path", ""))
-    score = SequenceMatcher(None, source, name).ratio() * 55
-    score += _char_overlap(source, name) * 30
-    score += _char_overlap(source, path) * 15
-
-    type_values = "".join(
-        _source_values(facts, "产品类别") + _source_values(facts, "裙类别")
-    )
-    clues = normalize_label(type_values + facts.source_category_name)
-    score += _char_overlap(clues, name) * 20
-
-    raw_source_evidence = " ".join(
-        [
-            facts.source_category_name,
-            facts.source_title,
-            type_values,
-            *[f"{item.name}:{item.value}" for item in facts.attributes],
-        ]
-    )
-    raw_candidate = " ".join(
-        [
-            str(candidate.get("name") or ""),
-            str(candidate.get("name_chinese") or ""),
-            str(candidate.get("path") or ""),
-        ]
-    )
-    source_families = _semantic_groups(raw_source_evidence, _CATEGORY_FAMILIES)
-    candidate_families = _semantic_groups(raw_candidate, _CATEGORY_FAMILIES)
-    if source_families and candidate_families:
-        score += 28 if source_families & candidate_families else -48
-    source_audiences = _source_audience_groups(facts)
-    candidate_audiences = _semantic_groups(raw_candidate, _CATEGORY_AUDIENCES)
-    if source_audiences and candidate_audiences:
-        score += 16 if source_audiences & candidate_audiences else -52
-    # Specialised leaves need direct intent evidence from the title/category or
-    # an explicit use/sport field. Generic source fields named "类别" often carry
-    # loose supplier tags such as 运动休闲裤 and must not route an everyday item
-    # into a sport-specific taxonomy subtree.
-    specialization_evidence = " ".join(
-        [
-            facts.source_title,
-            facts.source_category_name,
-            *[
-                item.value
-                for item in facts.attributes
-                if any(marker in item.name for marker in ("适用场景", "用途", "运动项目"))
-            ],
-        ]
-    )
-    normalized_evidence = normalize_label(specialization_evidence)
-    normalized_candidate = normalize_label(raw_candidate)
-    for marker in _SPECIALIZED_CATEGORY_MARKERS:
-        normalized_marker = normalize_label(marker)
-        if (
-            normalized_marker in normalized_candidate
-            and normalized_marker not in normalized_evidence
-        ):
-            score -= 34
-
-    length_evidence = " ".join(
-        [
-            facts.source_title,
-            *[
-                item.value
-                for item in facts.attributes
-                if any(marker in item.name for marker in ("裤长", "裙长", "衣长"))
-            ],
-        ]
-    )
-    source_length = _semantic_groups(length_evidence, {
-        "shorts": ("短裤", "五分裤", "三分裤", "七分裤", "裤衩", "shorts"),
-        "long_pants": ("长裤", "九分裤", "pants", "trousers"),
-    })
-    candidate_length = _semantic_groups(raw_candidate, {
-        "shorts": ("短裤", "五分裤", "shorts"),
-        "long_pants": ("长裤", "pants", "trousers"),
-    })
-    if "shorts" in source_length and "long_pants" in candidate_length and "shorts" not in candidate_length:
-        score -= 120
-    if "long_pants" in source_length and "shorts" in candidate_length and "long_pants" not in candidate_length:
-        score -= 120
-
-    # When no specialised purpose is verified, prefer the ordinary apparel
-    # subtree over otherwise lexically similar sport/uniform leaves.
-    if (
-        source_length & candidate_length
-        and "男装短裤" in raw_candidate
-        and not any(
-            normalize_label(marker) in normalized_evidence
-            for marker in _SPECIALIZED_CATEGORY_MARKERS
+    evidence = normalize_label(
+        " ".join(
+            [
+                facts.source_category_name,
+                facts.source_title,
+                *[f"{item.name}:{item.value}" for item in facts.attributes],
+            ]
         )
-    ):
-        score += 24
-
-    normalized_source_category = normalize_label(facts.source_category_name)
-    if normalized_source_category and normalized_source_category == name:
-        score += 35
-    elif normalized_source_category and (
-        normalized_source_category in name or name in normalized_source_category
-    ):
-        score += 18
-    if any(token in title for token in ("男", "男士", "男童")) and "女士" in path:
-        score -= 40
-    if any(token in title for token in ("女", "女士", "女童")) and "男士" in path:
-        score -= 40
-    if "童" in title and "童" not in path:
-        score -= 35
-    if "短裤" in title and "短裤" in path:
+    )
+    score = SequenceMatcher(None, source, name).ratio() * 45
+    score += _char_overlap(source, name) * 25
+    score += _char_overlap(source, path) * 15
+    score += _char_overlap(title, name) * 10
+    score += _char_overlap(evidence, name + path) * 5
+    if source and source == name:
         score += 30
-    if "连衣裙" in title and "连衣裙" in path:
-        score += 30
+    elif source and (source in name or name in source):
+        score += 15
     return score
 
 
@@ -394,37 +249,6 @@ def _category_parent_map(data: dict[str, Any]) -> dict[str, str]:
     return parents
 
 
-_ATTRIBUTE_NAME_SYNONYMS = {
-    "面料成分": {"主面料成分", "面料", "面料名称", "材质", "材质成分", "织物"},
-    "面料成分含量": {
-        "主面料成分含量",
-        "面料成分含量",
-        "材质含量",
-        "成分含量",
-    },
-    "图案": {"图案", "图案花纹"},
-    "包容度": {"版型", "包容度", "廓形", "剪裁"},
-    "领型": {"领型", "衣领类型", "领口", "领口类型"},
-    "袖长": {"袖长", "袖子长度"},
-    "袖型": {"袖型", "袖子类型", "袖子款式"},
-    "衣长": {"衣长", "上衣长度"},
-    "裤长": {"裤长", "裤子长度"},
-    "裤型": {"裤型", "裤子版型"},
-    "腰型": {"腰型", "腰高", "腰线", "腰部类型"},
-    "裙长": {"裙长", "裙子长度"},
-    "裙型": {"裙型", "裙子版型"},
-    "风格": {"风格", "风格类型", "跨境风格类型"},
-    "季节": {"适合季节", "上市年份季节", "上市年份/季节", "季节"},
-    "场合": {"适用场景", "场合", "风格", "跨境风格类型"},
-    "设计": {"设计", "流行元素"},
-    "尺码类型": {"尺码类型"},
-    "颜色": {"颜色", "色彩", "颜色分类", "色号"},
-    "尺码": {"尺码", "适合身高", "规格", "大小"},
-    "适用性别": {"适用性别", "性别", "适合人群"},
-    "产品类别": {"产品类别", "类别", "品类", "商品类型"},
-}
-
-
 def _name_match_score(source_name: str, platform_alias: str) -> float:
     source = normalize_label(source_name)
     platform = normalize_label(platform_alias)
@@ -436,62 +260,9 @@ def _name_match_score(source_name: str, platform_alias: str) -> float:
         return 0.0
     if source == platform:
         return 1.0
-    # Prefer the semantically exact source field when a broad compatibility
-    # synonym (for example 风格) could otherwise tie with 适用场景 for 场合.
-    preferred_sources = {
-        "场合": {"适用场景", "场合"},
-    }
-    if platform in preferred_sources and source in {
-        normalize_label(item) for item in preferred_sources[platform]
-    }:
-        return 0.99
-    for canonical, alternatives in _ATTRIBUTE_NAME_SYNONYMS.items():
-        normalized = {normalize_label(item) for item in alternatives | {canonical}}
-        if source in normalized and platform in normalized:
-            return 0.95
     if source in platform or platform in source:
         return 0.8
     return SequenceMatcher(None, source, platform).ratio() * 0.55
-
-
-_VALUE_EQUIVALENTS = (
-    {"纯色", "素色"},
-    {"宽松型", "宽松"},
-    {"修身型", "修身"},
-    {"polo领", "马球领"},
-    {"涤纶", "涤纶聚酯纤维", "聚酯纤维"},
-    {"春", "春季"},
-    {"夏", "夏季"},
-    {"秋", "秋季"},
-    {"冬", "冬季"},
-    {"休闲风", "舒适休闲", "休闲"},
-    {"普通款", "中"},
-)
-
-# Atomic aliases let a composite seller value map to every supported option
-# when the destination field is multi-select. This is intentionally separate
-# from whole-value equivalence: "Japanese & Korean casual" must not collapse
-# to only Korean.
-_ATOMIC_VALUE_EQUIVALENTS = (
-    {"日", "日本", "日式", "日系"},
-    {"韩", "韩国", "韩式", "韩系", "韩语"},
-)
-
-
-def _equivalent_value(left: str, right: str) -> bool:
-    if right == normalize_label("中") and (
-        "普通款" in left or ("50cm" in left and "65cm" in left)
-    ):
-        return True
-    for group in _VALUE_EQUIVALENTS:
-        normalized = {normalize_label(item) for item in group}
-        if left in normalized and right in normalized:
-            return True
-    if any(token in left for token in ("春季", "夏季", "秋季", "冬季")):
-        return any(
-            token in left and token in right for token in ("春", "夏", "秋", "冬")
-        )
-    return False
 
 
 def _value_match(source_value: str, values: list[dict[str, Any]]) -> tuple[str, str]:
@@ -508,8 +279,6 @@ def _value_match(source_value: str, values: list[dict[str, Any]]) -> tuple[str, 
                 continue
             if source == normalized:
                 score = 1.0
-            elif _equivalent_value(source, normalized):
-                score = 0.96
             elif min(len(source), len(normalized)) >= 2 and (
                 source in normalized or normalized in source
             ):
@@ -523,32 +292,6 @@ def _value_match(source_value: str, values: list[dict[str, Any]]) -> tuple[str, 
     return "", source_value
 
 
-def _season_value_matches(
-    source_value: str, values: list[dict[str, Any]]
-) -> list[tuple[str, str]]:
-    """Resolve a seller-declared multi-season value without choosing one arbitrarily."""
-
-    source = normalize_label(source_value)
-    if "四季" in source:
-        value_id, platform_value = _value_match("四季", values)
-        return [(value_id, platform_value)] if value_id else []
-    markers = (
-        ("春", "春"),
-        ("夏", "夏"),
-        ("秋", "秋"),
-        ("冬", "冬季"),
-    )
-    result: list[tuple[str, str]] = []
-    for marker, platform_label in markers:
-        if marker not in source:
-            continue
-        value_id, platform_value = _value_match(platform_label, values)
-        pair = (value_id, platform_value)
-        if value_id and pair not in result:
-            result.append(pair)
-    return result
-
-
 def _multiple_value_matches(
     source_value: str, values: list[dict[str, Any]]
 ) -> list[tuple[str, str]]:
@@ -556,15 +299,6 @@ def _multiple_value_matches(
 
     source = normalize_label(source_value)
     matches: list[tuple[str, str]] = []
-    atomic_groups = [
-        {normalize_label(item) for item in group}
-        for group in _ATOMIC_VALUE_EQUIVALENTS
-    ]
-    short_marker_groups = {
-        index
-        for index, group in enumerate(atomic_groups)
-        if any(len(item) == 1 and item in source for item in group)
-    }
     for value in values:
         alias = str(value.get("valueNameAlias") or "")
         name = str(value.get("name") or "")
@@ -572,28 +306,6 @@ def _multiple_value_matches(
         represented = any(
             len(candidate) >= 2 and candidate in source for candidate in candidates
         )
-        if not represented:
-            for index, normalized_group in enumerate(atomic_groups):
-                source_mentions_long_alias = any(
-                    len(item) >= 2 and item in source for item in normalized_group
-                )
-                source_is_atomic_marker = source in {
-                    item for item in normalized_group if len(item) == 1
-                }
-                source_is_compound_abbreviation = (
-                    index in short_marker_groups and len(short_marker_groups) >= 2
-                )
-                source_mentions_group = (
-                    source_mentions_long_alias
-                    or source_is_atomic_marker
-                    or source_is_compound_abbreviation
-                )
-                value_belongs_to_group = any(
-                    item in normalized_group for item in candidates
-                )
-                if source_mentions_group and value_belongs_to_group:
-                    represented = True
-                    break
         pair = (str(value.get("id") or ""), alias or name)
         if represented and pair[0] and pair not in matches:
             matches.append(pair)
@@ -619,15 +331,6 @@ def _map_attribute_group(
         )
         required = bool(definition.get("isMandatory"))
         source_attributes = list(facts.attributes)
-        if "尺码类型" in alias and "大码" in facts.source_title:
-            source_attributes.append(
-                ProductAttribute(
-                    attribute_id="",
-                    name="尺码类型",
-                    value="大码",
-                    evidence_pointer=facts.source_title_evidence_pointer,
-                )
-            )
         matches = sorted(
             ((_name_match_score(item.name, alias), item) for item in source_attributes),
             key=lambda pair: pair[0],
@@ -681,9 +384,7 @@ def _map_attribute_group(
         for item in accepted:
             values = definition.get("values") or []
             resolved_values = (
-                _season_value_matches(item.value, values)
-                if multiple and "季节" in alias and values
-                else _multiple_value_matches(item.value, values)
+                _multiple_value_matches(item.value, values)
                 if multiple and values
                 else [_value_match(item.value, values)]
             )
@@ -710,12 +411,109 @@ def _map_attribute_group(
     return mapped, missing
 
 
+def apply_model_attribute_mappings(
+    facts: ProductFacts,
+    taxonomy: TaxonomyResult,
+    attribute_data: dict[str, Any],
+    decisions: Any,
+) -> TaxonomyResult:
+    """Install only model mappings that are fully grounded in supplied IDs and facts.
+
+    The model performs semantic matching, while this function owns authority:
+    invented attributes, enum values, source names, and source values are rejected.
+    An empty or malformed response leaves the deterministic fallback untouched.
+    """
+
+    schema = attribute_schema_definition(
+        attribute_data, taxonomy.attribute_schema_category_id
+    )
+    definitions = {
+        (item["scope"], item["attr_id"]): item
+        for item in schema.get("attributes") or []
+        if item.get("attr_id")
+    }
+    source_rows: dict[tuple[str, str, str], str] = {}
+    for item in facts.attributes:
+        source_rows.setdefault(
+            ("product", item.name, item.value), item.evidence_pointer
+        )
+    for sku in facts.skus:
+        for item in sku.attributes:
+            source_rows.setdefault(("sku", item.name, item.value), item.evidence_pointer)
+
+    if not isinstance(decisions, list):
+        return taxonomy
+    validated: list[MappedAttribute] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for row in decisions:
+        if not isinstance(row, dict):
+            continue
+        scope = str(row.get("scope") or "")
+        attr_id = str(row.get("platform_attr_id") or "")
+        definition = definitions.get((scope, attr_id))
+        source_kind = str(row.get("source_kind") or "")
+        source_name = str(row.get("source_name") or "")
+        source_value = str(row.get("source_value") or "")
+        evidence_pointer = source_rows.get(
+            (source_kind, source_name, source_value), ""
+        )
+        if not definition or not evidence_pointer:
+            continue
+        values = {
+            str(value.get("value_id") or ""): str(value.get("name") or "")
+            for value in definition.get("values") or []
+            if value.get("value_id")
+        }
+        value_id = str(row.get("platform_value_id") or "")
+        if values and value_id not in values:
+            continue
+        if not values:
+            value_id = ""
+        key = (scope, attr_id, value_id, source_name, source_value)
+        if key in seen:
+            continue
+        seen.add(key)
+        validated.append(
+            MappedAttribute(
+                attr_id=attr_id,
+                name=str(definition.get("name") or ""),
+                source_name=source_name,
+                source_value=source_value,
+                source_evidence_pointer=evidence_pointer,
+                value_id=value_id,
+                platform_value=values.get(value_id, source_value),
+                required=bool(definition.get("required")),
+                sales_attribute=scope == "sales",
+            )
+        )
+    if not validated:
+        return taxonomy
+    present = {
+        ("sales" if item.sales_attribute else "product", item.attr_id)
+        for item in validated
+    }
+    missing_required = [
+        str(item.get("name") or "")
+        for item in schema.get("attributes") or []
+        if item.get("required")
+        and (str(item.get("scope") or ""), str(item.get("attr_id") or ""))
+        not in present
+    ]
+    return TaxonomyResult(
+        category=taxonomy.category,
+        attributes=validated,
+        missing_required=missing_required,
+        attribute_schema_category_id=taxonomy.attribute_schema_category_id,
+    )
+
+
 def resolve_taxonomy(
     facts: ProductFacts,
     category_tree: dict[str, Any],
     attribute_data: dict[str, Any],
     *,
     preferred_category_id: str = "",
+    preferred_attribute_schema_id: str = "",
 ) -> TaxonomyResult:
     leaves = _flatten_category_tree(category_tree)
     metadata = _metadata_categories(attribute_data)
@@ -724,17 +522,14 @@ def resolve_taxonomy(
     # must never enter the selectable category candidate set.
     candidates = _best_candidates(facts, leaves)
 
-    explicit_id = preferred_category_id or _explicit_category_id(facts)
-    selected = _find_category(explicit_id, leaves)
+    selected = _find_category(preferred_category_id, leaves)
     if selected:
         choice = CategoryChoice(
             category_id=selected["category_id"],
             name=selected["name"],
             path=selected["path"],
-            confidence=0.92 if preferred_category_id else 0.98,
-            method="model-constrained-candidate"
-            if preferred_category_id
-            else "curated-source-alias",
+            confidence=0.92,
+            method="model-constrained-all-leaves",
             candidates=candidates,
         )
     elif candidates:
@@ -764,16 +559,42 @@ def resolve_taxonomy(
             candidates=[],
         )
 
-    selected_metadata = _find_category(choice.category_id, metadata)
+    selected_metadata = _find_category(preferred_attribute_schema_id, metadata)
+    if not selected_metadata:
+        selected_metadata = _find_category(choice.category_id, metadata)
     if not selected_metadata:
         parents = _category_parent_map(category_tree)
         ancestor_id = parents.get(choice.category_id, "")
         while ancestor_id and not selected_metadata:
             selected_metadata = _find_category(ancestor_id, metadata)
             ancestor_id = parents.get(ancestor_id, "")
-    if not selected_metadata:
-        fallback_metadata_id = _METADATA_SCHEMA_FALLBACKS.get(choice.category_id, "")
-        selected_metadata = _find_category(fallback_metadata_id, metadata)
+    if not selected_metadata and metadata:
+        # Some taxonomy snapshots omit metadata for individual leaves. Select a
+        # schema generically by label/path similarity instead of maintaining a
+        # benchmark category-ID substitution table. In full mode the model may
+        # supply preferred_attribute_schema_id and takes precedence over this
+        # conservative offline fallback.
+        target = f"{choice.name} {choice.path}"
+        ranked_metadata = sorted(
+            metadata,
+            key=lambda item: max(
+                SequenceMatcher(
+                    None,
+                    normalize_label(target),
+                    normalize_label(
+                        f"{item.get('name', '')} {item.get('name_chinese', '')} {item.get('path', '')}"
+                    ),
+                ).ratio(),
+                _char_overlap(
+                    normalize_label(target),
+                    normalize_label(
+                        f"{item.get('name', '')} {item.get('name_chinese', '')} {item.get('path', '')}"
+                    ),
+                ),
+            ),
+            reverse=True,
+        )
+        selected_metadata = ranked_metadata[0]
     if not selected_metadata:
         return TaxonomyResult(category=choice)
 

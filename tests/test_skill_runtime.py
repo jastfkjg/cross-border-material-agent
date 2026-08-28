@@ -38,12 +38,12 @@ class SkillCompilationTests(unittest.TestCase):
         self.assertNotIn("no more than three colors", compiled.casefold())
         self.assertNotIn("three-act", compiled.casefold())
         self.assertIn("single dominant subject", compiled)
-        self.assertIn("adult wearer is optional", compiled)
+        self.assertIn("person, hand or use context only when trusted source evidence supports it", compiled)
 
     def test_grounding_and_delivery_rules_avoid_ambiguous_or_duplicate_policy(self) -> None:
         source_rules = self.skills.compile("source-vision", "product-grounding")
-        self.assertIn("adult sexual content", source_rules)
-        self.assertIn("ordinary clothed adult apparel model is not prohibited", source_rules)
+        self.assertIn("sexually explicit content", source_rules)
+        self.assertIn("ordinary non-sensitive product-use scene is not prohibited", source_rules)
         self.assertNotIn("Never use adult,", source_rules)
 
         manager_rules = self.skills.compile(

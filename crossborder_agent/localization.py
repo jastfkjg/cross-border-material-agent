@@ -154,26 +154,7 @@ _FALLBACK_CONTENT: dict[str, dict[str, Any]] = {
 _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
         "123批发网": "123 Wholesale",
-        "女式衬衫": "Women's shirts",
-        "女式针织衫": "Women's knitwear",
-        "女式T恤": "Women's T-shirts",
-        "女装T恤": "Women's T-shirts",
-        "女士羊毛和混纺大衣": "Women's wool-blend coat",
-        "女装连衣裙": "Women's dress",
-        "工装": "Men's utility jacket",
-        "男童T恤": "Boys' T-shirt",
-        "女装半身裙": "Women's skirt",
-        "男装休闲衬衫": "Men's casual shirt",
-        "男士无褶短裤": "Men's flat-front shorts",
-        "服装、鞋靴和珠宝饰品/男士时尚/男装/男装短裤/男士无褶短裤": "Apparel, Shoes & Jewelry/Men's Fashion/Men's Clothing/Men's Shorts/Men's Flat-front Shorts",
         "T恤": "T-shirt",
-        "女式毛呢外套": "Women's wool-blend coats",
-        "男式夹克": "Men's jackets",
-        "男式衬衫": "Men's shirts",
-        "男式休闲裤": "Men's casual pants",
-        "童T恤": "Children's T-shirts",
-        "半身裙": "Skirts",
-        "连衣裙": "Dresses",
         "面料名称": "Fabric",
         "面料": "Fabric",
         "主面料成分": "Main material",
@@ -296,8 +277,6 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "针织衫": "Knit top",
         "其他品牌": "Other brand",
         "通用": "General",
-        "女装针织套头衫": "Women's knit pullover",
-        "服装、鞋靴和珠宝饰品/女士时尚/女装/女士毛衣/女装针织套头衫": "Apparel, Shoes & Jewelry/Women's Fashion/Women's Clothing/Women's Sweaters/Women's Knit Pullovers",
         "中长款": "Mid-length",
         "长裙": "Long skirt",
         "A字裙": "A-line skirt",
@@ -341,30 +320,10 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "设计": "Design",
         "尺码类型": "Size type",
         "场合": "Occasion",
-        "服装、鞋靴和珠宝饰品/女士时尚/女装/女装上衣、T恤、衬衫/女装T恤": "Apparel, Shoes & Jewelry/Women's Fashion/Women's Clothing/Women's Tops, T-Shirts & Blouses/Women's T-Shirts",
     },
     "ko": {
         "123批发网": "123 도매",
-        "女式衬衫": "여성 셔츠",
-        "女式针织衫": "여성 니트",
-        "女式T恤": "여성 티셔츠",
-        "女装T恤": "여성 티셔츠",
-        "女士羊毛和混纺大衣": "여성 울 혼방 코트",
-        "女装连衣裙": "여성 원피스",
-        "工装": "남성 유틸리티 재킷",
-        "男童T恤": "남아 티셔츠",
-        "女装半身裙": "여성 스커트",
-        "男装休闲衬衫": "남성 캐주얼 셔츠",
-        "男士无褶短裤": "남성 플랫 프런트 쇼츠",
-        "服装、鞋靴和珠宝饰品/男士时尚/男装/男装短裤/男士无褶短裤": "의류·신발·주얼리/남성 패션/남성 의류/남성 쇼츠/남성 플랫 프런트 쇼츠",
         "T恤": "티셔츠",
-        "女式毛呢外套": "여성 울 혼방 코트",
-        "男式夹克": "남성 재킷",
-        "男式衬衫": "남성 셔츠",
-        "男式休闲裤": "남성 캐주얼 팬츠",
-        "童T恤": "아동 티셔츠",
-        "半身裙": "스커트",
-        "连衣裙": "원피스",
         "面料名称": "원단",
         "面料": "원단",
         "主面料成分": "주요 소재",
@@ -484,8 +443,6 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "针织衫": "니트 톱",
         "其他品牌": "기타 브랜드",
         "通用": "공용",
-        "女装针织套头衫": "여성 니트 풀오버",
-        "服装、鞋靴和珠宝饰品/女士时尚/女装/女士毛衣/女装针织套头衫": "의류·신발·주얼리/여성 패션/여성 의류/여성 스웨터/여성 니트 풀오버",
         "中长款": "미디 길이",
         "长裙": "롱 스커트",
         "A字裙": "A라인 스커트",
@@ -529,30 +486,10 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "设计": "디자인",
         "尺码类型": "사이즈 유형",
         "场合": "착용 상황",
-        "服装、鞋靴和珠宝饰品/女士时尚/女装/女装上衣、T恤、衬衫/女装T恤": "의류·신발·주얼리/여성 패션/여성 의류/여성 상의·티셔츠·블라우스/여성 티셔츠",
     },
     "pt": {
         "123批发网": "123 Atacado",
-        "女式衬衫": "Camisas femininas",
-        "女式针织衫": "Malhas femininas",
-        "女式T恤": "Camisetas femininas",
-        "女装T恤": "Camisetas femininas",
-        "女士羊毛和混纺大衣": "Casaco feminino de mistura de lã",
-        "女装连衣裙": "Vestido feminino",
-        "工装": "Jaqueta utilitária masculina",
-        "男童T恤": "Camiseta infantil masculina",
-        "女装半身裙": "Saia feminina",
-        "男装休闲衬衫": "Camisa casual masculina",
-        "男士无褶短裤": "Bermuda masculina sem pregas",
-        "服装、鞋靴和珠宝饰品/男士时尚/男装/男装短裤/男士无褶短裤": "Roupas, calçados e joias/Moda masculina/Roupas masculinas/Bermudas masculinas/Bermuda masculina sem pregas",
         "T恤": "Camiseta",
-        "女式毛呢外套": "Casacos femininos de mistura de lã",
-        "男式夹克": "Jaquetas masculinas",
-        "男式衬衫": "Camisas masculinas",
-        "男式休闲裤": "Calças casuais masculinas",
-        "童T恤": "Camisetas infantis",
-        "半身裙": "Saias",
-        "连衣裙": "Vestidos",
         "面料名称": "Tecido",
         "面料": "Tecido",
         "主面料成分": "Material principal",
@@ -672,8 +609,6 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "针织衫": "Blusa de malha",
         "其他品牌": "Outra marca",
         "通用": "Uso geral",
-        "女装针织套头衫": "Suéter feminino de malha",
-        "服装、鞋靴和珠宝饰品/女士时尚/女装/女士毛衣/女装针织套头衫": "Roupas, calçados e joias/Moda feminina/Roupas femininas/Suéteres femininos/Suéteres femininos de malha",
         "中长款": "Comprimento médio",
         "长裙": "Saia longa",
         "A字裙": "Saia evasê",
@@ -717,7 +652,6 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "设计": "Design",
         "尺码类型": "Tipo de tamanho",
         "场合": "Ocasião",
-        "服装、鞋靴和珠宝饰品/女士时尚/女装/女装上衣、T恤、衬衫/女装T恤": "Roupas, calçados e joias/Moda feminina/Roupas femininas/Blusas, camisetas e camisas femininas/Camisetas femininas",
     },
 }
 
@@ -790,8 +724,6 @@ _PROCESS_FILLER_PATTERNS: dict[str, tuple[str, ...]] = {
         "canonical data",
         "sku matrix below",
         "fact-check",
-        "features cold-shoulder design",
-        "solid color finish is paired with a pullover construction",
     ),
     "ko": (
         "원본 데이터에서 확인",
@@ -821,12 +753,11 @@ def _source_terms(facts: ProductFacts, taxonomy: TaxonomyResult) -> set[str]:
         taxonomy.category.name,
         taxonomy.category.path,
     }
-    # Translate only facts that can actually be rendered into the buyer copy or
-    # machine appendix.  Sending supply-chain flags and unused source metadata
-    # made the copy response needlessly large and allowed one missed translation
-    # to invalidate otherwise strong prose.
+    # Include every shopper-safe source field rather than a benchmark-derived
+    # apparel whitelist. Unknown product types can therefore still render their
+    # real attributes in the machine appendix.
     for item in facts.attributes:
-        if item.name in _PUBLIC_ATTRIBUTE_NAMES or item.name in _MARKETING_ATTRIBUTE_NAMES:
+        if buyer_safe_source_name(item.name):
             terms.update((item.name, item.value))
     for item in taxonomy.attributes:
         terms.update(
@@ -1031,11 +962,41 @@ def _compose_copy_layers(
     if isinstance(claim_refs, dict):
         payload["claim_refs"] = claim_refs
     payload["media_descriptions"] = dict(fallback["media_descriptions"])
-    payload["localized_terms"] = dict(fallback["localized_terms"])
+    localized_terms = dict(fallback["localized_terms"])
+    candidate_terms = source.get("localized_terms")
+    if isinstance(candidate_terms, dict):
+        for term in localized_terms:
+            value = candidate_terms.get(term)
+            if (
+                isinstance(value, str)
+                and value.strip()
+                and not re.search(r"[\u4e00-\u9fff]", value)
+            ):
+                localized_terms[term] = value.strip()
+    payload["localized_terms"] = localized_terms
     return payload
 
 
 def _verified_fit_note(language: str, facts: ProductFacts, fallback_note: str) -> str:
+    has_size_evidence = bool(
+        facts.size_chart_rows
+        or facts.size_conversions
+        or any(
+            re.search(r"(?:尺码|适合身高|\bsize\b)", item.name, re.I)
+            for item in facts.attributes
+        )
+        or any(
+            re.search(r"(?:尺码|适合身高|\bsize\b)", item.name, re.I)
+            for sku in facts.skus
+            for item in sku.attributes
+        )
+    )
+    if not has_size_evidence:
+        return {
+            "en": "Review the seller-listed specifications and option labels before ordering.",
+            "ko": "구매 전 판매자가 제공한 상품 사양과 옵션 표기를 확인해 주세요.",
+            "pt": "Consulte as especificações e opções informadas pelo vendedor antes da compra.",
+        }[language]
     if not facts.size_chart_rows:
         return fallback_note
     return {
@@ -1080,8 +1041,9 @@ def _salvage_copy_payload(
         merged["highlights"] = [item.strip() for item in highlights]
     # Media keys and localized terms are a separate machine layer. They never
     # come from a writer or repair response, including field-level salvage.
-    merged["media_descriptions"] = dict(fallback["media_descriptions"])
-    merged["localized_terms"] = dict(fallback["localized_terms"])
+    machine_layers = _compose_copy_layers(candidate, fallback)
+    merged["media_descriptions"] = dict(machine_layers["media_descriptions"])
+    merged["localized_terms"] = dict(machine_layers["localized_terms"])
 
     for _ in range(5):
         error = _payload_validation_error(
@@ -1377,6 +1339,8 @@ def _localized_category_title(
     """Turn a resolved category label into a title noun without category IDs."""
 
     localized = _static_localize_term(language, category_name).strip()
+    if localized in _UNTRANSLATED_VALUES:
+        return {"en": "Product", "ko": "상품", "pt": "Produto"}[language]
     if language == "en":
         singular_suffixes = {
             "T-shirts": "T-Shirt",
@@ -1638,7 +1602,11 @@ def _benefit_led_highlight(
             return f"O vendedor informa {localized_value} para o tecido"
         if source_name in {"衣长", "裤长", "裙长"}:
             return f"Proporção de {localized_value.lower()} informada pelo vendedor"
-    return f"{localized_name}: {localized_value}"
+    return {
+        "en": f"Seller-listed {localized_name.lower()}: {localized_value}",
+        "ko": f"판매자 표기 {localized_name}: {localized_value}",
+        "pt": f"{localized_name} informado pelo vendedor: {localized_value}",
+    }[language]
 
 
 def _fallback_payload(
@@ -1649,10 +1617,15 @@ def _fallback_payload(
         language, facts, str(payload.get("fit_note") or "")
     )
     term_map = _fallback_term_map(language, facts, taxonomy)
-    base_title = _localized_category_title(
-        language,
-        taxonomy.category.name or facts.source_category_name,
+    # When the online model selected the leaf, its category is authoritative.
+    # In explicit offline mode the lexical resolver is only a weak fallback, so
+    # the seller's own category label is safer copy evidence than its guessed leaf.
+    category_label = (
+        taxonomy.category.name
+        if taxonomy.category.method == "model-constrained-all-leaves"
+        else facts.source_category_name or taxonomy.category.name
     )
+    base_title = _localized_category_title(language, category_label)
     selected_features: list[tuple[str, str]] = []
     feature_by_source: dict[str, str] = {}
     seen_values: set[str] = set()
@@ -1672,14 +1645,31 @@ def _fallback_payload(
         == "publish"
     )
     buyer_title_source = facts.source_title if title_is_publishable else ""
-    if "露肩" in buyer_title_source:
-        cold_shoulder = _TERM_TRANSLATIONS[language]["露肩"]
-        selected_features.append(
-            (_TERM_TRANSLATIONS[language]["设计"], cold_shoulder)
+    mapped_product_source_names = [
+        item.source_name
+        for item in taxonomy.attributes
+        if item.source_name and not item.sales_attribute
+    ]
+    mapped_sales_source_names = [
+        item.source_name
+        for item in taxonomy.attributes
+        if item.source_name and item.sales_attribute
+    ]
+    attribute_priority = list(
+        dict.fromkeys(
+            [
+                *mapped_product_source_names,
+                *_MARKETING_ATTRIBUTE_NAMES,
+                *[
+                    item.name
+                    for item in publishable_attributes
+                    if buyer_safe_source_name(item.name)
+                ],
+                *mapped_sales_source_names,
+            ]
         )
-        feature_by_source["设计"] = cold_shoulder
-        seen_values.add(cold_shoulder)
-    for attribute_name in _MARKETING_ATTRIBUTE_NAMES:
+    )
+    for attribute_name in attribute_priority:
         item = next(
             (
                 attribute
@@ -1728,34 +1718,9 @@ def _fallback_payload(
         if len(selected_features) == 5:
             break
 
-    has_cold_shoulders = "露肩" in buyer_title_source
-    has_halter_neck = any(
-        item.name == "领型" and item.value == "挂脖" for item in publishable_attributes
-    )
-    has_long_sleeves = any(
-        item.name == "袖长" and item.value == "长袖" for item in publishable_attributes
-    )
-    has_slim_fit = any(
-        item.name == "版型" and item.value == "修身型" for item in publishable_attributes
-    )
     payload["title"] = _compose_localized_title(
         language, base_title, feature_by_source
     )
-    if language == "en" and has_cold_shoulders:
-        descriptive_title = "Women's Cold-shoulder"
-        if has_halter_neck:
-            descriptive_title += " Halter neck"
-        descriptive_title += " Knit Sweater"
-        title_tail = []
-        if has_long_sleeves:
-            title_tail.append("Long Sleeve")
-        if has_slim_fit:
-            title_tail.append("Slim Fit")
-        payload["title"] = (
-            f"{descriptive_title}, {', '.join(title_tail)}"
-            if title_tail
-            else descriptive_title
-        )
     feature_summary = _natural_join(
         language, [value for _, value in selected_features[:4]]
     )
@@ -1793,47 +1758,34 @@ def _fallback_payload(
     )
     option_summary = _natural_join(language, colors)
     if language == "en":
-        if has_cold_shoulders and has_halter_neck:
-            sleeve_phrase = "long sleeves" if has_long_sleeves else "its sleeve design"
-            fit_phrase = "slim fit" if has_slim_fit else "defined silhouette"
-            first = (
-                "This knit pullover combines shoulder cutouts with a halter-style "
-                f"neckline, {sleeve_phrase}, and a {fit_phrase}."
-            )
-            if patterns and closures:
-                first += (
-                    f" Its {patterns[0].lower()} finish and {closures[0].lower()} "
-                    "construction give the design a clean, polished look."
-                )
-        else:
-            feature_phrases = [value.lower() for _, value in selected_features[:4]]
-            phrase_overrides = {
-                "v-neck": "a V-neck",
-                "long sleeve": "long sleeves",
-                "relaxed fit": "a relaxed fit",
-                "slim fit": "a slim fit",
-                "vintage floral print": "a vintage floral print",
-                "floral print": "a floral print",
-                "3d-effect print": "a 3D-effect print",
-            }
-            feature_phrases = [
-                phrase_overrides.get(phrase, phrase) for phrase in feature_phrases
-            ]
-            plural_bottom = bool(
-                re.search(r"\b(?:shorts|pants|trousers)\b", base_title, re.IGNORECASE)
-            )
-            subject = (
-                f"This pair of {base_title.lower()}"
-                if plural_bottom
-                else f"This {base_title.lower()}"
-            )
-            first = (
-                f"{subject} combines "
-                f"{_natural_join('en', feature_phrases)}."
-                if feature_phrases
-                else f"A {base_title.lower()} with a clean, product-focused silhouette."
-            )
-        if not (has_cold_shoulders and has_halter_neck) and patterns and closures:
+        feature_phrases = [value.lower() for _, value in selected_features[:4]]
+        phrase_overrides = {
+            "v-neck": "a V-neck",
+            "long sleeve": "long sleeves",
+            "relaxed fit": "a relaxed fit",
+            "slim fit": "a slim fit",
+            "vintage floral print": "a vintage floral print",
+            "floral print": "a floral print",
+            "3d-effect print": "a 3D-effect print",
+        }
+        feature_phrases = [
+            phrase_overrides.get(phrase, phrase) for phrase in feature_phrases
+        ]
+        plural_bottom = bool(
+            re.search(r"\b(?:shorts|pants|trousers)\b", base_title, re.IGNORECASE)
+        )
+        subject = (
+            f"This pair of {base_title.lower()}"
+            if plural_bottom
+            else f"This {base_title.lower()}"
+        )
+        first = (
+            f"{subject} combines "
+            f"{_natural_join('en', feature_phrases)}."
+            if feature_phrases
+            else f"A {base_title.lower()} with a clean, product-focused presentation."
+        )
+        if patterns and closures:
             first += (
                 f" The {patterns[0].lower()} finish is paired with a "
                 f"{closures[0].lower()} construction."
@@ -1857,7 +1809,7 @@ def _fallback_payload(
         first = (
             f"{feature_summary} 디테일을 갖춘 {base_title}입니다."
             if feature_summary
-            else f"깔끔한 실루엣의 {base_title}입니다."
+            else f"상품 특징을 명확하게 정리한 {base_title}입니다."
         )
         if patterns and closures:
             first += f" {patterns[0]} 디자인에 {closures[0]} 구조를 적용했습니다."
@@ -1882,7 +1834,7 @@ def _fallback_payload(
         first = (
             f"Esta peça apresenta {pt_feature_summary}."
             if pt_feature_summary
-            else "Uma peça com silhueta limpa e foco no produto."
+            else f"Este {base_title.lower()} apresenta as características verificadas do produto."
         )
         if patterns and closures:
             pattern = patterns[0][:1].lower() + patterns[0][1:]
@@ -1936,33 +1888,6 @@ def _fallback_payload(
             f"{color_label}: {_natural_join(language, colors)}"
         )
     payload["highlights"] = payload["highlights"][:5]
-    if language == "en" and has_cold_shoulders:
-        design_detail = "Cold-shoulder cutouts"
-        if has_halter_neck:
-            design_detail += " framed by a halter-style neckline"
-        silhouette_parts = []
-        if has_long_sleeves:
-            silhouette_parts.append("Long sleeves")
-        if has_slim_fit:
-            silhouette_parts.append("a slim fit")
-        payload["highlights"] = [design_detail]
-        if silhouette_parts:
-            payload["highlights"].append(
-                _natural_join("en", silhouette_parts).capitalize()
-            )
-        if patterns and closures:
-            payload["highlights"].append(
-                f"{patterns[0]} {closures[0].lower()} construction"
-            )
-        if colors:
-            payload["highlights"].append(
-                f"Available in {_natural_join('en', colors)}"
-            )
-        if size_label:
-            payload["highlights"].append(
-                f"One Size; seller guidance: {size_label.split('—', 1)[-1].strip()}"
-            )
-        payload["highlights"] = payload["highlights"][:5]
     if len(payload["highlights"]) < 3:
         for fallback_highlight in _FALLBACK_CONTENT[language]["highlights"]:
             if fallback_highlight not in payload["highlights"]:
@@ -1971,24 +1896,22 @@ def _fallback_payload(
                 break
     payload["localized_terms"] = term_map
     media_feature_summary = feature_summary
-    if language == "en" and has_cold_shoulders:
-        media_feature_summary = "the cold-shoulder cutouts, halter-style neckline, long sleeves, and slim silhouette"
     payload["media_descriptions"] = {
         "main_image.jpeg": f"Primary image showing the complete {base_title.lower()}.",
-        "detail_image_1.jpeg": f"Full product view highlighting {media_feature_summary or 'the overall silhouette'}.",
+        "detail_image_1.jpeg": f"Full product view highlighting {media_feature_summary or 'the overall product form'}.",
         "detail_image_2.jpeg": "Closer view of the construction and visible design details.",
-        "detail_image_3.jpeg": "Alternate product view showing the silhouette and sleeve structure.",
+        "detail_image_3.jpeg": "Alternate product view showing another verified visible feature.",
         "detail_image_4.jpeg": (
             f"Color comparison featuring {option_summary}."
             if option_summary
-            else "Available product variant comparison."
+            else "Alternate product view or verified option comparison."
         ),
         "detail_image_5.jpeg": (
             f"Size and fit reference for {size_label}."
             if size_label
-            else "Product fit and proportion reference."
+            else "Practical product presentation based on verified source evidence."
         ),
-        "product_video.mp4": "Eight-second product presentation showing the silhouette and key design details.",
+        "product_video.mp4": "Eight-second product presentation showing the complete form and key visible details.",
     }
     if language == "ko":
         feature_object = feature_summary
@@ -1999,36 +1922,36 @@ def _fallback_payload(
             "main_image.jpeg": f"{base_title}의 전체 형태를 보여 주는 대표 이미지입니다.",
             "detail_image_1.jpeg": f"{feature_object or '전체 실루엣을'} 강조한 상품 전체 이미지입니다.",
             "detail_image_2.jpeg": "짜임과 눈에 보이는 디자인 디테일을 가까이 보여 줍니다.",
-            "detail_image_3.jpeg": "실루엣과 소매 구조를 보여 주는 다른 각도의 상품 이미지입니다.",
+            "detail_image_3.jpeg": "다른 각도에서 확인 가능한 상품 특징을 보여 줍니다.",
             "detail_image_4.jpeg": (
                 f"{option_summary} 색상을 비교해 보여 줍니다."
                 if option_summary
-                else "구매 가능한 상품 옵션을 비교해 보여 줍니다."
+                else "다른 상품 각도 또는 확인된 옵션을 보여 줍니다."
             ),
             "detail_image_5.jpeg": (
                 f"{size_label}의 사이즈와 핏을 안내합니다."
                 if size_label
-                else "상품의 핏과 비율을 안내합니다."
+                else "확인된 원본 정보를 바탕으로 상품을 실용적으로 보여 줍니다."
             ),
-            "product_video.mp4": "실루엣과 주요 디자인 디테일을 보여 주는 8초 상품 영상입니다.",
+            "product_video.mp4": "상품의 전체 형태와 주요 특징을 보여 주는 8초 영상입니다.",
         }
     elif language == "pt":
         payload["media_descriptions"] = {
             "main_image.jpeg": f"Imagem principal mostrando o {base_title.lower()} por inteiro.",
-            "detail_image_1.jpeg": f"Vista completa destacando {feature_summary or 'a silhueta do produto'}.",
+            "detail_image_1.jpeg": f"Vista completa destacando {feature_summary or 'a forma geral do produto'}.",
             "detail_image_2.jpeg": "Vista aproximada da construção e dos detalhes visíveis do design.",
-            "detail_image_3.jpeg": "Outro ângulo mostrando a silhueta e a estrutura das mangas.",
+            "detail_image_3.jpeg": "Outro ângulo mostrando uma característica visível confirmada.",
             "detail_image_4.jpeg": (
                 f"Comparação das cores {option_summary}."
                 if option_summary
-                else "Comparação das variações disponíveis."
+                else "Outro ângulo do produto ou comparação de opção confirmada."
             ),
             "detail_image_5.jpeg": (
                 f"Referência de tamanho e caimento para {size_label}."
                 if size_label
-                else "Referência de caimento e proporção do produto."
+                else "Apresentação prática baseada nas informações verificadas do produto."
             ),
-            "product_video.mp4": "Vídeo de 8 segundos mostrando a silhueta e os principais detalhes do design.",
+            "product_video.mp4": "Vídeo de 8 segundos mostrando a forma completa e os principais detalhes visíveis.",
         }
     return payload
 
@@ -2070,13 +1993,13 @@ flattering, premium quality, or easy-care unless the exact benefit is explicitly
 When a material is labeled as the main material but its declared content is below 30% and the complete
 fiber composition is unavailable, do not present it as the predominant material. Omit it from shopper
 prose or qualify it as a seller-listed material with incomplete composition information.
-Prefer concrete source-backed details such as product type, composition, pattern, collar, sleeve,
-closure, fit, length, colors, and seller-declared option guidance.
+Prefer concrete source-backed, category-relevant details from the supplied facts. Do not assume
+apparel parts, materials, functions or usage when this product belongs to another category.
 The title, overview and highlights together must name at least three concrete verified product
 attributes. Do not use process-oriented filler such as "source-grounded details" or describe the
 fact-checking workflow to the shopper.
-Treat the source title as useful product evidence: retain distinctive, concrete design details such
-as shoulder cutouts, neckline construction or silhouette when they are explicitly named there.
+Treat the source title as useful product evidence: retain distinctive, concrete construction,
+appearance, compatibility or form-factor details only when they are explicitly named there.
 Use product-first phrasing natural to {locale["locale"]}; avoid translated syntax, keyword stuffing,
 generic filler and mixed-language fragments. Keep the title under 128 characters.
 Build the title from the localized product category plus the strongest supported search concepts such
@@ -2091,9 +2014,8 @@ Do not repeat the overview as bullets. Use the overview for the overall product 
 each highlight add one new source-backed decision point.
 The shopper prose is a presentation layer: never include category IDs, attribute IDs, SKU IDs, source
 labels or audit terminology there. Code will place those exact machine fields in a separate appendix.
-Use normal grammar rather than concatenating localized field values. In English, for example, write
-"a cold-shoulder design, a halter-style neckline, long sleeves, and a slim fit" rather than copying
-Title Case attribute labels into a sentence.
+Use normal grammar rather than concatenating localized field values or copying Title Case attribute
+labels into a sentence.
 Write a concise, substantive overview as two short natural paragraphs. The first should explain the
 distinctive construction and silhouette; the second should add supported options, seller-listed use or
 style context, and conservative sizing information. Do not pad either paragraph when those facts are
@@ -2114,10 +2036,15 @@ Produce a JSON object containing at least these required fields; extra explanato
 - fit_note: one conservative localized sizing note
 - claim_refs: optional object mapping title, overview, highlights and fit_note to supporting claim_id values
   from the ledger. Use only listed IDs; this metadata is for the delivery audit and is not shopper copy.
+- localized_terms: object with exactly the source-term keys listed below. Translate each value naturally
+  into {locale["locale"]}; preserve model numbers, IDs and established brand spellings. Do not leave Chinese
+  characters in the translated values.
 
-Do not generate category tables, attribute tables, SKU rows, media filenames or localized source-term
-maps. Code builds that machine appendix independently from verified structured data after the buyer
-copy passes review.
+Do not generate category tables, attribute tables, SKU rows or media filenames. Code builds that machine
+appendix independently from verified structured data after the buyer copy passes review.
+
+Source terms requiring localization (keys must remain exact):
+{json.dumps(sorted(fallback["localized_terms"]), ensure_ascii=False)}
 
 Verified product facts:
 {json.dumps(facts.compact_dict(), ensure_ascii=False)}
@@ -2153,6 +2080,9 @@ extract only concrete product type, construction, silhouette, pattern, color and
                 error=str(exc),
             )
         return fallback, "deterministic-fallback"
+    draft_localized_terms = (
+        draft.get("localized_terms") if isinstance(draft, dict) else None
+    )
     if trace:
         trace.emit("copy.draft", language=language, payload=draft)
 
@@ -2232,6 +2162,9 @@ Do not output media_descriptions or localized_terms. Output the corrected buyer-
                 retryable=exc.retryable,
                 error=str(exc),
             )
+    if isinstance(audited, dict) and isinstance(draft_localized_terms, dict):
+        audited = dict(audited)
+        audited["localized_terms"] = draft_localized_terms
     if trace:
         trace.emit(
             "copy.audit",
@@ -2300,6 +2233,9 @@ Verified source facts:
             if salvaged is not fallback:
                 return salvaged, f"{client.config.chat_model}-{salvage_source}"
             return fallback, validation_error
+        if isinstance(payload, dict) and isinstance(draft_localized_terms, dict):
+            payload = dict(payload)
+            payload["localized_terms"] = draft_localized_terms
         payload = _compose_copy_layers(payload, fallback)
         validation_error = _payload_validation_error(
             language, payload, facts, taxonomy, expected_media, expected_terms
@@ -2364,11 +2300,6 @@ def _localized_display(language: str, value: str, term_map: dict[str, Any]) -> s
         rendered = translated.strip()
     else:
         rendered = _static_localize_term(language, raw)
-    seller_weight = _seller_weight_display(language, raw)
-    if seller_weight:
-        rendered = seller_weight
-    if language == "en":
-        rendered = _append_us_length_conversion(raw, rendered)
     if rendered in _UNTRANSLATED_VALUES:
         if "/" in raw:
             localized_parts = [
@@ -2387,6 +2318,11 @@ def _localized_display(language: str, value: str, term_map: dict[str, Any]) -> s
                 "pt": "Categoria do marketplace",
             }[language]
         return "—"
+    seller_weight = _seller_weight_display(language, raw)
+    if seller_weight:
+        rendered = seller_weight
+    if language == "en":
+        rendered = _append_us_length_conversion(raw, rendered)
     return rendered
 
 
@@ -2478,7 +2414,7 @@ def render_description(
             )
         )
         if (
-            item.name not in _PUBLIC_ATTRIBUTE_NAMES
+            not buyer_safe_source_name(item.name)
             and item.name not in mapped_source_names
             and not mentioned_in_buyer_copy
         ):

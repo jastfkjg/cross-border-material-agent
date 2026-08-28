@@ -202,6 +202,10 @@ class AgentAction:
     reason: str = ""
     dimension: str = ""
     priority: int = 0
+    supporting_models: list[str] = field(default_factory=list)
+    votes: int = 0
+    execution_tier: str = "unclassified"
+    verification: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

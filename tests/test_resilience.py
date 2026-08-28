@@ -110,6 +110,21 @@ class ResilienceTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 400)
         self.assertFalse(raised.exception.retryable)
 
+    def test_video_configuration_failure_disables_capability_for_repairs(self) -> None:
+        config = ApiConfig(
+            api_key="test",
+            dashscope_base_url=self.base + "/",
+            openai_base_url=self.base + "/",
+            video_model="missing-video-model",
+        )
+        client = QwenClient(config, self.logger, time.monotonic() + 300)
+
+        with self.assertRaises(ApiError) as raised:
+            client.generate_video("product motion", "https://example.test/frame.jpeg")
+
+        self.assertEqual(raised.exception.category, "model_configuration")
+        self.assertFalse(client.operation_available("video"))
+
     def test_malformed_json_response_is_retried(self) -> None:
         self.handler.counters["/bad-json"] = 0
         with mock.patch("crossborder_agent.api.time.sleep", return_value=None):

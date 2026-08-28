@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import logging
 import re
@@ -33,6 +34,8 @@ _RUBRIC_WEIGHTS = {
     "A6": 7,
     "A7": 5,
 }
+
+_INTERNAL_MINIMUM_WEIGHTED_SCORE = 95.0
 
 _RUBRIC_DEFINITIONS = {
     "A1": {
@@ -119,7 +122,7 @@ class BoundedDeliveryAgent:
                 "fit or size guidance",
             ],
             "video_strategy": "stable product-led short presentation",
-            "minimum_weighted_score": 90,
+            "minimum_weighted_score": int(_INTERNAL_MINIMUM_WEIGHTED_SCORE),
         }
         if self.client is None or not use_model:
             return default
@@ -147,7 +150,7 @@ Return exactly these keys:
 - risk_priorities: ordered array containing only A1 through A7
 - visual_sequence: exactly six concise slot objectives, main image first
 - video_strategy: concise English shot and motion strategy
-- minimum_weighted_score: integer 90 through 95
+- minimum_weighted_score: integer 95
 
 Verified product facts:
 {json.dumps(facts.compact_dict(), ensure_ascii=False)}
@@ -195,12 +198,9 @@ Available repair tools for later rounds:
             and all(isinstance(item, str) and item.strip() for item in sequence)
         ):
             result["visual_sequence"] = [item.strip()[:500] for item in sequence]
-        for key, minimum, maximum in (
-            ("minimum_weighted_score", 90, 95),
-        ):
-            value = payload.get(key)
-            if isinstance(value, int):
-                result[key] = min(maximum, max(minimum, value))
+        # The internal acceptance bar is intentionally fixed. The manager may
+        # prioritize work, but it cannot lower the quality gate for a hard run.
+        result["minimum_weighted_score"] = int(_INTERNAL_MINIMUM_WEIGHTED_SCORE)
         return result
 
     def _evaluation_models(self) -> tuple[str, ...]:
@@ -562,9 +562,12 @@ Compact source-image evidence:
         )
         prompt = f"""
 Evaluate this whole delivery. Source-reference images are listed first in the visual input map;
-delivery image URLs follow. The video input, when present, is the actual generated video URL.
-Local deterministic artifacts cannot be uploaded to the model and must be judged from their
-physical inspection and provenance in the manifest.
+directly reviewable delivery image URLs follow. The video input, when present, is the actual generated
+video URL. A provenance_source_url is never the final artifact and must not be used to claim that the
+final artifact contains the source image's text, people, background, layout, or other pixels.
+Local deterministic artifacts cannot be uploaded to the model. Judge them only from final_artifact
+physical/hash/rendered-text evidence in the manifest. If that evidence cannot establish a semantic
+defect, do not invent one and do not request a repair for it.
 
 Return exactly these keys:
 - ready_for_delivery: boolean
@@ -578,7 +581,7 @@ Return exactly these keys:
 Only choose tool/target combinations from the catalog. Each instruction must be an actionable,
 artifact-specific correction prompt grounded in the evidence. Prefer revising the weakest high-weight
 dimension. Do not request cosmetic changes that risk factual identity. Set ready_for_delivery true only
-when the weighted score is at least {agent_plan.get('minimum_weighted_score', 90)}, there are no blocker
+when the weighted score is at least {max(_INTERNAL_MINIMUM_WEIGHTED_SCORE, float(agent_plan.get('minimum_weighted_score', _INTERNAL_MINIMUM_WEIGHTED_SCORE)))}, there are no blocker
 issues, and A1/A2/A5 have no major issue.
 Return a repair action for every reparable issue that has an allowed tool/target; there is no arbitrary
 per-round target-count cap. Do not omit a supported target merely because three other targets were listed.
@@ -629,7 +632,14 @@ Visual input map:
 Available repair tools:
 {json.dumps(tools.catalog(), ensure_ascii=False)}
 """.strip()
-        minimum_score = float(agent_plan.get("minimum_weighted_score", 90))
+        minimum_score = max(
+            _INTERNAL_MINIMUM_WEIGHTED_SCORE,
+            float(
+                agent_plan.get(
+                    "minimum_weighted_score", _INTERNAL_MINIMUM_WEIGHTED_SCORE
+                )
+            ),
+        )
 
         def evaluate_with(model: str) -> tuple[str, AgentEvaluation | None, str]:
             try:
@@ -680,6 +690,137 @@ Available repair tools:
             round_index=round_index,
             minimum_weighted_score=minimum_score,
         )
+
+    def verify_repair_action(
+        self,
+        action: AgentAction,
+        *,
+        facts: ProductFacts,
+        taxonomy: TaxonomyResult,
+        assets: list[AssetResult],
+        visual_set_review: dict[str, Any],
+        work_dir: Path,
+        evaluator_models: list[str],
+    ) -> dict[str, Any]:
+        """Ask a non-supporting evaluator to verify one single-vote critical action."""
+
+        if self.client is None:
+            return {"supported": False, "status": "no-model-client"}
+        verifier = next(
+            (
+                model
+                for model in evaluator_models
+                if model not in set(action.supporting_models)
+            ),
+            "",
+        )
+        if not verifier:
+            return {
+                "supported": False,
+                "status": "no-independent-verifier",
+            }
+
+        manifest, image_urls, video_urls = self._artifact_evidence(
+            facts, assets, work_dir
+        )
+        target_manifest = next(
+            (item for item in manifest if item.get("name") == action.target), {}
+        )
+        copy_evidence = next(
+            (
+                item
+                for item in self._copy_artifact_evidence(work_dir)
+                if action.target == f"product_description_{item.get('language')}.md"
+            ),
+            {},
+        )
+        target_url = str(target_manifest.get("delivery_visual_url") or "")
+        source_references = list(
+            dict.fromkeys(
+                facts.product_image_urls[:2]
+                + facts.sku_image_urls[:1]
+                + facts.description_image_urls[:1]
+            )
+        )
+        verification_images: list[str] = []
+        verification_videos: list[str] = []
+        if action.target.endswith(".jpeg"):
+            verification_images = list(
+                dict.fromkeys(source_references[:3] + ([target_url] if target_url else []))
+            )
+        elif action.target.endswith(".md") and action.dimension == "A5":
+            verification_images = source_references[:3]
+        elif action.target.endswith(".mp4"):
+            verification_images = source_references[:2]
+            verification_videos = [target_url] if target_url else video_urls[:1]
+
+        definition = _RUBRIC_DEFINITIONS.get(action.dimension, {})
+        system = (
+            "You are an independent lightweight repair-action verifier. Return JSON only. "
+            "You did not propose this action. Confirm it only when the supplied artifact evidence "
+            "supports the alleged critical defect and the proposed scope is narrow enough to avoid regressions."
+        )
+        prompt = f"""
+Verify this single-evaluator repair request. Do not rescore the delivery and do not suggest other work.
+
+Return exactly:
+- supported: boolean
+- safe_to_attempt: boolean
+- evidence: concise artifact-specific evidence, or why evidence is insufficient
+- corrected_scope: concise bounded correction instruction; empty when unsupported
+- status: verified or rejected
+
+Rules:
+- supported requires concrete evidence in the supplied target artifact, verified fact ledger, physical inspection,
+  or directly supplied source/delivery media. The first evaluator's assertion alone is not evidence.
+- safe_to_attempt requires changing only the named target and preserving all unaffected facts and structures.
+- Reject speculative, cosmetic, duplicate, or already-resolved requests.
+- Use this rubric dimension exactly: {json.dumps(definition, ensure_ascii=False)}
+
+Proposed action:
+{json.dumps({"tool": action.tool, "target": action.target, "instruction": action.instruction, "reason": action.reason, "dimension": action.dimension, "supporting_models": action.supporting_models}, ensure_ascii=False)}
+
+Target manifest:
+{json.dumps(target_manifest, ensure_ascii=False)}
+
+Rendered copy evidence when applicable:
+{json.dumps(copy_evidence, ensure_ascii=False)}
+
+Verified facts and reconciled ledger:
+{json.dumps(facts.compact_dict(), ensure_ascii=False)}
+
+Resolved category and attributes:
+{json.dumps({"category_id": taxonomy.category.category_id, "category": taxonomy.category.name, "attributes": [{"id": item.attr_id, "value_id": item.value_id, "value": item.platform_value} for item in taxonomy.attributes]}, ensure_ascii=False)}
+
+Current six-image set review:
+{json.dumps(visual_set_review, ensure_ascii=False)}
+""".strip()
+        try:
+            payload = self.client.chat_json(
+                system,
+                prompt,
+                images=verification_images,
+                videos=verification_videos,
+                model=verifier,
+                fallback_model=verifier,
+            )
+        except (ApiError, ValueError, TypeError) as exc:
+            return {
+                "supported": False,
+                "status": "verifier-unavailable",
+                "verifier_model": verifier,
+                "evidence": str(exc)[:1000],
+            }
+        supported = payload.get("supported") is True
+        safe_to_attempt = payload.get("safe_to_attempt") is True
+        return {
+            "supported": bool(supported and safe_to_attempt),
+            "safe_to_attempt": safe_to_attempt,
+            "status": "verified" if supported and safe_to_attempt else "rejected",
+            "verifier_model": verifier,
+            "evidence": str(payload.get("evidence") or "")[:2000],
+            "corrected_scope": str(payload.get("corrected_scope") or "")[:3000],
+        }
 
     @staticmethod
     def _copy_artifact_evidence(work_dir: Path) -> list[dict[str, Any]]:
@@ -733,7 +874,9 @@ Available repair tools:
         delivery_urls = [
             asset.source_url
             for asset in assets
-            if asset.name.endswith(".jpeg") and asset.source_url
+            if asset.name.endswith(".jpeg")
+            and asset.generated
+            and asset.source_url
         ]
         image_urls = list(dict.fromkeys(source_references + delivery_urls))
         video_urls = [
@@ -743,21 +886,35 @@ Available repair tools:
         ][:1]
         for asset in assets:
             path = work_dir / asset.name
+            delivery_visual_url = (
+                asset.source_url
+                if asset.generated and asset.name.endswith(".jpeg")
+                else ""
+            )
             item: dict[str, Any] = {
                 "name": asset.name,
                 "generated": asset.generated,
                 "model": asset.model,
-                "source_url": asset.source_url,
+                "evidence_mode": (
+                    "remote-final-output"
+                    if delivery_visual_url
+                    else "local-final-inspection"
+                ),
+                "delivery_visual_url": delivery_visual_url,
+                "provenance_source_url": asset.source_url,
                 "description": asset.description,
                 "fallback_reason": asset.fallback_reason,
                 "visual_input_index": (
-                    image_urls.index(asset.source_url)
-                    if asset.source_url in image_urls
+                    image_urls.index(delivery_visual_url)
+                    if delivery_visual_url in image_urls
                     else None
                 ),
             }
             try:
                 item["bytes"] = path.stat().st_size
+                item["final_artifact_sha256"] = hashlib.sha256(
+                    path.read_bytes()
+                ).hexdigest()
                 if asset.name.endswith(".jpeg"):
                     info = inspect_image(path)
                     quality = inspect_image_quality(path)
@@ -769,6 +926,34 @@ Available repair tools:
                         "luminance_stddev": quality.luminance_stddev if quality else None,
                         "difference_hash": quality.difference_hash if quality else None,
                     }
+                    if asset.model == "deterministic-size-chart":
+                        rendered_rows = [
+                            {
+                                "size": str(row.size_label),
+                                "bust": f"{row.bust_cm} cm" if row.bust_cm else "—",
+                                "length": (
+                                    f"{row.length_cm} cm" if row.length_cm else "—"
+                                ),
+                                "weight": (
+                                    f"{row.weight_kg} / {row.weight_lb}"
+                                    if row.weight_kg and row.weight_lb
+                                    else row.weight_kg or "—"
+                                ),
+                            }
+                            for row in facts.size_chart_rows
+                        ]
+                        item["deterministic_render"] = {
+                            "text_language": "en",
+                            "contains_cjk": False,
+                            "title": "SIZE GUIDE",
+                            "subtitle": "GARMENT MEASUREMENTS • SELLER-PROVIDED DATA",
+                            "columns": ["SIZE", "BUST", "LENGTH", "WEIGHT GUIDE"],
+                            "rows": rendered_rows,
+                            "notes": [
+                                "Measurements are transcribed from the seller's source size chart.",
+                                "Check garment measurements; regional size equivalence is not assumed.",
+                            ],
+                        }
                 elif asset.name == "product_video.mp4":
                     item["physical"] = inspect_video(path)
             except (OSError, MediaError) as exc:
@@ -782,7 +967,7 @@ Available repair tools:
         *,
         round_index: int,
         tools: BoundedToolRegistry,
-        minimum_weighted_score: float = 90,
+        minimum_weighted_score: float = _INTERNAL_MINIMUM_WEIGHTED_SCORE,
         evaluator_model: str = "",
     ) -> AgentEvaluation:
         raw_scores = payload.get("dimension_scores")
@@ -829,6 +1014,8 @@ Available repair tools:
                         reason=str(item.get("reason") or "")[:1000],
                         dimension=str(item.get("dimension") or "")[:8],
                         priority=priority if isinstance(priority, int) else 4,
+                        supporting_models=[evaluator_model] if evaluator_model else [],
+                        votes=1 if evaluator_model else 0,
                     )
                 )
         actions.sort(key=lambda item: item.priority)
@@ -872,7 +1059,7 @@ Available repair tools:
         round_index: int,
         minimum_weighted_score: float,
     ) -> AgentEvaluation:
-        models = list(evaluations)
+        models = sorted(evaluations)
         scores = {
             dimension: round(
                 sum(item.dimension_scores[dimension] for item in evaluations.values())
@@ -952,7 +1139,16 @@ Available repair tools:
                 key=lambda item: _RUBRIC_WEIGHTS.get(item, 0),
                 default="",
             )
-            models_text = ", ".join(dict.fromkeys(row["models"]))
+            supporting_models = sorted(set(row["models"]))
+            votes = len(supporting_models)
+            execution_tier = (
+                "consensus"
+                if votes >= 2
+                else "critical_verification"
+                if dimension in {"A1", "A2", "A5"}
+                else "discretionary"
+            )
+            models_text = ", ".join(supporting_models)
             actions.append(
                 AgentAction(
                     tool=tool,
@@ -964,10 +1160,19 @@ Available repair tools:
                     reason=" | ".join(dict.fromkeys(row["reasons"]))[:1000],
                     dimension=dimension,
                     priority=min(row["priorities"] or [4]),
+                    supporting_models=supporting_models,
+                    votes=votes,
+                    execution_tier=execution_tier,
                 )
             )
+        tier_order = {
+            "consensus": 0,
+            "critical_verification": 1,
+            "discretionary": 2,
+        }
         actions.sort(
             key=lambda item: (
+                tier_order.get(item.execution_tier, 3),
                 item.priority,
                 -_RUBRIC_WEIGHTS.get(item.dimension, 0),
                 item.target,

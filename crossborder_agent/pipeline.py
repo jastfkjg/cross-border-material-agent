@@ -30,12 +30,14 @@ from .media import (
     create_size_chart_image,
     create_slideshow_video,
     hash_distance,
+    inspect_image,
     inspect_image_quality,
     inspect_video,
     normalize_image,
     strip_video_audio,
 )
 from .models import (
+    AgentAction,
     AgentActionResult,
     AssetResult,
     CreativePlan,
@@ -45,9 +47,15 @@ from .models import (
     TaxonomyResult,
 )
 from .planning import create_creative_plan
-from .qa import EXPECTED_FILES, validate_delivery
+from .qa import EXPECTED_FILES, _description_language_surfaces, validate_delivery
 from .skill_runtime import SkillLibrary
-from .taxonomy import resolve_taxonomy
+from .taxonomy import (
+    apply_model_attribute_mappings,
+    attribute_schema_definition,
+    attribute_schema_candidates,
+    category_leaf_candidates,
+    resolve_taxonomy,
+)
 
 
 class PipelineError(RuntimeError):
@@ -74,7 +82,7 @@ _SINGLE_COMPOSITION_NEGATIVE_PROMPT = (
 
 _MAIN_NEGATIVE_PROMPT = (
     _IMAGE_NEGATIVE_PROMPT
-    + ", collage, montage, split screen, inset, duplicate garment, multiple products, multiple colorways, "
+    + ", collage, montage, split screen, inset, duplicate product, multiple products, unsupported variants, "
     "cropped product, person, mannequin body"
 )
 
@@ -85,6 +93,7 @@ _VIDEO_NEGATIVE_PROMPT = (
 )
 
 _AGENT_MIN_NEW_REPAIR_SECONDS = 8 * 60
+_AGENT_MIN_DISCRETIONARY_REPAIR_SECONDS = 12 * 60
 _AGENT_POST_REPAIR_REVIEW_RESERVE_SECONDS = 4 * 60
 _AGENT_MAX_EVALUATIONS = 3
 _AGENT_SNAPSHOT_FILES = tuple(
@@ -942,6 +951,72 @@ class Pipeline:
             ),
         )
 
+        def operation_available(operation: str) -> tuple[bool, str]:
+            if self.client is None:
+                return False, f"{operation} model client unavailable"
+            probe = getattr(self.client, "operation_available", None)
+            if callable(probe) and not probe(operation):
+                return False, f"{operation} model capability is disabled for this run"
+            return True, "available"
+
+        def main_precondition(target: str) -> tuple[bool, str]:
+            available, reason = operation_available("image")
+            if not available:
+                return available, reason
+            references = self._ordered_source_urls(facts, vision)
+            if not references:
+                return False, "no trusted hero generation reference"
+            return True, "trusted hero reference available"
+
+        def detail_precondition(target: str) -> tuple[bool, str]:
+            available, reason = operation_available("image")
+            if not available:
+                return available, reason
+            try:
+                index = int(target.removeprefix("detail_image_").split(".", 1)[0])
+            except ValueError:
+                return False, "invalid detail target"
+            if index == 5 and facts.size_chart_rows:
+                return False, "verified deterministic size chart is protected"
+            main_asset = self._find_asset(state.assets, "main_image.jpeg")
+            references = self._detail_reference_selection(
+                index, facts, main_asset.source_url
+            )
+            if not references:
+                return False, f"no trusted detail reference for slot {index}"
+            return True, f"{len(references)} trusted detail references available"
+
+        def copy_precondition(target: str) -> tuple[bool, str]:
+            available, reason = operation_available("chat")
+            if not available:
+                return available, reason
+            language = target.removeprefix("product_description_").split(".", 1)[0]
+            if language not in localization_payloads:
+                return False, f"localized payload unavailable: {language}"
+            return True, "localized payload available"
+
+        def video_precondition(target: str) -> tuple[bool, str]:
+            available, reason = operation_available("video")
+            if not available:
+                return available, reason
+            main_asset = self._find_asset(state.assets, "main_image.jpeg")
+            first_frame = main_asset.source_url
+            if not first_frame or not self._safe_generation_reference(first_frame):
+                candidates = self._source_urls_for_use(
+                    self._fallback_source_urls(facts, asset_name="main_image.jpeg"),
+                    use="reference",
+                    preferred_roles=("hero", "front"),
+                )
+                first_frame = candidates[0] if candidates else ""
+            if not first_frame:
+                return False, "no safe video first frame"
+            return True, "video model and safe first frame available"
+
+        registry.bind_precondition("regenerate_main_image", main_precondition)
+        registry.bind_precondition("regenerate_detail_image", detail_precondition)
+        registry.bind_precondition("revise_localized_copy", copy_precondition)
+        registry.bind_precondition("regenerate_video", video_precondition)
+
     def _capture_agent_snapshot(
         self,
         *,
@@ -1159,6 +1234,375 @@ class Pipeline:
         )
         return True
 
+    @staticmethod
+    def _deterministic_repair_evidence(
+        action: AgentAction, work_dir: Path
+    ) -> list[str]:
+        """Return locally reproducible defects that justify a repair without another vote."""
+
+        path = work_dir / action.target
+        evidence: list[str] = []
+        if not path.is_file():
+            return [f"target file is missing: {action.target}"]
+        try:
+            size_bytes = path.stat().st_size
+        except OSError as exc:
+            return [f"target cannot be inspected: {exc}"]
+        if size_bytes <= 0 and action.dimension in {"A2", "A4", "A6", "A7"}:
+            evidence.append("target file is empty")
+        if action.target.endswith(".md"):
+            if action.dimension == "A2" and size_bytes >= 1024 * 1024:
+                evidence.append("localized description is at least 1 MB")
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                evidence.append(f"localized description is not readable UTF-8: {exc}")
+                return evidence
+            language = action.target.removeprefix("product_description_").removesuffix(
+                ".md"
+            )
+            buyer_surface, _ = _description_language_surfaces(text, language)
+            buyer_surface = re.sub(r"https?://[^\s)>]+", "", buyer_surface)
+            if action.dimension in {"A1", "A4"} and re.search(
+                r"[\u4e00-\u9fff]", buyer_surface
+            ):
+                evidence.append("buyer-facing copy contains untranslated Chinese")
+            if action.dimension in {"A1", "A4"}:
+                for marker in (
+                    "/ret/result/result",
+                    "Canonical source",
+                    "Source evidence",
+                ):
+                    if marker.casefold() in text.casefold():
+                        evidence.append(
+                            f"localized description exposes internal marker: {marker}"
+                        )
+        elif action.target.endswith(".jpeg"):
+            try:
+                info = inspect_image(path)
+                if action.dimension in {"A2", "A6"} and info.format not in {
+                    "JPEG",
+                    "JPG",
+                    "PNG",
+                }:
+                    evidence.append(f"unsupported image format: {info.format}")
+                if action.dimension in {"A2", "A6"} and action.target == "main_image.jpeg":
+                    if info.width < 800 or info.height < 800:
+                        evidence.append(
+                            f"hero dimensions are below 800x800: {info.width}x{info.height}"
+                        )
+                elif action.dimension in {"A2", "A6"} and (
+                    info.width <= 260 or info.height <= 260
+                ):
+                    evidence.append(
+                        f"detail dimensions are not above 260 px: {info.width}x{info.height}"
+                    )
+                if action.dimension in {"A2", "A6"} and info.size_bytes > 5 * 1024 * 1024:
+                    evidence.append("image exceeds 5 MB")
+                quality = inspect_image_quality(path)
+                if action.dimension == "A6" and quality and (
+                    quality.luminance_stddev < 2 or quality.entropy < 0.8
+                ):
+                    evidence.append("image is deterministically blank or information-poor")
+            except (MediaError, OSError) as exc:
+                evidence.append(f"image cannot be decoded: {exc}")
+        elif action.target.endswith(".mp4"):
+            try:
+                inspect_video(path)
+            except (MediaError, OSError) as exc:
+                if action.dimension in {"A2", "A7"}:
+                    evidence.append(f"video cannot be decoded: {exc}")
+            if action.dimension in {"A2", "A7"} and size_bytes >= 200 * 1024 * 1024:
+                evidence.append("video is at least 200 MB")
+        return evidence
+
+    def _qualify_repair_actions(
+        self,
+        evaluation: Any,
+        *,
+        facts: ProductFacts,
+        taxonomy: TaxonomyResult,
+        state: RunState,
+        work_dir: Path,
+        registry: BoundedToolRegistry | None = None,
+    ) -> tuple[list[AgentAction], list[dict[str, Any]]]:
+        """Apply consensus, deterministic-evidence, and verification policy."""
+
+        eligible: list[AgentAction] = []
+        deferred: list[dict[str, Any]] = []
+        requires_verification: list[AgentAction] = []
+        remaining = self.deadline - time.monotonic()
+        for action in evaluation.repair_actions:
+            if registry is not None:
+                available, reason = registry.availability(action.tool, action.target)
+                if not available:
+                    deferred.append(
+                        {
+                            "tool": action.tool,
+                            "target": action.target,
+                            "dimension": action.dimension,
+                            "reason": "tool-precondition-unavailable",
+                            "detail": reason,
+                        }
+                    )
+                    continue
+            deterministic = self._deterministic_repair_evidence(action, work_dir)
+            if action.votes >= 2 or action.execution_tier == "consensus":
+                action.execution_tier = "consensus"
+                action.verification = {
+                    "status": "consensus",
+                    "supporting_models": list(action.supporting_models),
+                }
+                eligible.append(action)
+            elif deterministic:
+                action.execution_tier = "deterministic"
+                action.verification = {
+                    "status": "deterministic-evidence",
+                    "evidence": deterministic,
+                }
+                eligible.append(action)
+            elif action.dimension in {"A1", "A2", "A5"}:
+                action.execution_tier = "critical_verification"
+                requires_verification.append(action)
+            elif remaining >= _AGENT_MIN_DISCRETIONARY_REPAIR_SECONDS:
+                action.execution_tier = "discretionary"
+                action.verification = {
+                    "status": "budget-qualified-discretionary",
+                    "remaining_seconds": round(remaining, 1),
+                }
+                eligible.append(action)
+            else:
+                deferred.append(
+                    {
+                        "tool": action.tool,
+                        "target": action.target,
+                        "dimension": action.dimension,
+                        "reason": "single-model-noncritical-insufficient-budget",
+                    }
+                )
+
+        if requires_verification:
+            verify_method = getattr(self.agent, "verify_repair_action", None)
+
+            def verify(action: AgentAction) -> tuple[AgentAction, dict[str, Any]]:
+                if not callable(verify_method):
+                    return action, {
+                        "supported": False,
+                        "status": "verification-method-unavailable",
+                    }
+                try:
+                    result = verify_method(
+                        action,
+                        facts=facts,
+                        taxonomy=taxonomy,
+                        assets=state.assets,
+                        visual_set_review=state.visual_set_review,
+                        work_dir=work_dir,
+                        evaluator_models=evaluation.evaluator_models,
+                    )
+                except Exception as exc:
+                    result = {
+                        "supported": False,
+                        "status": "verification-failed",
+                        "evidence": str(exc)[:1000],
+                    }
+                return action, result if isinstance(result, dict) else {}
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(3, len(requires_verification)),
+                thread_name_prefix="repair-verifier",
+            ) as executor:
+                futures = [
+                    executor.submit(verify, action)
+                    for action in requires_verification
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    action, result = future.result()
+                    action.verification = result
+                    if result.get("supported") is True:
+                        action.execution_tier = "verified_critical"
+                        corrected_scope = str(result.get("corrected_scope") or "").strip()
+                        if corrected_scope:
+                            action.instruction = corrected_scope[:4000]
+                        eligible.append(action)
+                    else:
+                        deferred.append(
+                            {
+                                "tool": action.tool,
+                                "target": action.target,
+                                "dimension": action.dimension,
+                                "reason": "single-model-critical-not-verified",
+                                "verification": result,
+                            }
+                        )
+
+        tier_order = {
+            "consensus": 0,
+            "deterministic": 0,
+            "verified_critical": 1,
+            "discretionary": 2,
+        }
+        eligible.sort(
+            key=lambda item: (
+                tier_order.get(item.execution_tier, 3),
+                item.priority,
+                item.target,
+            )
+        )
+        self.trace.emit(
+            "agent.repair_actions_qualified",
+            round_index=evaluation.round_index,
+            eligible=[
+                {
+                    "tool": item.tool,
+                    "target": item.target,
+                    "dimension": item.dimension,
+                    "votes": item.votes,
+                    "supporting_models": item.supporting_models,
+                    "execution_tier": item.execution_tier,
+                    "verification": item.verification,
+                }
+                for item in eligible
+            ],
+            deferred=deferred,
+        )
+        return eligible, deferred
+
+    @staticmethod
+    def _build_repair_batches(actions: list[AgentAction]) -> list[dict[str, Any]]:
+        """Create dependency-isolated batches; only one successful batch is applied per round."""
+
+        groups: dict[str, list[AgentAction]] = {}
+        direct_tiers = {"consensus", "deterministic", "verified_critical"}
+        for action in actions:
+            if action.tool == "revise_localized_copy":
+                confidence = (
+                    "direct" if action.execution_tier in direct_tiers else "discretionary"
+                )
+                key = f"localized_copy:{confidence}"
+            elif action.tool == "regenerate_main_image":
+                key = "hero_identity"
+            elif action.tool == "regenerate_detail_image":
+                # Each generated detail is its own batch so structural drift in
+                # one slot cannot compound with another before global re-review.
+                key = f"detail:{action.target}"
+            elif action.tool == "regenerate_video":
+                key = "video"
+            else:
+                key = f"other:{action.tool}:{action.target}"
+            groups.setdefault(key, []).append(action)
+
+        tier_order = {
+            "consensus": 0,
+            "deterministic": 0,
+            "verified_critical": 1,
+            "discretionary": 2,
+        }
+        dependency_order = {
+            "hero_identity": 0,
+            "localized_copy": 1,
+            "detail": 2,
+            "video": 3,
+            "other": 4,
+        }
+        batches: list[dict[str, Any]] = []
+        for batch_id, batch_actions in groups.items():
+            batch_actions.sort(key=lambda item: (item.priority, item.target))
+            batches.append(
+                {
+                    "batch_id": batch_id,
+                    "kind": batch_id.split(":", 1)[0],
+                    "actions": batch_actions,
+                    "atomic": len(batch_actions) > 1,
+                    "tier_rank": min(
+                        tier_order.get(item.execution_tier, 3)
+                        for item in batch_actions
+                    ),
+                    "priority": min(item.priority for item in batch_actions),
+                }
+            )
+        batches.sort(
+            key=lambda item: (
+                item["tier_rank"],
+                item["priority"],
+                dependency_order.get(item["kind"], 4),
+                item["batch_id"],
+            )
+        )
+        return batches
+
+    @staticmethod
+    def _repair_batch_consistent(
+        changed_targets: set[str],
+        *,
+        state: RunState,
+        localization_payloads: dict[str, dict[str, Any]],
+        work_dir: Path,
+    ) -> tuple[bool, str]:
+        """Perform a local post-batch consistency checkpoint before re-evaluation."""
+
+        affected = set(changed_targets)
+        if any(name.endswith(".jpeg") for name in changed_targets):
+            affected.update(
+                f"product_description_{language}.md"
+                for language in ("en", "ko", "pt")
+            )
+        try:
+            for target in sorted(affected):
+                path = work_dir / target
+                if not path.is_file() or path.stat().st_size <= 0:
+                    return False, f"missing or empty synchronized target: {target}"
+                if target.endswith(".jpeg"):
+                    inspect_image(path)
+                elif target.endswith(".mp4"):
+                    inspect_video(path)
+                elif target.endswith(".md"):
+                    language = target.removeprefix(
+                        "product_description_"
+                    ).removesuffix(".md")
+                    payload = localization_payloads.get(language)
+                    if not isinstance(payload, dict) or not all(
+                        payload.get(key)
+                        for key in ("title", "overview", "highlights", "fit_note")
+                    ):
+                        return False, f"localized payload incomplete after batch: {language}"
+                    text = path.read_text(encoding="utf-8")
+                    buyer_surface, _ = _description_language_surfaces(text, language)
+                    buyer_surface = re.sub(
+                        r"https?://[^\s)>]+", "", buyer_surface
+                    )
+                    if re.search(r"[\u4e00-\u9fff]", buyer_surface):
+                        return False, f"buyer copy contains Chinese after batch: {target}"
+        except (MediaError, OSError, UnicodeError) as exc:
+            return False, str(exc)
+
+        changed_images = {
+            name for name in changed_targets if name.endswith(".jpeg")
+        }
+        rows = (
+            state.visual_set_review.get("assets", [])
+            if isinstance(state.visual_set_review, dict)
+            else []
+        )
+        if changed_images and isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict) or row.get("name") not in changed_images:
+                    continue
+                if any(
+                    row.get(key) is False
+                    for key in (
+                        "usable",
+                        "identity_consistent",
+                        "construction_consistent",
+                        "slot_match",
+                    )
+                ) or any(
+                    row.get(key) is True
+                    for key in ("unwanted_text", "major_artifacts")
+                ):
+                    return False, f"set review rejects synchronized image: {row.get('name')}"
+        return True, "post-batch files, payloads, and explicit set-review gates are consistent"
+
     def _run_bounded_agent_loop(
         self,
         registry: BoundedToolRegistry,
@@ -1267,6 +1711,9 @@ class Pipeline:
                         "reason": item.reason,
                         "dimension": item.dimension,
                         "priority": item.priority,
+                        "supporting_models": item.supporting_models,
+                        "votes": item.votes,
+                        "execution_tier": item.execution_tier,
                     }
                     for item in evaluation.repair_actions
                 ],
@@ -1311,88 +1758,252 @@ class Pipeline:
             completed = 0
             skipped = 0
             failed = 0
+            rolled_back = 0
             changed_targets: set[str] = set()
-            dependency_order = {
-                "regenerate_main_image": 0,
-                "regenerate_detail_image": 0,
-                "revise_localized_copy": 1,
-                "regenerate_video": 2,
-            }
-            ordered_actions = sorted(
-                evaluation.repair_actions,
-                key=lambda item: (dependency_order.get(item.tool, 1), item.priority),
+            applied_batch = ""
+            qualified_actions, deferred_actions = self._qualify_repair_actions(
+                evaluation,
+                facts=facts,
+                taxonomy=taxonomy,
+                state=state,
+                work_dir=work_dir,
+                registry=registry,
             )
-            for action in ordered_actions:
-                dependency_seconds = (
-                    registry.estimated_seconds("regenerate_video")
-                    if action.tool == "regenerate_main_image"
-                    else 60
-                    if action.tool == "regenerate_detail_image"
-                    else 0
-                )
+            repair_batches = self._build_repair_batches(qualified_actions)
+            self.logger.info(
+                "Agent 修复资格轮次 %d: proposed=%d qualified=%d deferred=%d batches=%d",
+                round_index,
+                len(evaluation.repair_actions),
+                len(qualified_actions),
+                len(deferred_actions),
+                len(repair_batches),
+            )
+            for batch in repair_batches:
+                batch_actions = batch["actions"]
+                dependency_seconds = 0
+                if any(
+                    action.tool == "regenerate_main_image"
+                    for action in batch_actions
+                ):
+                    dependency_seconds += registry.estimated_seconds(
+                        "regenerate_video"
+                    )
+                if any(
+                    action.tool == "regenerate_detail_image"
+                    for action in batch_actions
+                ):
+                    dependency_seconds += 60
                 required = (
-                    registry.estimated_seconds(action.tool)
+                    sum(registry.estimated_seconds(action.tool) for action in batch_actions)
                     + dependency_seconds
                     + _AGENT_POST_REPAIR_REVIEW_RESERVE_SECONDS
                 )
                 if self.deadline - time.monotonic() <= required:
+                    skipped += len(batch_actions)
                     self.warnings.append(
-                        f"剩余时间不足以执行 {action.tool}、同步依赖并重新评分"
+                        f"剩余时间不足以执行修复批次 {batch['batch_id']}、同步依赖并重新评分"
+                    )
+                    self.trace.emit(
+                        "agent.repair_batch_skipped",
+                        round_index=round_index,
+                        batch_id=batch["batch_id"],
+                        reason="insufficient-batch-budget",
+                        required_seconds=required,
+                        remaining_seconds=round(
+                            self.deadline - time.monotonic(), 1
+                        ),
                     )
                     continue
-                result = registry.execute(
-                    action.tool, action.target, action.instruction
+
+                self.trace.emit(
+                    "agent.repair_batch_started",
+                    round_index=round_index,
+                    batch_id=batch["batch_id"],
+                    atomic=batch["atomic"],
+                    actions=[
+                        {
+                            "tool": action.tool,
+                            "target": action.target,
+                            "execution_tier": action.execution_tier,
+                            "votes": action.votes,
+                        }
+                        for action in batch_actions
+                    ],
                 )
-                state.agent_actions.append(
-                    AgentActionResult(
+                batch_changed: set[str] = set()
+                batch_noncompleted = 0
+                for action in batch_actions:
+                    result = registry.execute(
+                        action.tool, action.target, action.instruction
+                    )
+                    state.agent_actions.append(
+                        AgentActionResult(
+                            round_index=round_index,
+                            tool=action.tool,
+                            target=action.target,
+                            status=result.status,
+                            detail=(
+                                f"batch={batch['batch_id']} tier={action.execution_tier}; "
+                                + result.detail
+                            ),
+                        )
+                    )
+                    self.trace.emit(
+                        "agent.repair_result",
                         round_index=round_index,
+                        batch_id=batch["batch_id"],
                         tool=action.tool,
                         target=action.target,
+                        dimension=action.dimension,
+                        instruction=action.instruction,
+                        supporting_models=action.supporting_models,
+                        votes=action.votes,
+                        execution_tier=action.execution_tier,
+                        verification=action.verification,
                         status=result.status,
                         detail=result.detail,
+                        metadata=result.metadata,
                     )
-                )
-                self.trace.emit(
-                    "agent.repair_result",
-                    round_index=round_index,
-                    tool=action.tool,
-                    target=action.target,
-                    dimension=action.dimension,
-                    instruction=action.instruction,
-                    status=result.status,
-                    detail=result.detail,
-                    metadata=result.metadata,
-                )
-                if result.status == "completed":
-                    completed += 1
-                    changed_targets.add(action.target)
-                    self.logger.info(
-                        "Agent 修复完成: %s/%s", action.tool, action.target
-                    )
-                else:
-                    if result.status == "skipped":
-                        skipped += 1
+                    if result.status == "completed":
+                        batch_changed.add(action.target)
+                        self.logger.info(
+                            "Agent 修复候选完成: batch=%s %s/%s",
+                            batch["batch_id"],
+                            action.tool,
+                            action.target,
+                        )
                     else:
-                        failed += 1
-                    self.warnings.append(
-                        f"Agent 修复未替换现有素材 {action.target}: {result.detail[:300]}"
+                        batch_noncompleted += 1
+                        if result.status == "skipped":
+                            skipped += 1
+                        else:
+                            failed += 1
+                        self.warnings.append(
+                            f"Agent 修复未替换现有素材 {action.target}: {result.detail[:300]}"
+                        )
+
+                if not batch_changed:
+                    continue
+                if batch["atomic"] and batch_noncompleted:
+                    rolled_back += len(batch_changed)
+                    self._restore_agent_snapshot(
+                        current_snapshot,
+                        state=state,
+                        localization_payloads=localization_payloads,
+                        localization_sources=localization_sources,
+                        work_dir=work_dir,
+                        mark_selected=False,
                     )
+                    state.agent_actions.append(
+                        AgentActionResult(
+                            round_index=round_index,
+                            tool="repair_batch",
+                            target=batch["batch_id"],
+                            status="rolled_back",
+                            detail="atomic batch was only partially completed",
+                        )
+                    )
+                    self.trace.emit(
+                        "agent.repair_batch_rolled_back",
+                        round_index=round_index,
+                        batch_id=batch["batch_id"],
+                        reason="partial-atomic-batch",
+                        changed_targets=sorted(batch_changed),
+                    )
+                    continue
+
+                synchronized = self._synchronize_repair_dependencies(
+                    round_index=round_index,
+                    changed_targets=batch_changed,
+                    registry=registry,
+                    facts=facts,
+                    taxonomy=taxonomy,
+                    creative_plan=creative_plan,
+                    state=state,
+                    localization_payloads=localization_payloads,
+                    work_dir=work_dir,
+                )
+                consistent, consistency_detail = self._repair_batch_consistent(
+                    batch_changed,
+                    state=state,
+                    localization_payloads=localization_payloads,
+                    work_dir=work_dir,
+                ) if synchronized else (False, "dependency synchronization failed")
+                if not consistent:
+                    rolled_back += len(batch_changed)
+                    self.warnings.append(
+                        f"修复批次 {batch['batch_id']} 一致性检查失败，已恢复修复前快照: {consistency_detail}"
+                    )
+                    self._restore_agent_snapshot(
+                        current_snapshot,
+                        state=state,
+                        localization_payloads=localization_payloads,
+                        localization_sources=localization_sources,
+                        work_dir=work_dir,
+                        mark_selected=False,
+                    )
+                    state.agent_actions.append(
+                        AgentActionResult(
+                            round_index=round_index,
+                            tool="repair_batch",
+                            target=batch["batch_id"],
+                            status="rolled_back",
+                            detail=consistency_detail,
+                        )
+                    )
+                    self.trace.emit(
+                        "agent.repair_batch_rolled_back",
+                        round_index=round_index,
+                        batch_id=batch["batch_id"],
+                        reason="post-batch-consistency-failed",
+                        detail=consistency_detail,
+                        changed_targets=sorted(batch_changed),
+                    )
+                    continue
+
+                applied_batch = batch["batch_id"]
+                changed_targets = batch_changed
+                completed = len(batch_changed)
+                self.trace.emit(
+                    "agent.repair_batch_applied",
+                    round_index=round_index,
+                    batch_id=applied_batch,
+                    changed_targets=sorted(changed_targets),
+                    consistency_detail=consistency_detail,
+                    deferred_batch_ids=[
+                        item["batch_id"]
+                        for item in repair_batches
+                        if item["batch_id"] != applied_batch
+                    ],
+                )
+                # A full multi-model evaluation must observe this coherent batch
+                # before any other dependency group is allowed to mutate files.
+                break
             self.trace.emit(
                 "agent.repair_round_complete",
                 round_index=round_index,
-                requested=len(ordered_actions),
+                requested=len(evaluation.repair_actions),
+                qualified=len(qualified_actions),
+                deferred=len(deferred_actions),
+                applied_batch=applied_batch,
                 completed=completed,
                 skipped=skipped,
                 failed=failed,
+                rolled_back=rolled_back,
                 changed_targets=sorted(changed_targets),
             )
             self.logger.info(
-                "Agent 修复轮次 %d: requested=%d completed=%d skipped=%d failed=%d",
+                "Agent 修复轮次 %d: requested=%d qualified=%d deferred=%d batch=%s "
+                "completed=%d skipped=%d failed=%d rolled_back=%d",
                 round_index,
-                len(ordered_actions),
+                len(evaluation.repair_actions),
+                len(qualified_actions),
+                len(deferred_actions),
+                applied_batch or "none",
                 completed,
                 skipped,
                 failed,
+                rolled_back,
             )
             if completed == 0:
                 self.trace.emit(
@@ -1400,42 +2011,13 @@ class Pipeline:
                     round_index=round_index,
                     reason=(
                         "no-repair-actions"
-                        if not ordered_actions
-                        else "all-repairs-skipped-or-failed"
+                        if not evaluation.repair_actions
+                        else "no-qualified-consistent-batch-applied"
                     ),
                     next_evaluation_round=round_index + 1,
                 )
                 round_index += 1
                 continue
-            synchronized = self._synchronize_repair_dependencies(
-                round_index=round_index,
-                changed_targets=changed_targets,
-                registry=registry,
-                facts=facts,
-                taxonomy=taxonomy,
-                creative_plan=creative_plan,
-                state=state,
-                localization_payloads=localization_payloads,
-                work_dir=work_dir,
-            )
-            if not synchronized:
-                self.warnings.append(
-                    f"第 {round_index + 1} 轮跨素材依赖同步失败，已恢复该轮修复前快照"
-                )
-                self._restore_agent_snapshot(
-                    current_snapshot,
-                    state=state,
-                    localization_payloads=localization_payloads,
-                    localization_sources=localization_sources,
-                    work_dir=work_dir,
-                    mark_selected=False,
-                )
-                self.trace.emit(
-                    "agent.repair_round_no_change",
-                    round_index=round_index,
-                    reason="dependency-synchronization-failed",
-                    next_evaluation_round=round_index + 1,
-                )
             round_index += 1
 
         if snapshots:
@@ -1510,11 +2092,11 @@ class Pipeline:
                 generation_references=source_urls[:1],
                 review_references=source_urls[:3],
                 incumbent_url=asset.source_url,
-                minimum_improvement=6.0,
+                minimum_improvement=0.0,
             )
             if asset.source_url and selected == asset.source_url:
                 return ToolExecution(
-                    "skipped", "hero revision did not beat the current asset by 6 points"
+                    "skipped", "hero revision did not score higher than the current asset"
                 )
             self._download_and_normalize(
                 selected,
@@ -1577,12 +2159,12 @@ class Pipeline:
                 prompt,
                 references=references[:3],
                 incumbent_url=asset.source_url,
-                minimum_improvement=6.0,
+                minimum_improvement=0.0,
             )
             if asset.source_url and selected == asset.source_url:
                 return ToolExecution(
                     "skipped",
-                    f"detail slot {index} revision did not beat the current asset by 6 points",
+                    f"detail slot {index} revision did not score higher than the current asset",
                 )
             self._download_and_normalize(
                 selected,
@@ -1852,44 +2434,123 @@ Candidate 1:
         category_tree: dict[str, Any],
         attribute_data: dict[str, Any],
     ) -> TaxonomyResult:
-        candidates = taxonomy.category.candidates[:12]
-        top_score = (
-            float(candidates[0].get("score") or 0) if candidates else 0.0
-        )
-        second_score = (
-            float(candidates[1].get("score") or 0)
-            if len(candidates) > 1
-            else top_score
-        )
-        score_margin = max(0.0, top_score - second_score)
-        # Curated aliases are deterministic and should not be second-guessed. A
-        # locally ranked hidden category is adjudicated whenever the ranking is
-        # weak or close, even if its absolute lexical score happened to be high.
-        needs_model_adjudication = (
-            taxonomy.category.method == "local-lexical-ranking"
-            and (taxonomy.category.confidence < 0.91 or score_margin < 18.0)
-        )
-        if self.client is None or not needs_model_adjudication:
+        if self.client is None:
             return taxonomy
-        allowed_ids = {str(item.get("category_id")) for item in candidates}
+        leaves = category_leaf_candidates(category_tree)
+        schemas = attribute_schema_candidates(attribute_data)
+        allowed_ids = {str(item.get("category_id") or "") for item in leaves}
+        allowed_schema_ids = {
+            str(item.get("category_id") or "") for item in schemas
+        }
         if not allowed_ids:
             return taxonomy
+        # Product identifiers and URLs are deliberately excluded from semantic
+        # classification so neither the prompt nor a model can turn evaluation
+        # examples into a product-ID lookup table.
+        product_evidence = {
+            "source_title": facts.source_title,
+            "source_category_name": facts.source_category_name,
+            "attributes": [
+                {"name": item.name, "value": item.value}
+                for item in facts.attributes
+            ],
+            "sku_options": [
+                {"name": item.name, "value": item.value}
+                for sku in facts.skus
+                for item in sku.attributes
+            ],
+        }
         system = (
-            "You are a conservative AliExpress apparel taxonomy classifier. Return JSON only. "
-            "You must choose exactly one supplied leaf category ID. Do not invent an ID.\n\n"
+            "You are a conservative marketplace taxonomy classifier. Return JSON only. "
+            "Choose from the complete supplied leaf set; never invent an ID and never rely on a "
+            "product-specific lookup table. Use the seller title, source category, structured "
+            "attributes and SKU options together. Distinguish product family, audience, intended "
+            "use and specialization only when the supplied facts support them.\n\n"
             + self.skills.compile(
                 "taxonomy", "product-grounding", "aliexpress-taxonomy"
             )
         )
+        # The supplied tree can contain thousands of leaves. Screening bounded
+        # batches with the same model keeps every leaf eligible without relying
+        # on a hard-coded or lexical Top-N gate that can hide an unseen category.
+        final_leaves = leaves
+        batch_size = 500
+        if len(leaves) > batch_size:
+            semifinal_ids: list[str] = []
+            for batch_index in range(0, len(leaves), batch_size):
+                batch = leaves[batch_index : batch_index + batch_size]
+                batch_ids = {
+                    str(item.get("category_id") or "") for item in batch
+                }
+                lines = "\n".join(
+                    f"{item['category_id']} | {item['path']}" for item in batch
+                )
+                screening_prompt = f"""
+Select up to three best leaf categories for this product from this batch only.
+Return JSON with selected_category_ids as an ordered array of one to three IDs.
+Do not invent an ID. Do not use product identifiers as evidence.
+
+Product evidence:
+{json.dumps(product_evidence, ensure_ascii=False)}
+
+LEAF BATCH {batch_index // batch_size + 1}:
+{lines}
+""".strip()
+                try:
+                    screened = self.client.chat_json(system, screening_prompt)
+                except ApiError as exc:
+                    self.logger.warning(
+                        "全叶子类目分片裁决失败，保留本地降级结果: %s", exc
+                    )
+                    self.trace.emit(
+                        "taxonomy.screening_failed",
+                        batch_index=batch_index // batch_size,
+                        error=str(exc),
+                    )
+                    return taxonomy
+                selected_batch_ids = screened.get("selected_category_ids")
+                if not isinstance(selected_batch_ids, list):
+                    selected_batch_ids = [screened.get("selected_category_id")]
+                valid_batch_ids = [
+                    str(item)
+                    for item in selected_batch_ids[:3]
+                    if str(item) in batch_ids
+                ]
+                if not valid_batch_ids:
+                    self.logger.warning(
+                        "全叶子类目分片返回无效 ID，保留本地降级结果"
+                    )
+                    return taxonomy
+                semifinal_ids.extend(valid_batch_ids)
+            semifinal_set = set(semifinal_ids)
+            final_leaves = [
+                item
+                for item in leaves
+                if str(item.get("category_id") or "") in semifinal_set
+            ]
         prompt = f"""
 Choose the most accurate leaf category for the verified product.
-Return JSON with selected_category_id and concise evidence.
+Return JSON with exactly:
+- selected_category_id: one ID from FINAL LEAF CANDIDATES
+- selected_attribute_schema_category_id: one ID from AVAILABLE ATTRIBUTE SCHEMAS;
+  use the selected leaf ID when its own schema exists, otherwise choose the most semantically
+  compatible schema. Return an empty string only when no supplied schema is compatible.
+- evidence: concise source-fact reasoning
 
-Product:
-{json.dumps(facts.compact_dict(), ensure_ascii=False)}
+The lexical ranking result is included only as a weak hint. It is not authoritative and the
+correct answer may occur anywhere in the complete leaf list.
 
-Allowed leaf candidates:
-{json.dumps(candidates, ensure_ascii=False)}
+Product evidence:
+{json.dumps(product_evidence, ensure_ascii=False)}
+
+Weak local hint:
+{json.dumps({"category_id": taxonomy.category.category_id, "name": taxonomy.category.name, "path": taxonomy.category.path, "top_candidates": taxonomy.category.candidates}, ensure_ascii=False)}
+
+FINAL LEAF CANDIDATES:
+{json.dumps(final_leaves, ensure_ascii=False)}
+
+AVAILABLE ATTRIBUTE SCHEMAS:
+{json.dumps(schemas, ensure_ascii=False)}
 """.strip()
         try:
             response = self.client.chat_json(system, prompt)
@@ -1899,33 +2560,88 @@ Allowed leaf candidates:
                 "taxonomy.adjudication_failed",
                 category=taxonomy.category.category_id,
                 confidence=taxonomy.category.confidence,
-                score_margin=score_margin,
                 error=str(exc),
             )
             return taxonomy
         selected_id = str(response.get("selected_category_id") or "")
-        if selected_id not in allowed_ids:
-            self.logger.warning("类目裁决返回候选外 ID，已忽略: %s", selected_id)
+        final_ids = {
+            str(item.get("category_id") or "") for item in final_leaves
+        }
+        if selected_id not in final_ids:
+            self.logger.warning("类目裁决返回全量叶子集外 ID，已忽略: %s", selected_id)
             self.trace.emit(
                 "taxonomy.adjudication_rejected",
                 selected_category_id=selected_id,
-                allowed_category_ids=sorted(allowed_ids),
+                allowed_category_count=len(allowed_ids),
             )
             return taxonomy
+        selected_schema_id = str(
+            response.get("selected_attribute_schema_category_id") or ""
+        )
+        if selected_schema_id not in allowed_schema_ids:
+            selected_schema_id = ""
         self.trace.emit(
             "taxonomy.adjudication",
             local_category_id=taxonomy.category.category_id,
             selected_category_id=selected_id,
-            confidence=taxonomy.category.confidence,
-            score_margin=score_margin,
+            selected_attribute_schema_category_id=selected_schema_id,
+            leaf_candidate_count=len(leaves),
+            final_candidate_count=len(final_leaves),
+            attribute_schema_candidate_count=len(schemas),
             evidence=response.get("evidence"),
         )
-        return resolve_taxonomy(
+        resolved = resolve_taxonomy(
             facts,
             category_tree,
             attribute_data,
             preferred_category_id=selected_id,
+            preferred_attribute_schema_id=selected_schema_id,
         )
+        schema = attribute_schema_definition(
+            attribute_data, resolved.attribute_schema_category_id
+        )
+        if not schema:
+            return resolved
+        mapping_prompt = f"""
+Map source facts to the selected platform attribute schema. Return JSON with a mappings array.
+Each mapping must contain exactly:
+- scope: product or sales
+- platform_attr_id: an ID from the schema
+- platform_value_id: an allowed value ID, or an empty string only when the schema has no enum
+- source_kind: product or sku
+- source_name and source_value: an exact pair from Product evidence
+
+Map only explicit facts. For uncertain, inferred, or incompatible values, omit the mapping.
+Never invent, translate, normalize, or paraphrase source_name/source_value in the response.
+
+Product evidence:
+{json.dumps(product_evidence, ensure_ascii=False)}
+
+Selected category:
+{json.dumps({"category_id": resolved.category.category_id, "path": resolved.category.path}, ensure_ascii=False)}
+
+Selected attribute schema:
+{json.dumps(schema, ensure_ascii=False)}
+""".strip()
+        try:
+            mapping_response = self.client.chat_json(system, mapping_prompt)
+        except ApiError as exc:
+            self.logger.warning("模型属性映射失败，保留确定性降级结果: %s", exc)
+            return resolved
+        mapped = apply_model_attribute_mappings(
+            facts,
+            resolved,
+            attribute_data,
+            mapping_response.get("mappings"),
+        )
+        self.trace.emit(
+            "taxonomy.attribute_mapping",
+            schema_category_id=resolved.attribute_schema_category_id,
+            fallback_mapping_count=len(resolved.attributes),
+            accepted_model_mapping_count=len(mapped.attributes),
+            used_model_mapping=mapped is not resolved,
+        )
+        return mapped
 
     def _analyze_source_images(self, facts: ProductFacts) -> dict[str, Any]:
         if self.client is None:
@@ -3326,13 +4042,35 @@ Allowed leaf candidates:
         product = facts.product_image_urls
         sku = facts.sku_image_urls
         description = facts.description_image_urls
-        if index == 4 and sku:
-            inspected_variants = [
-                url for url in sku if url in self._source_image_observations
+        visual_variant_values = {
+            str(attribute.value or "").strip().casefold()
+            for item in facts.skus
+            for attribute in item.attributes
+            if str(attribute.value or "").strip()
+            and re.search(
+                r"(?:颜色|色号|花色|款式|图案|\bcolou?r\b|\bstyle\b|\bpattern\b)",
+                str(attribute.name or ""),
+                re.I,
+            )
+        }
+        if self._source_image_observations:
+            safe_variant_references = [
+                url
+                for url in sku
+                if self._source_image_observations.get(url, {}).get(
+                    "safe_for_generation_reference"
+                )
+                is True
             ]
-            variant_references = inspected_variants or _even_sample(sku, 3)
+        else:
+            safe_variant_references = list(sku)
+        if index == 4 and len(visual_variant_values) >= 2 and safe_variant_references:
             return self._source_urls_for_use(
-                _unique(_even_sample(variant_references, 3) + product[:1]),
+                _unique(
+                    _even_sample(safe_variant_references, 3)
+                    + [main_reference_url]
+                    + product
+                ),
                 use="reference",
                 preferred_roles=("variant", "front", "hero"),
             )[:3]
@@ -3691,11 +4429,12 @@ Allowed leaf candidates:
             self.warnings.append("六图集合不完整，无法执行集合级语义评审")
             self.trace.emit("image.set_review_skipped", reason="incomplete-image-set")
             return {}
-        review_inputs = [by_name[name].source_url for name in ordered_names]
-        if any(not url for url in review_inputs):
-            self.warnings.append("六图集合缺少平台允许的远程评审 URL，跳过集合级模型评审")
-            self.trace.emit("image.set_review_skipped", reason="missing-review-url")
-            return {}
+        reviewable_names = [
+            name
+            for name in ordered_names
+            if by_name[name].generated and by_name[name].source_url
+        ]
+        review_inputs = [by_name[name].source_url for name in reviewable_names]
 
         if self.fast_mode:
             source_references = _unique(
@@ -3712,53 +4451,83 @@ Allowed leaf candidates:
             {
                 "name": name,
                 "purpose": by_name[name].description or name,
-                "representation": (
-                    "source proxy for deterministic local rendering"
-                    if by_name[name].model == "deterministic-size-chart"
-                    else "final model output before lossless delivery normalization"
-                    if by_name[name].generated
-                    else "source-backed fallback"
-                ),
+                "representation": "final model output before lossless delivery normalization",
             }
-            for name in ordered_names
+            for name in reviewable_names
         ]
-        try:
-            review = self.client.review_generated_images(
-                json.dumps(facts.compact_dict(), ensure_ascii=False),
-                source_references,
-                review_inputs,
-                expected_assets,
-            )
-        except ApiError as exc:
-            # A judge outage is not evidence that an already accepted image is bad.
-            self.logger.warning("六图集合语义评审不可用，保留当前素材: %s", exc)
-            self.warnings.append(f"六图集合语义评审未完成: {exc}")
-            self.trace.emit(
-                "image.set_review_failed",
-                category=exc.category,
-                retryable=exc.retryable,
-                status_code=exc.status_code,
-                error=str(exc),
-            )
-            return {}
+        if review_inputs:
+            try:
+                review = self.client.review_generated_images(
+                    json.dumps(facts.compact_dict(), ensure_ascii=False),
+                    source_references,
+                    review_inputs,
+                    expected_assets,
+                )
+            except ApiError as exc:
+                # A judge outage is not evidence that an already accepted image is bad.
+                self.logger.warning("六图集合语义评审不可用，保留当前素材: %s", exc)
+                self.warnings.append(f"六图集合语义评审未完成: {exc}")
+                self.trace.emit(
+                    "image.set_review_failed",
+                    category=exc.category,
+                    retryable=exc.retryable,
+                    status_code=exc.status_code,
+                    error=str(exc),
+                )
+                return {}
+        else:
+            review = {
+                "assets": [],
+                "set_usable": True,
+                "coherent": True,
+                "near_duplicate_pairs": [],
+                "missing_roles": [],
+                "repair_targets": [],
+                "summary": "All final images are local deterministic artifacts; semantic proxy review was intentionally skipped.",
+            }
 
         rows = review.get("assets")
-        if not isinstance(rows, list) or len(rows) != len(ordered_names):
+        if not isinstance(rows, list) or len(rows) != len(reviewable_names):
             self.warnings.append("六图集合评审返回结构异常，忽略该评审而不判定素材失败")
             self.trace.emit("image.set_review_invalid", review=review)
             return {}
-        normalized_rows: list[dict[str, Any]] = []
-        for index, name in enumerate(ordered_names):
+        remote_by_name: dict[str, dict[str, Any]] = {}
+        for remote_index, name in enumerate(reviewable_names):
             item = next(
                 (
                     row
                     for row in rows
-                    if isinstance(row, dict) and row.get("index") == index
+                    if isinstance(row, dict) and row.get("index") == remote_index
                 ),
                 {},
             )
-            normalized_rows.append({"name": name, **item})
+            remote_by_name[name] = item
+        normalized_rows: list[dict[str, Any]] = []
+        for index, name in enumerate(ordered_names):
+            if name in remote_by_name:
+                item = remote_by_name[name]
+                normalized_rows.append({"name": name, **item, "index": index})
+            else:
+                normalized_rows.append(
+                    self._local_visual_review_row(
+                        by_name[name], index=index
+                    )
+                )
         review["assets"] = normalized_rows
+        review["usable_count"] = sum(
+            item.get("usable") is True for item in normalized_rows
+        )
+        review["distinct_commercial_roles"] = len(
+            {
+                str(item.get("actual_role") or "other")
+                for item in normalized_rows
+                if item.get("usable") is True
+            }
+        )
+        review["set_usable"] = bool(
+            review.get("set_usable") is not False
+            and review["usable_count"] >= max(1, len(ordered_names) - 1)
+        )
         review["reviewed_names"] = ordered_names
         review["review_model"] = getattr(
             self.client,
@@ -3767,6 +4536,27 @@ Allowed leaf candidates:
         )
 
         duplicate_pairs = review.get("near_duplicate_pairs")
+        if isinstance(duplicate_pairs, list) and len(reviewable_names) != len(ordered_names):
+            remote_to_ordered = {
+                remote_index: ordered_names.index(name)
+                for remote_index, name in enumerate(reviewable_names)
+            }
+            duplicate_pairs = [
+                [remote_to_ordered[pair[0]], remote_to_ordered[pair[1]]]
+                for pair in duplicate_pairs
+                if isinstance(pair, list)
+                and len(pair) == 2
+                and pair[0] in remote_to_ordered
+                and pair[1] in remote_to_ordered
+            ]
+            review["near_duplicate_pairs"] = duplicate_pairs
+            repair_targets = review.get("repair_targets")
+            if isinstance(repair_targets, list):
+                review["repair_targets"] = [
+                    remote_to_ordered[target]
+                    for target in repair_targets
+                    if isinstance(target, int) and target in remote_to_ordered
+                ]
         if isinstance(duplicate_pairs, list) and duplicate_pairs:
             readable_pairs: list[str] = []
             for pair in duplicate_pairs[:6]:
@@ -3791,6 +4581,88 @@ Allowed leaf candidates:
             )
         self.trace.emit("image.set_review", review=review)
         return review
+
+    def _local_visual_review_row(
+        self, asset: AssetResult, *, index: int
+    ) -> dict[str, Any]:
+        """Describe a local final image without substituting its provenance pixels."""
+
+        observation = self._source_image_observations.get(asset.source_url, {})
+        try:
+            info = inspect_image(Path(asset.path))
+            quality = inspect_image_quality(Path(asset.path))
+            physically_usable = bool(
+                info.width > 260
+                and info.height > 260
+                and info.size_bytes <= 5 * 1024 * 1024
+                and (
+                    quality is None
+                    or (quality.entropy >= 0.8 and quality.luminance_stddev >= 2)
+                )
+            )
+        except (MediaError, OSError):
+            physically_usable = False
+
+        if asset.model == "deterministic-size-chart":
+            actual_role = "size_chart"
+            observed_features = [
+                "locally rendered English size guide",
+                "seller-provided size, bust, and garment-length measurements",
+                "no Chinese text is rendered by the deterministic template",
+            ]
+            media_descriptions = {
+                "en": "Size guide with seller-provided garment measurements.",
+                "ko": "판매자가 제공한 의류 실측 사이즈 안내표입니다.",
+                "pt": "Guia de tamanhos com as medidas da peça informadas pelo vendedor.",
+            }
+            source_safe = True
+            unwanted_text = False
+        else:
+            description = asset.description.casefold()
+            actual_role = (
+                "construction_detail"
+                if any(token in description for token in ("crop", "close-up", "upper", "lower"))
+                else "alternate_view"
+            )
+            observed_features = [
+                "normalized or cropped seller-source product image",
+                asset.description or "source-backed final image",
+            ]
+            media_descriptions = {
+                "en": "Seller-source product detail normalized for the listing.",
+                "ko": "판매자 원본을 상품 상세 이미지 규격에 맞게 정리한 이미지입니다.",
+                "pt": "Detalhe do produto da fonte do vendedor, normalizado para o anúncio.",
+            }
+            source_safe = bool(
+                not observation
+                or observation.get("safe_for_listing_fallback") is True
+            )
+            unwanted_text = bool(observation.get("has_overlay_text") is True)
+
+        usable = bool(physically_usable and source_safe and not unwanted_text)
+        return {
+            "name": asset.name,
+            "index": index,
+            "usable": usable,
+            "identity_consistent": source_safe,
+            "construction_consistent": source_safe,
+            "color_consistent": source_safe,
+            "pattern_consistent": source_safe,
+            "slot_match": True,
+            "unwanted_text": unwanted_text,
+            "prohibited_visual": False,
+            "major_artifacts": not physically_usable,
+            "unexpected_collage": False,
+            "product_coverage": "high",
+            "actual_role": actual_role,
+            "description_confidence": "medium",
+            "observed_features": observed_features,
+            "media_descriptions": media_descriptions,
+            "reason": (
+                "Final local artifact was physically inspected; provenance pixels were not substituted for the final image."
+            ),
+            "evidence_mode": "local-final-inspection",
+        }
 
     def _repair_visual_set_once(
         self,
@@ -4050,12 +4922,15 @@ Allowed leaf candidates:
             "交付管理器先依据事实账本、A1–A7 权重、源图观察和可用工具生成本次执行策略。初稿完成后，"
             "两个或三个独立多模态评估器读取全套文案 payload、类目属性、素材清单、图片/视频及本地物理检查，"
             "依据完整 A1–A7 定义分别输出逐维度评分、证据化问题和白名单工具调用。代码按维度取算术平均并合并各模型"
-            "的问题与修复目标。Full 模式在预算允许时执行三次聚合评估；剩余时间不足 8 分钟时可跳过新修复，但仍会"
-            "在评估预算允许时继续下一轮评分。",
+            "的问题与修复目标。两模型一致或命中确定性门禁的动作可直接进入修复；单模型提出的 A1/A2/A5 动作须由"
+            "未支持该动作的评估模型做聚焦验证；其他单模型动作仅在预算充足时作为低优先级候选。Full 模式在预算允许时"
+            "执行三次聚合评估；剩余时间不足 8 分钟时可跳过新修复，但仍会在评估预算允许时继续下一轮评分。",
             "所有修复均先写入临时文件，完成候选语义选优、文案事实/schema 校验或视频播放校验后才原子替换；"
             "修复失败会保留上一版，不会因为评估意见自动降级为源图或幻灯片。",
             "每个完成全局评分的版本均保存完整文件与内存状态快照。图片变化后刷新六图复核与三语 Media Guide；"
-            "主图变化时同步视频，模型视频无法可靠同步则使用当前最终图片集重建一致的目录视频。最终直接恢复聚合"
+            "主图变化时同步视频，模型视频无法可靠同步则使用当前最终图片集重建一致的目录视频。每轮只允许一个依赖"
+            "隔离的修复批次通过；多语言文案批次为原子事务，单张生成图独立成批，批次完成后先同步依赖和检查一致性，"
+            "再由下一轮完整评估观察结果，避免连续应用基于旧快照的修复意见。最终直接恢复聚合"
             "加权分最高的完整快照；不再调用单模型仲裁，也不存在对最高平均分快照的覆盖。",
             "- LLM 自由文本计划仅用于内部生成提示，不作为商品事实写入交付；策略文档只披露经过白名单筛选的控制参数。",
             f"- Agent 控制参数：{json.dumps(agent_plan_controls, ensure_ascii=False)}",
