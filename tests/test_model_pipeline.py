@@ -213,6 +213,30 @@ class _ModelServiceHandler(BaseHTTPRequestHandler):
                 "major_artifacts": False,
                 "reason": "ok",
             }
+        elif "multimodal evidence reconciler" in system:
+            payload = {
+                "seller_title_decision": "publish",
+                "attribute_decisions": [],
+                "canonical_visual_claims": [],
+                "conflicts": [],
+            }
+        elif "multimodal acceptance evaluator" in system:
+            payload = {
+                "ready_for_delivery": True,
+                "weighted_score": 94,
+                "dimension_scores": {
+                    "A1": 94,
+                    "A2": 94,
+                    "A3": 94,
+                    "A4": 94,
+                    "A5": 94,
+                    "A6": 94,
+                    "A7": 94,
+                },
+                "summary": "All delivery dimensions pass the acceptance threshold.",
+                "issues": [],
+                "repair_actions": [],
+            }
         else:
             if "ko-KR" in system:
                 title, overview, fit = (

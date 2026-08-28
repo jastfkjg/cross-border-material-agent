@@ -26,12 +26,13 @@ class DebugTraceTests(unittest.TestCase):
         ):
             self.assertEqual(build_parser().parse_args([]).run_profile, "fast")
 
-    def test_local_runner_defaults_to_fast_profile(self) -> None:
+    def test_local_runner_defaults_to_submission_safe_full_profile(self) -> None:
         script = (
             Path(__file__).resolve().parents[1] / "run_agent_local.sh"
         ).read_text(encoding="utf-8")
-        self.assertIn('RUN_PROFILE="${RUN_PROFILE:-fast}"', script)
+        self.assertIn('RUN_PROFILE="${RUN_PROFILE:-full}"', script)
         self.assertIn('--run-profile "$RUN_PROFILE"', script)
+        self.assertIn('",".join(config.evaluation_models)', script)
 
     def test_trace_is_disabled_by_default(self) -> None:
         logger = logging.getLogger("debug-disabled-test")

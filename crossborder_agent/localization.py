@@ -1009,33 +1009,30 @@ def _repair_numeric_fields(
     return repaired
 
 
-def _normalize_auxiliary_fields(
-    payload: Any, fallback: dict[str, Any]
-) -> Any:
-    """Preserve good prose when a model omits one translation or media-map key."""
+_BUYER_COPY_FIELDS = ("title", "overview", "highlights", "fit_note")
 
-    if not isinstance(payload, dict):
-        return payload
-    normalized = dict(payload)
-    for object_key in ("media_descriptions", "localized_terms"):
-        candidate = payload.get(object_key)
-        candidate_map = candidate if isinstance(candidate, dict) else {}
-        merged: dict[str, str] = {}
-        for key, fallback_value in fallback[object_key].items():
-            value = candidate_map.get(key)
-            if (
-                isinstance(value, str)
-                and value.strip()
-                and (
-                    object_key == "localized_terms"
-                    or not re.search(r"[\u4e00-\u9fff]", value)
-                )
-            ):
-                merged[key] = value.strip()
-            else:
-                merged[key] = str(fallback_value)
-        normalized[object_key] = merged
-    return normalized
+
+def _compose_copy_layers(
+    candidate: Any, fallback: dict[str, Any]
+) -> dict[str, Any]:
+    """Combine model-authored buyer copy with a deterministic machine appendix.
+
+    Category labels, localized source terms, media keys and the tables rendered from
+    them are an exact delivery contract. Keeping that layer out of writer responses
+    prevents a prose revision from deleting identifiers or mutating parseable data.
+    """
+
+    source = candidate if isinstance(candidate, dict) else {}
+    payload = dict(fallback)
+    for key in _BUYER_COPY_FIELDS:
+        if key in source:
+            payload[key] = source[key]
+    claim_refs = source.get("claim_refs")
+    if isinstance(claim_refs, dict):
+        payload["claim_refs"] = claim_refs
+    payload["media_descriptions"] = dict(fallback["media_descriptions"])
+    payload["localized_terms"] = dict(fallback["localized_terms"])
+    return payload
 
 
 def _verified_fit_note(language: str, facts: ProductFacts, fallback_note: str) -> str:
@@ -1081,13 +1078,9 @@ def _salvage_copy_payload(
         )
     ):
         merged["highlights"] = [item.strip() for item in highlights]
-    normalized = _normalize_auxiliary_fields(candidate, fallback)
-    if isinstance(normalized, dict):
-        merged["media_descriptions"] = normalized.get(
-            "media_descriptions", fallback["media_descriptions"]
-        )
-    # IDs, category labels, platform attributes and SKU values are a machine
-    # layer. Their deterministic map must not depend on buyer-copy generation.
+    # Media keys and localized terms are a separate machine layer. They never
+    # come from a writer or repair response, including field-level salvage.
+    merged["media_descriptions"] = dict(fallback["media_descriptions"])
     merged["localized_terms"] = dict(fallback["localized_terms"])
 
     for _ in range(5):
@@ -1276,7 +1269,9 @@ def _payload_validation_error(
         for item in highlights
     ]
     if len(set(normalized_highlights)) != len(normalized_highlights) or any(
-        len(item) >= 18 and item in normalized_overview
+        # Short feature phrases naturally summarize prose; reject only a
+        # sentence-like bullet copied back from the overview.
+        len(item) >= 32 and item in normalized_overview
         for item in normalized_highlights
     ):
         return "repetitive-shopper-copy-guard"
@@ -1427,8 +1422,15 @@ def _attribute_display_values(
     term_map: dict[str, Any],
     names: tuple[str, ...],
 ) -> list[str]:
+    decisions = {
+        item.get("attribute_index"): str(item.get("decision") or "publish")
+        for item in facts.reconciled_fact_ledger.get("attribute_decisions", [])
+        if isinstance(item, dict) and isinstance(item.get("attribute_index"), int)
+    } if isinstance(facts.reconciled_fact_ledger, dict) else {}
     values: list[str] = []
-    for item in facts.attributes:
+    for index, item in enumerate(facts.attributes):
+        if decisions.get(index, "publish") != "publish":
+            continue
         if item.name not in names:
             continue
         localized = _localized_display(language, item.value, term_map)
@@ -1654,7 +1656,23 @@ def _fallback_payload(
     selected_features: list[tuple[str, str]] = []
     feature_by_source: dict[str, str] = {}
     seen_values: set[str] = set()
-    if "露肩" in facts.source_title:
+    decisions = {
+        item.get("attribute_index"): str(item.get("decision") or "publish")
+        for item in facts.reconciled_fact_ledger.get("attribute_decisions", [])
+        if isinstance(item, dict) and isinstance(item.get("attribute_index"), int)
+    } if isinstance(facts.reconciled_fact_ledger, dict) else {}
+    publishable_attributes = [
+        item
+        for index, item in enumerate(facts.attributes)
+        if decisions.get(index, "publish") == "publish"
+    ]
+    title_is_publishable = (
+        not facts.reconciled_fact_ledger
+        or facts.reconciled_fact_ledger.get("seller_title_decision", "publish")
+        == "publish"
+    )
+    buyer_title_source = facts.source_title if title_is_publishable else ""
+    if "露肩" in buyer_title_source:
         cold_shoulder = _TERM_TRANSLATIONS[language]["露肩"]
         selected_features.append(
             (_TERM_TRANSLATIONS[language]["设计"], cold_shoulder)
@@ -1663,7 +1681,11 @@ def _fallback_payload(
         seen_values.add(cold_shoulder)
     for attribute_name in _MARKETING_ATTRIBUTE_NAMES:
         item = next(
-            (attribute for attribute in facts.attributes if attribute.name == attribute_name),
+            (
+                attribute
+                for attribute in publishable_attributes
+                if attribute.name == attribute_name
+            ),
             None,
         )
         if item is None:
@@ -1675,17 +1697,17 @@ def _fallback_payload(
             item.value, _static_localize_term(language, item.value)
         )
         if item.name == "图案" and any(
-            token in facts.source_title for token in ("花卉", "花朵", "花印")
+            token in buyer_title_source for token in ("花卉", "花朵", "花印")
         ):
             localized_value = {
                 "en": "Vintage floral print"
-                if "复古" in facts.source_title
+                if "复古" in buyer_title_source
                 else "Floral print",
                 "ko": "빈티지 플로럴 프린트"
-                if "复古" in facts.source_title
+                if "复古" in buyer_title_source
                 else "플로럴 프린트",
                 "pt": "Estampa floral retrô"
-                if "复古" in facts.source_title
+                if "复古" in buyer_title_source
                 else "Estampa floral",
             }[language]
         if (
@@ -1706,15 +1728,15 @@ def _fallback_payload(
         if len(selected_features) == 5:
             break
 
-    has_cold_shoulders = "露肩" in facts.source_title
+    has_cold_shoulders = "露肩" in buyer_title_source
     has_halter_neck = any(
-        item.name == "领型" and item.value == "挂脖" for item in facts.attributes
+        item.name == "领型" and item.value == "挂脖" for item in publishable_attributes
     )
     has_long_sleeves = any(
-        item.name == "袖长" and item.value == "长袖" for item in facts.attributes
+        item.name == "袖长" and item.value == "长袖" for item in publishable_attributes
     )
     has_slim_fit = any(
-        item.name == "版型" and item.value == "修身型" for item in facts.attributes
+        item.name == "版型" and item.value == "修身型" for item in publishable_attributes
     )
     payload["title"] = _compose_localized_title(
         language, base_title, feature_by_source
@@ -2030,7 +2052,6 @@ def generate_copy_payload(
 
     locale = LANGUAGES[language]
     trace = getattr(client, "trace", None)
-    source_terms = _source_terms(facts, taxonomy)
     claim_context = (
         json.dumps(publishable_claims(claim_ledger), ensure_ascii=False)
         if claim_ledger
@@ -2091,24 +2112,18 @@ Produce a JSON object containing at least these required fields; extra explanato
 - overview: concise substantive localized prose using natural paragraphing
 - highlights: preferably 3 to 5 distinct natural shopper-facing feature phrases, not raw field labels
 - fit_note: one conservative localized sizing note
-- media_descriptions: object with exactly these keys:
-  main_image.jpeg, detail_image_1.jpeg, detail_image_2.jpeg,
-  detail_image_3.jpeg, detail_image_4.jpeg, detail_image_5.jpeg, product_video.mp4
-- localized_terms: object covering every source term below with a concise native display value. Keep model numbers, IDs and size codes unchanged. Translate source-script labels when reliable; preserve an exact proper label only when translation would lose evidence.
 - claim_refs: optional object mapping title, overview, highlights and fit_note to supporting claim_id values
   from the ledger. Use only listed IDs; this metadata is for the delivery audit and is not shopper copy.
 
-Source terms requiring localized display values:
-{json.dumps(sorted(source_terms), ensure_ascii=False)}
+Do not generate category tables, attribute tables, SKU rows, media filenames or localized source-term
+maps. Code builds that machine appendix independently from verified structured data after the buyer
+copy passes review.
 
 Verified product facts:
 {json.dumps(facts.compact_dict(), ensure_ascii=False)}
 
 Resolved AliExpress category:
 {json.dumps({"id": taxonomy.category.category_id, "name": taxonomy.category.name, "path": taxonomy.category.path}, ensure_ascii=False)}
-
-Creative media plan:
-{json.dumps({"theme": creative_plan.visual_theme, "detail_prompts": creative_plan.detail_prompts, "video_prompt": creative_plan.video_prompt}, ensure_ascii=False)}
 
 Bounded manager localization priority:
 {agent_guidance or "Use the locale rules and verified facts above."}
@@ -2142,7 +2157,7 @@ extract only concrete product type, construction, silhouette, pattern, color and
         trace.emit("copy.draft", language=language, payload=draft)
 
     if not audit_valid_draft:
-        fast_payload = _normalize_auxiliary_fields(draft, fallback)
+        fast_payload = _compose_copy_layers(draft, fallback)
         fast_error = _payload_validation_error(
             language,
             fast_payload,
@@ -2181,10 +2196,9 @@ Keep natural localized language, but prefer precise field-level facts over gener
 Replace stock marketing phrases with product-specific syntax and vary sentence structure. Keep buyer
 copy free of IDs and raw field labels because code renders machine-oriented data in a separate appendix.
 Make each highlight serve a distinct purchase decision instead of repeating the overview.
-The result must contain all requested fields and all seven required media keys; ignore harmless extra
-top-level metadata instead of rewriting good prose. Do not copy Chinese characters into buyer-facing
-prose or media descriptions. Preserve exact localized_terms source keys, and normally translate their
-values; an exact identifier, model code or proper source label may remain in this machine-oriented map.
+The result must contain the four requested buyer-copy fields; ignore harmless extra top-level metadata
+instead of rewriting good prose. Do not copy Chinese characters into buyer-facing prose. Do not add
+machine appendix fields: code supplies category, attribute, SKU and media data independently.
 When the candidate contains valid claim_refs, preserve only ledger IDs that still support the rewritten field.
 Apply native {locale["locale"]} grammar and retail terminology, not literal source-language word order.
 Use natural paragraphing for the overview. Remove process language, evidence-led phrasing and
@@ -2192,8 +2206,8 @@ instructions to inspect a SKU matrix.
 {skill_instructions}
 """.strip()
     audit_prompt = f"""
-Audit and, where needed, correct this candidate payload:
-{json.dumps(draft, ensure_ascii=False)}
+Audit and, where needed, correct this candidate buyer-copy payload:
+{json.dumps({key: draft.get(key) for key in (*_BUYER_COPY_FIELDS, "claim_refs") if key in draft}, ensure_ascii=False)}
 
 Verified source facts:
 {json.dumps(facts.compact_dict(), ensure_ascii=False)}
@@ -2201,10 +2215,8 @@ Verified source facts:
 Resolved AliExpress category:
 {json.dumps({"id": taxonomy.category.category_id, "name": taxonomy.category.name, "path": taxonomy.category.path}, ensure_ascii=False)}
 
-Required top-level keys: title, overview, highlights, fit_note, media_descriptions, localized_terms.
-Required media keys: main_image.jpeg, detail_image_1.jpeg, detail_image_2.jpeg,
-detail_image_3.jpeg, detail_image_4.jpeg, detail_image_5.jpeg, product_video.mp4.
-The video description may state the fixed 8-second duration. Output the corrected JSON object only.
+Required top-level keys: title, overview, highlights, fit_note.
+Do not output media_descriptions or localized_terms. Output the corrected buyer-copy JSON object only.
 """.strip()
     audit_applied = True
     try:
@@ -2228,7 +2240,7 @@ The video description may state the fixed 8-second duration. Output the correcte
             payload=audited,
         )
 
-    payload = _normalize_auxiliary_fields(audited, fallback)
+    payload = _compose_copy_layers(audited, fallback)
     expected_media = set(fallback["media_descriptions"])
     expected_terms = set(fallback["localized_terms"])
     validation_error = _payload_validation_error(
@@ -2254,15 +2266,12 @@ The video description may state the fixed 8-second duration. Output the correcte
         repair_prompt = f"""
 Repair the candidate payload because it failed this deterministic check: {validation_error}.
 Return all required schema fields in natural {locale["locale"]}; harmless extra top-level fields are
-allowed and ignored. Remove Chinese fragments from buyer-facing prose and media descriptions. Preserve
-the exact localized_terms source keys below; translate their display values when reliable, while keeping
-exact identifiers, model codes and necessary proper source labels unchanged.
+allowed and ignored. Remove Chinese fragments from buyer-facing prose. Do not generate machine appendix
+fields; code restores the exact deterministic appendix after this repair.
 Remove unsupported numbers and claims instead of replacing them with new claims.
-The localized_terms object must cover these source keys; extra keys are ignored:
-{json.dumps(sorted(expected_terms), ensure_ascii=False)}
 
-Candidate:
-{json.dumps(payload, ensure_ascii=False)}
+Candidate buyer copy:
+{json.dumps({key: payload.get(key) for key in (*_BUYER_COPY_FIELDS, "claim_refs") if key in payload}, ensure_ascii=False)}
 
 Verified source facts:
 {json.dumps(facts.compact_dict(), ensure_ascii=False)}
@@ -2291,7 +2300,7 @@ Verified source facts:
             if salvaged is not fallback:
                 return salvaged, f"{client.config.chat_model}-{salvage_source}"
             return fallback, validation_error
-        payload = _normalize_auxiliary_fields(payload, fallback)
+        payload = _compose_copy_layers(payload, fallback)
         validation_error = _payload_validation_error(
             language, payload, facts, taxonomy, expected_media, expected_terms
         )

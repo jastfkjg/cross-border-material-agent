@@ -68,6 +68,11 @@ class ProductFacts:
     fingerprint: str
     size_chart_rows: list[SizeChartRow] = field(default_factory=list)
     source_title_evidence_pointer: str = ""
+    # Evidence decisions made after source-image inspection.  The structure is
+    # intentionally product-agnostic: source attributes are addressed by their
+    # input index, and downstream stages consume the decision instead of
+    # embedding category- or feature-specific exceptions in code.
+    reconciled_fact_ledger: dict[str, Any] = field(default_factory=dict)
 
     def all_image_urls(self) -> list[str]:
         seen: set[str] = set()
@@ -113,6 +118,7 @@ class ProductFacts:
                 }
                 for item in self.size_chart_rows
             ],
+            "reconciled_fact_ledger": self.reconciled_fact_ledger,
             "image_urls": self.all_image_urls()[:12],
         }
 
@@ -209,6 +215,9 @@ class AgentEvaluation:
     summary: str = ""
     issues: list[dict[str, Any]] = field(default_factory=list)
     repair_actions: list[AgentAction] = field(default_factory=list)
+    evaluator_models: list[str] = field(default_factory=list)
+    model_dimension_scores: dict[str, dict[str, float]] = field(default_factory=dict)
+    model_weighted_scores: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -240,7 +249,6 @@ class RunState:
     agent_evaluations: list[AgentEvaluation] = field(default_factory=list)
     agent_actions: list[AgentActionResult] = field(default_factory=list)
     agent_snapshots: list[dict[str, Any]] = field(default_factory=list)
-    agent_arbitration: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

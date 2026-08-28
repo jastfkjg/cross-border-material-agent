@@ -798,6 +798,147 @@ class FactAndTaxonomyTests(unittest.TestCase):
         self.assertEqual(payload["title"], draft["title"])
         self.assertEqual(source, "copy-model-validated-draft")
 
+    def test_writer_cannot_mutate_deterministic_machine_appendix(self) -> None:
+        facts = load_product_facts(DATA / "product_info/product_9493156931235.json")
+        taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
+        plan = fallback_creative_plan(facts, taxonomy)
+        fallback = _fallback_payload("en", facts, taxonomy)
+        draft = dict(fallback)
+        draft["media_descriptions"] = {
+            key: "MODEL MUTATED MEDIA CONTRACT"
+            for key in fallback["media_descriptions"]
+        }
+        draft["localized_terms"] = {
+            key: "MODEL MUTATED TERM" for key in fallback["localized_terms"]
+        }
+
+        class CopyClient:
+            config = SimpleNamespace(chat_model="copy-model")
+            trace = None
+
+            def __init__(self):
+                self.calls = 0
+
+            def chat_json(self, *args, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return draft
+                raise ApiError("auditor unavailable", retryable=True, category="queue")
+
+        payload, _ = generate_copy_payload(
+            "en", facts, taxonomy, plan, CopyClient()
+        )
+        self.assertEqual(payload["media_descriptions"], fallback["media_descriptions"])
+        self.assertEqual(payload["localized_terms"], fallback["localized_terms"])
+
+    def test_global_detail_pool_installs_only_hard_safe_improving_combination(self) -> None:
+        facts = load_product_facts(DATA / "product_info/product_8822221153828.json")
+        taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
+        plan = fallback_creative_plan(facts, taxonomy)
+        source_url = facts.product_image_urls[0]
+
+        class SetReviewer:
+            @staticmethod
+            def select_best_detail_set(*args, **kwargs):
+                safe_rows = []
+                for candidate_index, slot in enumerate(
+                    ("detail_image_1.jpeg", "detail_image_1.jpeg", "detail_image_2.jpeg", "detail_image_2.jpeg")
+                ):
+                    safe_rows.append(
+                        {
+                            "candidate_index": candidate_index,
+                            "slot": slot,
+                            "usable": True,
+                            "identity_consistent": True,
+                            "construction_consistent": True,
+                            "color_consistent": True,
+                            "pattern_consistent": True,
+                            "slot_match": True,
+                            "single_composition": True,
+                            "unwanted_text": False,
+                            "unwanted_brand_or_logo": False,
+                            "prohibited_visual": False,
+                            "major_artifacts": False,
+                        }
+                    )
+                return {
+                    "candidates": safe_rows,
+                    "selections": [
+                        {"slot": "detail_image_1.jpeg", "candidate_index": 1},
+                        {"slot": "detail_image_2.jpeg", "candidate_index": 2},
+                    ],
+                    "current_set_score": 70,
+                    "selected_set_score": 76,
+                    "selection_improves_current_set": True,
+                }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=root / "out",
+                logger=logging.getLogger("global-detail-pool-test"),
+                offline=True,
+            )
+            pipeline.client = SetReviewer()
+            pipeline.deadline += 600
+            pipeline._source_image_observations[source_url] = {
+                "inspection_complete": True,
+                "safe_for_generation_reference": True,
+                "role": "hero",
+            }
+            pipeline._detail_candidate_pools = {
+                1: ["https://example.test/slot-1-current.jpg", "https://example.test/slot-1-better.jpg"],
+                2: ["https://example.test/slot-2-current.jpg", "https://example.test/slot-2-alternate.jpg"],
+            }
+            detail_assets = {
+                1: AssetResult(
+                    "detail_image_1.jpeg",
+                    str(root / "detail_image_1.jpeg"),
+                    source_url="https://example.test/slot-1-current.jpg",
+                    generated=True,
+                    description="slot 1",
+                ),
+                2: AssetResult(
+                    "detail_image_2.jpeg",
+                    str(root / "detail_image_2.jpeg"),
+                    source_url="https://example.test/slot-2-current.jpg",
+                    generated=True,
+                    description="slot 2",
+                ),
+            }
+            for asset in detail_assets.values():
+                Path(asset.path).write_bytes(b"current")
+
+            def install(url, destination, *args, **kwargs):
+                Path(destination).write_bytes(url.encode("utf-8"))
+
+            with mock.patch.object(
+                pipeline, "_download_and_normalize", side_effect=install
+            ):
+                pipeline._apply_global_detail_candidate_selection(
+                    facts=facts,
+                    creative_plan=plan,
+                    main_asset=AssetResult(
+                        "main_image.jpeg",
+                        str(root / "main_image.jpeg"),
+                        source_url="https://example.test/main.jpg",
+                        generated=True,
+                    ),
+                    detail_assets=detail_assets,
+                    work_dir=root,
+                    downloads_dir=root,
+                )
+
+            self.assertEqual(
+                detail_assets[1].source_url,
+                "https://example.test/slot-1-better.jpg",
+            )
+            self.assertEqual(
+                detail_assets[2].source_url,
+                "https://example.test/slot-2-current.jpg",
+            )
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.tree = load_json(DATA / "clothing_categories.json")

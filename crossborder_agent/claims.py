@@ -108,6 +108,17 @@ def build_claim_ledger(
     """Create a compact claim-to-evidence registry used by copy and diagnostics."""
 
     claims: list[ClaimEvidence] = []
+    reconciliation = (
+        facts.reconciled_fact_ledger
+        if isinstance(facts.reconciled_fact_ledger, dict)
+        else {}
+    )
+    attribute_decisions = {
+        item.get("attribute_index"): item
+        for item in reconciliation.get("attribute_decisions", [])
+        if isinstance(item, dict) and isinstance(item.get("attribute_index"), int)
+    }
+    title_decision = str(reconciliation.get("seller_title_decision") or "publish")
 
     def add(
         concept: str,
@@ -139,12 +150,19 @@ def build_claim_ledger(
         "seller_title",
         "source_title",
         facts.source_title_evidence_pointer,
-        ["buyer_copy", "machine_appendix", "image_prompt"],
+        (
+            ["buyer_copy", "machine_appendix", "image_prompt"]
+            if title_decision == "publish"
+            else ["machine_appendix"]
+        ),
     )
-    for item in facts.attributes:
+    for attribute_index, item in enumerate(facts.attributes):
         buyer_safe = buyer_safe_source_name(item.name)
         surfaces = ["machine_appendix"]
-        if buyer_safe:
+        decision = str(
+            attribute_decisions.get(attribute_index, {}).get("decision") or "publish"
+        )
+        if buyer_safe and decision == "publish":
             surfaces = ["buyer_copy", "machine_appendix", "image_prompt"]
         add(
             item.name,
@@ -199,7 +217,30 @@ def build_claim_ledger(
             ["machine_appendix"],
         )
 
+    canonical_claims = reconciliation.get("canonical_visual_claims")
+    if isinstance(canonical_claims, list):
+        for index, item in enumerate(canonical_claims):
+            if not isinstance(item, dict):
+                continue
+            concept = str(item.get("concept") or "visible_design_feature").strip()
+            value = str(item.get("value") or "").strip()
+            evidence = item.get("evidence")
+            evidence_text = "; ".join(
+                str(part).strip() for part in evidence if str(part).strip()
+            ) if isinstance(evidence, list) else str(evidence or "")
+            add(
+                concept,
+                value,
+                "reconciled_visual_evidence",
+                concept,
+                evidence_text or f"reconciled_fact_ledger.canonical_visual_claims[{index}]",
+                ["buyer_copy", "image_prompt", "media_guide"],
+                float(item.get("confidence") or 0.8),
+            )
+
     observations = (vision or {}).get("design_features")
+    if not isinstance(observations, list):
+        observations = (vision or {}).get("visible_design_features")
     if isinstance(observations, list):
         for index, item in enumerate(observations):
             if isinstance(item, str):

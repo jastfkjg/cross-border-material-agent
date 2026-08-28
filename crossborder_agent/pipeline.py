@@ -86,7 +86,7 @@ _VIDEO_NEGATIVE_PROMPT = (
 
 _AGENT_MIN_NEW_REPAIR_SECONDS = 8 * 60
 _AGENT_POST_REPAIR_REVIEW_RESERVE_SECONDS = 4 * 60
-_AGENT_FINAL_ARBITRATION_MIN_SECONDS = 150
+_AGENT_MAX_EVALUATIONS = 3
 _AGENT_SNAPSHOT_FILES = tuple(
     sorted(EXPECTED_FILES - {"strategy_document.md"})
 )
@@ -190,6 +190,8 @@ class Pipeline:
         self.warnings: list[str] = []
         self._raw_counter = 0
         self._raw_counter_lock = threading.Lock()
+        self._detail_candidate_pool_lock = threading.Lock()
+        self._detail_candidate_pools: dict[int, list[str]] = {}
         self._source_image_observations: dict[str, dict[str, Any]] = {}
         self._source_selection_warnings: set[str] = set()
         self._size_chart_source_url = ""
@@ -332,6 +334,21 @@ class Pipeline:
 
             vision = self._analyze_source_images(facts)
             self.trace.emit("vision.source_review", result=vision)
+            facts.reconciled_fact_ledger = self.agent.reconcile_facts(facts, vision)
+            self.trace.emit(
+                "facts.reconciled",
+                ledger=facts.reconciled_fact_ledger,
+                models=facts.reconciled_fact_ledger.get("models", []),
+                conflict_count=len(
+                    facts.reconciled_fact_ledger.get("conflicts", [])
+                ),
+            )
+            self.logger.info(
+                "事实证据裁决完成: models=%s conflicts=%d attribute_decisions=%d",
+                ",".join(facts.reconciled_fact_ledger.get("models", [])) or "none",
+                len(facts.reconciled_fact_ledger.get("conflicts", [])),
+                len(facts.reconciled_fact_ledger.get("attribute_decisions", [])),
+            )
             self._apply_size_chart_observations(facts, vision)
             claim_ledger = build_claim_ledger(facts, taxonomy, vision)
             self.trace.emit(
@@ -460,6 +477,15 @@ class Pipeline:
                         detail_assets[index] = future.result()
                     except Exception as exc:
                         raise PipelineError(f"详情图 {index} 构建失败: {exc}") from exc
+
+                self._apply_global_detail_candidate_selection(
+                    facts=facts,
+                    creative_plan=creative_plan,
+                    main_asset=main_asset,
+                    detail_assets=detail_assets,
+                    work_dir=work_dir,
+                    downloads_dir=downloads_dir,
+                )
 
                 # The six-image collection is complete now. Review it immediately
                 # while copy/video futures continue in parallel, so a slow text or
@@ -737,8 +763,8 @@ class Pipeline:
                     "primary_verified_detail": "원본에서 확인된 핵심 디테일을 가까이 보여 줍니다.",
                     "secondary_verified_detail": "원본에서 확인된 다른 디테일을 가까이 보여 줍니다.",
                     "verified_variants": "판매자 원본에서 확인된 색상 옵션만 비교한 카탈로그 이미지입니다.",
-                    "verified_alternate_view": "원본 근거만 사용한 다른 시점의 상품 이미지입니다.",
-                    "verified_use_context": "상품 전체가 보이는 원본 근거 기반의 실용적 사용 이미지입니다.",
+                    "verified_alternate_view": "판매자 이미지에서 확인된 다른 시점의 상품 이미지입니다.",
+                    "verified_use_context": "상품 전체가 보이는 판매자 이미지 기반의 실용적 사용 장면입니다.",
                     "product_only_context": "실용적이고 중립적인 맥락의 상품 전용 이미지입니다.",
                 },
             },
@@ -947,6 +973,8 @@ class Pipeline:
             "after_repair_rounds": int(evaluation.round_index),
             "weighted_score": float(evaluation.weighted_score),
             "dimension_scores": dict(evaluation.dimension_scores),
+            "evaluator_models": list(evaluation.evaluator_models),
+            "model_weighted_scores": dict(evaluation.model_weighted_scores),
             "ready_for_delivery": bool(evaluation.ready_for_delivery),
             "selected": False,
         }
@@ -1155,14 +1183,14 @@ class Pipeline:
                 reason="offline" if self.offline else "no-model-client",
             )
             return
-        # Full mode has one deterministic upper bound. The manager may shape
-        # priorities and per-round actions, but cannot prematurely reduce the
-        # number of repair opportunities available to the runtime controller.
-        max_repairs = 3
-        repairs_used = 0
+        # Full mode aims for three independently aggregated evaluations whenever
+        # the deadline permits.  A failed/no-op repair does not prematurely end
+        # evaluation: another judge round can still surface consensus issues and
+        # produce a better targeted action set.
         round_index = 0
         snapshots: list[dict[str, Any]] = []
-        while True:
+        stop_reason = "max_evaluations_reached"
+        while round_index < _AGENT_MAX_EVALUATIONS:
             if (
                 self.deadline - time.monotonic()
                 <= _AGENT_POST_REPAIR_REVIEW_RESERVE_SECONDS
@@ -1173,6 +1201,13 @@ class Pipeline:
                     reason="insufficient-stage-budget",
                     round_index=round_index,
                     remaining_seconds=round(self.deadline - time.monotonic(), 1),
+                )
+                stop_reason = "insufficient_stage_budget"
+                self.logger.info(
+                    "Agent 评估停止: reason=%s completed_rounds=%d remaining_seconds=%.1f",
+                    stop_reason,
+                    len(snapshots),
+                    self.deadline - time.monotonic(),
                 )
                 break
             evaluation = self.agent.evaluate_delivery(
@@ -1197,7 +1232,12 @@ class Pipeline:
                     round_index=round_index,
                     reason="reviewer-unavailable-or-invalid-response",
                 )
-                break
+                self.logger.warning(
+                    "Agent 全局评估轮次 %d 无效: reason=insufficient_valid_evaluators",
+                    round_index,
+                )
+                round_index += 1
+                continue
             state.agent_evaluations.append(evaluation)
             current_snapshot = self._capture_agent_snapshot(
                 evaluation=evaluation,
@@ -1210,6 +1250,10 @@ class Pipeline:
             self.trace.emit(
                 "agent.evaluation",
                 round_index=round_index,
+                evaluator_models=evaluation.evaluator_models,
+                model_dimension_scores=evaluation.model_dimension_scores,
+                model_weighted_scores=evaluation.model_weighted_scores,
+                aggregation="per-dimension arithmetic mean",
                 ready=evaluation.ready_for_delivery,
                 weighted_score=evaluation.weighted_score,
                 dimension_scores=evaluation.dimension_scores,
@@ -1228,24 +1272,45 @@ class Pipeline:
                 ],
             )
             self.logger.info(
-                "Agent 全局评估轮次 %d: score=%.1f ready=%s actions=%d",
+                "Agent 全局评估轮次 %d: models=%s model_scores=%s aggregate_score=%.1f "
+                "dimensions=%s ready=%s actions=%d",
                 round_index,
+                ",".join(evaluation.evaluator_models),
+                json.dumps(evaluation.model_weighted_scores, ensure_ascii=False),
                 evaluation.weighted_score,
+                json.dumps(evaluation.dimension_scores, ensure_ascii=False),
                 evaluation.ready_for_delivery,
                 len(evaluation.repair_actions),
             )
-            if evaluation.ready_for_delivery or not evaluation.repair_actions:
-                break
-            if repairs_used >= max_repairs:
-                self.warnings.append("已达到有界 Agent 修复轮次上限，进入最优快照选择")
+            if round_index + 1 >= _AGENT_MAX_EVALUATIONS:
+                self.trace.emit(
+                    "agent.evaluation_loop_stop",
+                    reason="max-evaluations-reached",
+                    completed_rounds=len(snapshots),
+                    selected_by="highest-averaged-score",
+                    override=False,
+                )
                 break
             if self.deadline - time.monotonic() <= _AGENT_MIN_NEW_REPAIR_SECONDS:
                 self.warnings.append(
-                    "剩余时间不足 8 分钟，不启动新的 Agent 修复轮次"
+                    "剩余时间不足 8 分钟，不启动新修复；如评估预算允许则继续下一轮评分"
                 )
-                break
+                self.trace.emit(
+                    "agent.repair_round_skipped",
+                    round_index=round_index,
+                    reason="insufficient-repair-budget",
+                    remaining_seconds=round(self.deadline - time.monotonic(), 1),
+                )
+                self.logger.info(
+                    "Agent 修复轮次 %d 跳过: reason=insufficient_repair_budget",
+                    round_index,
+                )
+                round_index += 1
+                continue
 
             completed = 0
+            skipped = 0
+            failed = 0
             changed_targets: set[str] = set()
             dependency_order = {
                 "regenerate_main_image": 0,
@@ -1305,11 +1370,43 @@ class Pipeline:
                         "Agent 修复完成: %s/%s", action.tool, action.target
                     )
                 else:
+                    if result.status == "skipped":
+                        skipped += 1
+                    else:
+                        failed += 1
                     self.warnings.append(
                         f"Agent 修复未替换现有素材 {action.target}: {result.detail[:300]}"
                     )
+            self.trace.emit(
+                "agent.repair_round_complete",
+                round_index=round_index,
+                requested=len(ordered_actions),
+                completed=completed,
+                skipped=skipped,
+                failed=failed,
+                changed_targets=sorted(changed_targets),
+            )
+            self.logger.info(
+                "Agent 修复轮次 %d: requested=%d completed=%d skipped=%d failed=%d",
+                round_index,
+                len(ordered_actions),
+                completed,
+                skipped,
+                failed,
+            )
             if completed == 0:
-                break
+                self.trace.emit(
+                    "agent.repair_round_no_change",
+                    round_index=round_index,
+                    reason=(
+                        "no-repair-actions"
+                        if not ordered_actions
+                        else "all-repairs-skipped-or-failed"
+                    ),
+                    next_evaluation_round=round_index + 1,
+                )
+                round_index += 1
+                continue
             synchronized = self._synchronize_repair_dependencies(
                 round_index=round_index,
                 changed_targets=changed_targets,
@@ -1333,62 +1430,19 @@ class Pipeline:
                     work_dir=work_dir,
                     mark_selected=False,
                 )
-                break
-            repairs_used += 1
+                self.trace.emit(
+                    "agent.repair_round_no_change",
+                    round_index=round_index,
+                    reason="dependency-synchronization-failed",
+                    next_evaluation_round=round_index + 1,
+                )
             round_index += 1
 
         if snapshots:
             ranked_snapshots = sorted(
                 snapshots, key=self._agent_snapshot_rank, reverse=True
             )
-            primary_best = ranked_snapshots[0]
-            best_snapshot = primary_best
-            shortlist = sorted(
-                ranked_snapshots[:2],
-                key=lambda item: item["metadata"]["snapshot_id"],
-            )
-            if (
-                len(shortlist) == 2
-                and self.deadline - time.monotonic()
-                > _AGENT_FINAL_ARBITRATION_MIN_SECONDS
-            ):
-                arbitration = self.agent.arbitrate_snapshots(
-                    facts=facts,
-                    taxonomy=taxonomy,
-                    snapshots=shortlist,
-                )
-                candidate_ids = [
-                    item["metadata"]["snapshot_id"] for item in shortlist
-                ]
-                state.agent_arbitration = {
-                    **arbitration,
-                    "candidate_snapshot_ids": candidate_ids,
-                    "primary_selected_snapshot_id": primary_best["metadata"][
-                        "snapshot_id"
-                    ],
-                }
-                selected_index = arbitration.get("selected_index")
-                if (
-                    arbitration.get("status") == "completed"
-                    and selected_index in {0, 1}
-                ):
-                    best_snapshot = shortlist[int(selected_index)]
-                self.trace.emit("agent.final_arbitration", **state.agent_arbitration)
-            else:
-                state.agent_arbitration = {
-                    "status": "skipped",
-                    "reason": (
-                        "fewer than two scored snapshots"
-                        if len(shortlist) < 2
-                        else "insufficient final arbitration budget"
-                    ),
-                    "model": (
-                        self.client.config.arbitration_model if self.client else ""
-                    ),
-                    "primary_selected_snapshot_id": primary_best["metadata"][
-                        "snapshot_id"
-                    ],
-                }
+            best_snapshot = ranked_snapshots[0]
             self._restore_agent_snapshot(
                 best_snapshot,
                 state=state,
@@ -1398,10 +1452,24 @@ class Pipeline:
                 mark_selected=True,
             )
             self.logger.info(
-                "Agent 最终选择 %s，score=%.1f（共 %d 个已评分快照）",
+                "Agent 最终选择 %s: score=%.1f snapshots=%d selection_rule=highest_averaged_score "
+                "override=false stop_reason=%s",
                 best_snapshot["metadata"]["snapshot_id"],
                 best_snapshot["metadata"]["weighted_score"],
                 len(snapshots),
+                stop_reason,
+            )
+            self.trace.emit(
+                "agent.final_selection",
+                snapshot_id=best_snapshot["metadata"]["snapshot_id"],
+                weighted_score=best_snapshot["metadata"]["weighted_score"],
+                snapshot_scores={
+                    item["metadata"]["snapshot_id"]: item["metadata"]["weighted_score"]
+                    for item in snapshots
+                },
+                selection_rule="highest-averaged-score",
+                override=False,
+                stop_reason=stop_reason,
             )
 
     @staticmethod
@@ -1581,12 +1649,10 @@ class Pipeline:
                 "failed",
                 f"localized revision did not pass model/schema audit ({source}); prior copy preserved",
             )
-        if not self._copy_revision_improves(
-            language, facts, incumbent, candidate, minimum_improvement=6.0
-        ):
+        if not self._copy_revision_is_safe(language, facts, incumbent, candidate):
             return ToolExecution(
                 "skipped",
-                f"{language} revision did not beat current copy by 6 points; prior copy preserved",
+                f"{language} revision did not pass factual/safety comparison; prior copy preserved",
             )
         try:
             rendered = render_description(language, candidate, facts, taxonomy)
@@ -1599,14 +1665,12 @@ class Pipeline:
         sources[language] = f"{source}-agent-repair"
         return ToolExecution("completed", f"{language} copy revision accepted")
 
-    def _copy_revision_improves(
+    def _copy_revision_is_safe(
         self,
         language: str,
         facts: ProductFacts,
         incumbent: dict[str, Any],
         candidate: dict[str, Any],
-        *,
-        minimum_improvement: float,
     ) -> bool:
         if self.client is None:
             return False
@@ -1620,7 +1684,9 @@ Language: {language}
 Candidate 0 is the current accepted copy. Candidate 1 is a proposed repair.
 Return selected_index plus exactly two candidates containing index, score (0-100),
 facts_supported, complete, native_and_natural, has_source_script_contamination, and reason.
-Select candidate 1 only when it improves by at least {minimum_improvement:.0f} points and all its facts are supported.
+Candidate 1 is an evaluator-requested repair. Mark its facts and language properties conservatively.
+A confirmed factual correction must not be rejected merely because its style score is close to candidate 0.
+The reconciled fact ledger inside Verified facts is authoritative for appearance conflicts.
 
 Verified facts:
 {json.dumps(facts.compact_dict(), ensure_ascii=False)}
@@ -1650,14 +1716,8 @@ Candidate 1:
         new = by_index.get(1)
         if not isinstance(old, dict) or not isinstance(new, dict):
             return False
-        old_score = old.get("score")
-        new_score = new.get("score")
         return bool(
-            review.get("selected_index") == 1
-            and isinstance(old_score, (int, float))
-            and isinstance(new_score, (int, float))
-            and float(new_score) >= float(old_score) + minimum_improvement
-            and new.get("facts_supported") is True
+            new.get("facts_supported") is True
             and new.get("complete") is not False
             and new.get("native_and_natural") is not False
             and new.get("has_source_script_contamination") is not True
@@ -2819,6 +2879,7 @@ Allowed leaf candidates:
                     facts,
                     plan.detail_prompts[index - 1],
                     references=reference_selection[:3],
+                    record_pool=True,
                 )
                 try:
                     self._download_and_normalize(
@@ -2842,6 +2903,7 @@ Allowed leaf candidates:
                         plan.detail_prompts[index - 1]
                         + "\nThe previous output URL or file failed physical validation. Produce a fresh asset.",
                         references=reference_selection[:3],
+                        record_pool=True,
                     )
                     self._download_and_normalize(
                         generated_url,
@@ -2889,6 +2951,197 @@ Allowed leaf candidates:
             description=fallback_description,
         )
 
+    def _apply_global_detail_candidate_selection(
+        self,
+        *,
+        facts: ProductFacts,
+        creative_plan: CreativePlan,
+        main_asset: AssetResult,
+        detail_assets: dict[int, AssetResult],
+        work_dir: Path,
+        downloads_dir: Path,
+    ) -> None:
+        """Jointly select the detail-image combination from all slot candidates.
+
+        Per-slot review removes hard defects first. This second pass is deliberately
+        set-aware: it may choose a slightly lower local candidate when that candidate
+        removes semantic duplication and improves commercial role coverage.
+        """
+
+        if self.client is None:
+            return
+        with self._detail_candidate_pool_lock:
+            pools = {
+                index: list(urls[:2])
+                for index, urls in self._detail_candidate_pools.items()
+                if index in detail_assets and urls
+            }
+        if len(pools) < 2 or sum(len(urls) for urls in pools.values()) <= len(pools):
+            self.trace.emit(
+                "image.detail_pool_selection_skipped",
+                reason="no-cross-slot-alternatives",
+                pool_sizes={str(key): len(value) for key, value in pools.items()},
+            )
+            return
+        if self.deadline - time.monotonic() <= 4 * 60:
+            self.trace.emit(
+                "image.detail_pool_selection_skipped",
+                reason="insufficient-stage-budget",
+                remaining_seconds=round(self.deadline - time.monotonic(), 1),
+            )
+            return
+
+        source_references = self._source_urls_for_use(
+            _unique(
+                facts.product_image_urls
+                + facts.sku_image_urls
+                + facts.description_image_urls
+            ),
+            use="reference",
+            preferred_roles=("hero", "front", "detail", "variant"),
+        )[:1]
+        if not source_references or not main_asset.source_url:
+            self.trace.emit(
+                "image.detail_pool_selection_skipped",
+                reason="no-trusted-source-reference",
+            )
+            return
+
+        candidate_urls: list[str] = []
+        candidate_jobs: list[dict[str, Any]] = []
+        current_selection: dict[str, int] = {}
+        indices_by_slot: dict[str, set[int]] = {}
+        for index in sorted(pools):
+            slot = f"detail_image_{index}.jpeg"
+            indices_by_slot[slot] = set()
+            role = (
+                creative_plan.detail_roles[index - 1]
+                if index <= len(creative_plan.detail_roles)
+                else f"detail_slot_{index}"
+            )
+            for url in pools[index]:
+                candidate_index = len(candidate_urls)
+                candidate_urls.append(url)
+                indices_by_slot[slot].add(candidate_index)
+                candidate_jobs.append(
+                    {
+                        "candidate_index": candidate_index,
+                        "slot": slot,
+                        "canonical_role": role,
+                        "current": url == detail_assets[index].source_url,
+                    }
+                )
+                if url == detail_assets[index].source_url:
+                    current_selection[slot] = candidate_index
+            if slot not in current_selection:
+                current_selection[slot] = min(indices_by_slot[slot])
+
+        try:
+            review = self.client.select_best_detail_set(
+                json.dumps(facts.compact_dict(), ensure_ascii=False),
+                source_references,
+                main_asset.source_url,
+                candidate_urls,
+                candidate_jobs,
+                current_selection,
+            )
+        except (ApiError, AttributeError) as exc:
+            self.logger.warning("详情图候选池全局选片不可用，保留逐槽结果: %s", exc)
+            self.warnings.append(f"详情图候选池全局选片未完成: {exc}")
+            self.trace.emit(
+                "image.detail_pool_selection_failed",
+                error=str(exc),
+            )
+            return
+
+        current_score = review.get("current_set_score")
+        selected_score = review.get("selected_set_score")
+        if (
+            review.get("selection_improves_current_set") is not True
+            or not isinstance(current_score, (int, float))
+            or not isinstance(selected_score, (int, float))
+            or float(selected_score) < float(current_score) + 3.0
+        ):
+            self.trace.emit(
+                "image.detail_pool_selection_kept_current",
+                review=review,
+            )
+            return
+
+        rows = review.get("candidates")
+        selections = review.get("selections")
+        if not isinstance(rows, list) or not isinstance(selections, list):
+            self.warnings.append("详情图候选池评审结构不完整，保留逐槽结果")
+            return
+        by_index = {
+            item.get("candidate_index"): item
+            for item in rows
+            if isinstance(item, dict) and isinstance(item.get("candidate_index"), int)
+        }
+        selected_by_slot = {
+            str(item.get("slot")): item.get("candidate_index")
+            for item in selections
+            if isinstance(item, dict) and isinstance(item.get("candidate_index"), int)
+        }
+        if set(selected_by_slot) != set(indices_by_slot):
+            self.warnings.append("详情图候选池未覆盖全部可选槽位，保留逐槽结果")
+            return
+
+        staged: dict[int, tuple[Path, str]] = {}
+        try:
+            for index in sorted(pools):
+                slot = f"detail_image_{index}.jpeg"
+                candidate_index = selected_by_slot[slot]
+                row = by_index.get(candidate_index)
+                if candidate_index not in indices_by_slot[slot] or not isinstance(row, dict):
+                    raise PipelineError(f"全局选片返回了槽位外候选: {slot}/{candidate_index}")
+                hard_ok = bool(
+                    row.get("usable") is True
+                    and row.get("identity_consistent") is True
+                    and row.get("construction_consistent") is True
+                    and row.get("color_consistent") is True
+                    and row.get("pattern_consistent") is True
+                    and row.get("slot_match") is True
+                    and row.get("single_composition") is True
+                    and row.get("unwanted_text") is not True
+                    and row.get("unwanted_brand_or_logo") is not True
+                    and row.get("prohibited_visual") is not True
+                    and row.get("major_artifacts") is not True
+                )
+                if not hard_ok:
+                    raise PipelineError(f"全局选片候选未通过硬门禁: {slot}")
+                selected_url = candidate_urls[candidate_index]
+                if selected_url == detail_assets[index].source_url:
+                    continue
+                path = work_dir / f".global-detail-{index}-{uuid.uuid4().hex}.jpeg"
+                self._download_and_normalize(
+                    selected_url,
+                    path,
+                    downloads_dir,
+                    canvas=(1200, 1500),
+                    white_background=False,
+                )
+                staged[index] = (path, selected_url)
+        except (ApiError, MediaError, OSError, PipelineError) as exc:
+            for path, _ in staged.values():
+                path.unlink(missing_ok=True)
+            self.logger.warning("详情图候选池全局组合安装失败，保留逐槽结果: %s", exc)
+            self.warnings.append(f"详情图候选池全局组合未安装: {exc}")
+            return
+
+        for index, (path, selected_url) in staged.items():
+            asset = detail_assets[index]
+            os.replace(path, Path(asset.path))
+            asset.source_url = selected_url
+            asset.description += "; globally selected for set diversity"
+        self.trace.emit(
+            "image.detail_pool_selection",
+            changed_slots=sorted(staged),
+            current_set_score=current_score,
+            selected_set_score=selected_score,
+            review=review,
+        )
+
     def _generate_detail_with_semantic_retry(
         self,
         index: int,
@@ -2898,6 +3151,7 @@ Allowed leaf candidates:
         references: list[str],
         incumbent_url: str = "",
         minimum_improvement: float = 0.0,
+        record_pool: bool = False,
     ) -> tuple[str, str]:
         if self.client is None:
             raise ApiError("image model unavailable")
@@ -2920,6 +3174,9 @@ Allowed leaf candidates:
                 ),
                 count=1 if self.fast_mode else 2,
             )
+            if record_pool:
+                with self._detail_candidate_pool_lock:
+                    self._detail_candidate_pools[index] = _unique(candidate_urls)
             if self.fast_mode:
                 self.trace.emit(
                     "image.detail_review_skipped",
@@ -3659,8 +3916,6 @@ Allowed leaf candidates:
                 for value in raw_agent_plan.get("risk_priorities", [])
                 if value in {f"A{index}" for index in range(1, 8)}
             ],
-            "max_repair_rounds": raw_agent_plan.get("max_repair_rounds"),
-            "max_actions_per_round": raw_agent_plan.get("max_actions_per_round"),
             "minimum_weighted_score": raw_agent_plan.get("minimum_weighted_score"),
         }
         agent_plan_controls = {
@@ -3702,6 +3957,9 @@ Allowed leaf candidates:
             "Agent 首先把商品 JSON 归一化为内部事实账本。标题、属性、SKU、图片 URL、商品 ID 和来源均在内部保留证据位置；"
             "只有源 JSON、源图片直接观察或确定性单位换算得到的信息可以进入文案和素材提示词。"
             "所有模型文案均经过结构、数值、事实和平台内容规则的确定性复核。",
+            "源图理解完成后，两个独立模型按统一的通用证据协议裁决结构化外观属性与可信像素之间的冲突；"
+            "代码按属性索引聚合发布、拒绝或仅机器字段决定，不包含具体商品特征的硬编码。裁决后的事实账本是文案、"
+            "素材生成和最终评估共同使用的权威外观证据。",
             "三份文案只发布目标语言的买家文案和本地化显示值，不暴露中文原值或原始 JSON Pointer；"
             "本地化 Source 列标明商品事实、平台映射或卖家声明。平台类目 ID、属性 ID/Value ID、"
             "SKU ID/Spec ID 仍保留在精简表格中，兼顾上架解析与阅读体验。",
@@ -3764,7 +4022,8 @@ Allowed leaf candidates:
             "- 葡萄牙文按 pt-BR 编写，避免欧洲葡语表达和未经证实的 P/M/G 映射。",
             "- 三份文案共享同一个不可变商品 ID、URL、叶子类目、属性和完整 SKU 表。",
             "- 买家文案按 Feature → 可见结构优势 → 保守购买价值组织；任一步缺少事实或像素证据时停止延伸。",
-            "- 买家段落与机器字段分层：前半部分负责自然销售表达，后半部分保留精确 ID、SKU 与来源类型。",
+            "- 买家文案与机器附录独立构建：模型只生成标题、概述、卖点和尺码提示；代码从已核验的类目、属性、"
+            "SKU 和媒体契约确定性渲染附录，因此文案修订不能改变任何可解析 ID 或表格行。",
             "- 卖家提供的体重范围只按完全匹配的尺码标签写入对应 SKU，并同时展示 kg/lb，不推导地区尺码。",
             "- 可辨识的源尺码表先由视觉模型转录，再按SKU尺码代码、来源图角色和数值范围进行确定性校验；"
             "英文显示 cm/in 与 kg/lb，韩文和巴西葡萄牙文保留 cm/kg。",
@@ -3781,22 +4040,23 @@ Allowed leaf candidates:
             "- 五张详情图各承担唯一商业任务：整体轮廓、领口/门襟、袖口/垂感、背面/下摆或真实变体、使用情境；"
             "感知哈希不同但任务重复的图片仍视为分镜失败。若源详情图存在可核验尺码表，"
             "第5张改为确定性重绘的干净尺码图。",
-            "- 高风险的变体图与穿着场景各生成两个候选，并按商品身份、颜色、图案、结构、人体与分镜匹配自动选优。",
+            "- Full 模式下每个生成式详情槽保留两个候选，先执行逐槽身份与结构硬门禁，再把固定主图和全部详情候选"
+            "交给集合级编辑器联合选片；只有六图组合至少提升 3 分且所有替换图无硬伤时才原子安装。",
             "- 视频以最终主图或其源 URL 为首帧，按上装、下装、连衣裙或童装使用不同结构保护镜头；默认移除未审核音轨。",
             f"- 本次模型直接生成并通过校验的素材数：{generated_count}。",
             "",
             "## 6. 有界 Agent 规划、评估与定向修复",
             "",
             "交付管理器先依据事实账本、A1–A7 权重、源图观察和可用工具生成本次执行策略。初稿完成后，"
-            "独立多模态评估器读取全套文案 payload、类目属性、素材清单、图片/视频及本地物理检查，输出逐维度"
-            "评分、证据化问题和白名单工具调用。Full 模式最多累计执行三轮修复；剩余时间不足 8 分钟时不再启动"
-            "新修复，并为修复后的依赖同步、重新评分和最终校验保留时间。",
+            "两个或三个独立多模态评估器读取全套文案 payload、类目属性、素材清单、图片/视频及本地物理检查，"
+            "依据完整 A1–A7 定义分别输出逐维度评分、证据化问题和白名单工具调用。代码按维度取算术平均并合并各模型"
+            "的问题与修复目标。Full 模式在预算允许时执行三次聚合评估；剩余时间不足 8 分钟时可跳过新修复，但仍会"
+            "在评估预算允许时继续下一轮评分。",
             "所有修复均先写入临时文件，完成候选语义选优、文案事实/schema 校验或视频播放校验后才原子替换；"
             "修复失败会保留上一版，不会因为评估意见自动降级为源图或幻灯片。",
             "每个完成全局评分的版本均保存完整文件与内存状态快照。图片变化后刷新六图复核与三语 Media Guide；"
-            "主图变化时同步视频，模型视频无法可靠同步则使用当前最终图片集重建一致的目录视频。最终按加权分、"
-            "A1/A2/A5 关键分筛出两个最佳版本，再由与生成模型不同的独立模型进行不含主评分和版本先后的盲评仲裁；"
-            "仲裁不可用时才恢复主评估最佳完整快照。",
+            "主图变化时同步视频，模型视频无法可靠同步则使用当前最终图片集重建一致的目录视频。最终直接恢复聚合"
+            "加权分最高的完整快照；不再调用单模型仲裁，也不存在对最高平均分快照的覆盖。",
             "- LLM 自由文本计划仅用于内部生成提示，不作为商品事实写入交付；策略文档只披露经过白名单筛选的控制参数。",
             f"- Agent 控制参数：{json.dumps(agent_plan_controls, ensure_ascii=False)}",
             f"- 已完成全局评估轮次：{len(state.agent_evaluations)}。",
@@ -3832,7 +4092,9 @@ Allowed leaf candidates:
         if state.agent_evaluations:
             lines.extend(["", "全局评估轨迹：", ""])
             lines.extend(
-                f"- 完成 {item.round_index} 轮修复后的评估：加权分 {item.weighted_score:.1f}；"
+                f"- 评估轮次 {item.round_index}：模型 {json.dumps(item.evaluator_models, ensure_ascii=False)}；"
+                f"单模型加权分 {json.dumps(item.model_weighted_scores, ensure_ascii=False)}；"
+                f"平均加权分 {item.weighted_score:.1f}；维度均分 {json.dumps(item.dimension_scores, ensure_ascii=False)}；"
                 f"ready={item.ready_for_delivery}；{brief(item.summary)}"
                 for item in state.agent_evaluations
             )
@@ -3843,20 +4105,6 @@ Allowed leaf candidates:
                 f"加权分 {float(item.get('weighted_score', 0.0)):.1f}；"
                 f"{'最终提交' if item.get('selected') else '保留备选'}。"
                 for item in state.agent_snapshots
-            )
-        if state.agent_arbitration:
-            arbitration = state.agent_arbitration
-            lines.extend(
-                [
-                    "",
-                    "独立最终仲裁：",
-                    "",
-                    f"- 状态：{arbitration.get('status', 'unknown')}。",
-                    f"- 模型：{arbitration.get('model') or '未执行'}。",
-                    f"- 候选快照：{json.dumps(arbitration.get('candidate_snapshot_ids', []), ensure_ascii=False)}。",
-                    f"- 主评估首选：{arbitration.get('primary_selected_snapshot_id', 'unknown')}。",
-                    f"- 仲裁结论：{brief(str(arbitration.get('comparison') or arbitration.get('reason') or '未提供'))}。",
-                ]
             )
         if state.agent_actions:
             lines.extend(["", "定向修复轨迹：", ""])

@@ -77,12 +77,12 @@ class ApiConfig:
     chat_fallback_model: str = "qwen3.7-plus"
     review_model: str = "qwen3.8-max"
     review_fallback_model: str = "qwen3.7-plus"
-    arbitration_model: str = "qwen3.7-plus"
     visual_review_model: str = ""
     visual_review_fallback_model: str = ""
     image_model: str = "wan2.7-image-pro"
     image_fallback_model: str = "qwen-image-3.0-pro"
     video_model: str = "wan2.7-i2v-2026-04-25"
+    evaluation_models: tuple[str, ...] = ("qwen3.8-max", "qwen3.7-plus")
 
     @classmethod
     def from_environment(cls) -> "ApiConfig | None":
@@ -91,6 +91,16 @@ class ApiConfig:
         openai = os.environ.get("OPENAI_BASE_URL", "").strip()
         if not api_key or not dashscope or not openai:
             return None
+        configured_evaluators = [
+            item.strip()
+            for item in os.environ.get(
+                "AGENT_EVALUATION_MODELS", "qwen3.8-max,qwen3.7-plus"
+            ).split(",")
+            if item.strip()
+        ]
+        evaluation_models = tuple(dict.fromkeys(configured_evaluators))[:3]
+        if len(evaluation_models) < 2:
+            evaluation_models = ("qwen3.8-max", "qwen3.7-plus")
         return cls(
             api_key=api_key,
             dashscope_base_url=dashscope,
@@ -102,9 +112,6 @@ class ApiConfig:
             review_model=os.environ.get("AGENT_REVIEW_MODEL", "qwen3.8-max"),
             review_fallback_model=os.environ.get(
                 "AGENT_REVIEW_FALLBACK_MODEL", "qwen3.7-plus"
-            ),
-            arbitration_model=os.environ.get(
-                "AGENT_ARBITRATION_MODEL", "qwen3.7-plus"
             ),
             visual_review_model=os.environ.get(
                 "AGENT_VISUAL_REVIEW_MODEL",
@@ -119,6 +126,7 @@ class ApiConfig:
                 "AGENT_IMAGE_FALLBACK_MODEL", "qwen-image-3.0-pro"
             ),
             video_model=os.environ.get("AGENT_VIDEO_MODEL", "wan2.7-i2v-2026-04-25"),
+            evaluation_models=evaluation_models,
         )
 
 
@@ -417,18 +425,43 @@ class QwenClient:
             self.trace.emit("api.operation", **item)
 
     @property
-    def model_summary(self) -> dict[str, str]:
+    def model_summary(self) -> dict[str, Any]:
         return {
             "chat": self.config.chat_model,
             "review": self.config.review_model,
             "review_fallback": self.config.review_fallback_model,
-            "arbitration": self.config.arbitration_model,
             "visual_review": self.visual_review_model,
             "visual_review_fallback": self.visual_review_fallback_model,
             "image": self.config.image_model,
             "image_fallback": self.config.image_fallback_model,
             "video": self.config.video_model,
+            "evaluation_models": list(self.evaluation_models),
         }
+
+    @property
+    def evaluation_models(self) -> tuple[str, ...]:
+        configured = tuple(
+            dict.fromkeys(
+                model.strip()
+                for model in self.config.evaluation_models
+                if model.strip()
+            )
+        )[:3]
+        if len(configured) >= 2:
+            return configured
+        fallback = tuple(
+            dict.fromkeys(
+                model
+                for model in (
+                    self.config.review_model,
+                    self.config.review_fallback_model,
+                    "qwen3.8-max",
+                    "qwen3.7-plus",
+                )
+                if model
+            )
+        )
+        return fallback[: max(2, min(3, len(fallback)))]
 
     @property
     def visual_review_model(self) -> str:
@@ -834,6 +867,65 @@ Verified facts:
             system,
             prompt,
             images=[*source_image_urls, *candidate_urls],
+            model=self.visual_review_model,
+            fallback_model=self.visual_review_fallback_model,
+        )
+
+    def select_best_detail_set(
+        self,
+        facts_json: str,
+        source_image_urls: list[str],
+        fixed_hero_url: str,
+        candidate_urls: list[str],
+        candidate_jobs: list[dict[str, Any]],
+        current_selection: dict[str, int],
+    ) -> dict[str, Any]:
+        """Choose one candidate per detail slot as a coherent commercial set."""
+
+        system = (
+            "You are a strict e-commerce image-set editor. Return JSON only. "
+            "Select a globally coherent and commercially diverse detail set while preserving exact product identity. "
+            "A locally high-scoring image must lose when it duplicates another selected image's shopper purpose."
+        )
+        prompt = f"""
+The first {len(source_image_urls)} images are trusted source references. The next image is the already
+accepted fixed hero. The following {len(candidate_urls)} images form a candidate pool for several fixed detail slots. Candidate indices
+below are zero-based within that candidate pool, not within the full visual input list.
+
+Compare the proposed combination with current_selection. Return JSON with exactly these keys:
+- candidates: exactly {len(candidate_urls)} objects containing candidate_index, slot, usable,
+  identity_consistent, construction_consistent, color_consistent, pattern_consistent, slot_match,
+  single_composition, unwanted_text, unwanted_brand_or_logo, prohibited_visual, major_artifacts,
+  actual_role, score (0-100), and reason
+- selections: one object per represented slot containing slot and candidate_index
+- current_set_score: number from 0 to 100
+- selected_set_score: number from 0 to 100
+- selection_improves_current_set: boolean
+- distinct_commercial_roles: integer
+- near_duplicate_selected_pairs: array of two-slot arrays
+- missing_roles: array of strings
+- summary: concise string
+
+Each slot must select only a candidate generated for that same slot. Optimize the combination jointly:
+cover distinct shopper decisions across the hero plus five details; avoid repeated full-product views, repeated crops, repeated wearer
+scenes and semantically duplicated backgrounds. Never trade product identity, construction, color,
+pattern, anatomy, compliance or the assigned slot purpose for visual variety. Mark
+selection_improves_current_set true only if the chosen combination is materially better than the
+current combination and every changed candidate has no hard defect.
+
+Verified facts:
+{facts_json}
+
+Candidate jobs:
+{json.dumps(candidate_jobs, ensure_ascii=False)}
+
+Current selection by slot:
+{json.dumps(current_selection, ensure_ascii=False)}
+""".strip()
+        return self.chat_json(
+            system,
+            prompt,
+            images=[*source_image_urls, fixed_hero_url, *candidate_urls],
             model=self.visual_review_model,
             fallback_model=self.visual_review_fallback_model,
         )
