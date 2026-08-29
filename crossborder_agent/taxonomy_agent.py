@@ -887,7 +887,9 @@ class TaxonomyReActAgent:
         self.max_turns = max_turns
 
     @staticmethod
-    def _product_evidence(facts: ProductFacts) -> dict[str, Any]:
+    def _product_evidence(
+        facts: ProductFacts, *, decision_context: str = ""
+    ) -> dict[str, Any]:
         sku_options: list[dict[str, str]] = []
         seen: set[tuple[str, str]] = set()
         for sku in facts.skus:
@@ -896,17 +898,28 @@ class TaxonomyReActAgent:
                 if key not in seen:
                     seen.add(key)
                     sku_options.append({"name": item.name, "value": item.value})
-        return {
+        evidence = {
             "source_title": facts.source_title,
             "source_category_name": facts.source_category_name,
             "attributes": [
                 {"name": item.name, "value": item.value} for item in facts.attributes
             ],
             "sku_options": sku_options,
+            # This remains evidence, not a host-side routing rule.  The model
+            # decides whether a reconciled conflict changes category/schema or
+            # only affects a particular publication surface.
+            "reconciled_fact_ledger": facts.reconciled_fact_ledger,
         }
+        if decision_context:
+            evidence["orchestrator_reconsideration_context"] = decision_context[:3000]
+        return evidence
 
-    def run(self, facts: ProductFacts) -> TaxonomyResult:
-        evidence = self._product_evidence(facts)
+    def run(
+        self, facts: ProductFacts, *, decision_context: str = ""
+    ) -> TaxonomyResult:
+        evidence = self._product_evidence(
+            facts, decision_context=decision_context
+        )
         native_step = getattr(self.client, "chat_tool_step", None)
         if callable(native_step):
             category = self._run_native_category(evidence)

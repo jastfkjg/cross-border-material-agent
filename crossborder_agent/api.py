@@ -58,9 +58,32 @@ def _failure_category(status_code: int | None, message: str) -> str:
         return "server"
     if status_code in {401, 403}:
         return "authorization"
-    if status_code in {400, 404} and any(
+    # Provider tool-serving errors often include the generic phrase "model
+    # serving".  Treat explicit invalid-request codes as request failures
+    # before looking for model-configuration wording, otherwise the same
+    # malformed tool transcript is pointlessly replayed to a fallback model.
+    if status_code == 400 and any(
         token in lowered
-        for token in ("model", "not found", "does not exist", "unsupported")
+        for token in (
+            "invalid_parameter_error",
+            "invalid_request_error",
+            "invalid parameter",
+            "invalid request parameters",
+        )
+    ):
+        return "invalid_request"
+    if status_code == 404 and any(
+        token in lowered for token in ("not found", "does not exist", "unsupported")
+    ):
+        return "model_configuration"
+    if status_code == 400 and any(
+        token in lowered
+        for token in (
+            "model_not_found",
+            "model not found",
+            "model does not exist",
+            "unsupported model",
+        )
     ):
         return "model_configuration"
     if status_code is not None and 400 <= status_code < 500:
@@ -683,7 +706,11 @@ class QwenClient:
             # than free-text completion. Required tool choice keeps every turn
             # observable and machine-checkable.
             "tool_choice": "required",
-            "parallel_tool_calls": True,
+            # The current OpenAI-compatible endpoint rejects the next request
+            # when one assistant turn with multiple distinct tool_call_id values
+            # is replayed.  Keep the protocol sequential; individual inspection
+            # tools are cheap and the agent can request another one next turn.
+            "parallel_tool_calls": False,
             "temperature": 0.0,
             "enable_thinking": False,
         }
@@ -986,6 +1013,8 @@ Verified facts:
         candidate_urls: list[str],
         candidate_jobs: list[dict[str, Any]],
         current_selection: dict[str, int],
+        *,
+        editorial_context: str = "",
     ) -> dict[str, Any]:
         """Choose one candidate per detail slot as a coherent commercial set."""
 
@@ -1028,6 +1057,10 @@ Candidate jobs:
 
 Current selection by slot:
 {json.dumps(current_selection, ensure_ascii=False)}
+
+Top-level editorial context (may be empty; investigate it against the images and
+local-review evidence rather than treating it as proof):
+{json.dumps(editorial_context[:3000], ensure_ascii=False)}
 """.strip()
         return self.chat_json(
             system,

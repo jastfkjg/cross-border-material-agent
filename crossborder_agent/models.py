@@ -269,6 +269,11 @@ class RunState:
     agent_evaluations: list[AgentEvaluation] = field(default_factory=list)
     agent_actions: list[AgentActionResult] = field(default_factory=list)
     agent_snapshots: list[dict[str, Any]] = field(default_factory=list)
+    # Strategy-independent problem state for the top-level orchestrator.  The
+    # host records observations and attempts; it never maps a finding to a
+    # particular semantic repair.
+    defect_ledger: list[dict[str, Any]] = field(default_factory=list)
+    accepted_artifact_fingerprint: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -15,7 +15,13 @@ try:
 except ImportError:
     Image = None
 
-from crossborder_agent.api import ApiConfig, ApiError, HttpJsonClient, QwenClient
+from crossborder_agent.api import (
+    ApiConfig,
+    ApiError,
+    HttpJsonClient,
+    QwenClient,
+    _failure_category,
+)
 from crossborder_agent.media import (
     MediaError,
     create_catalog_video,
@@ -110,6 +116,14 @@ class ResilienceTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 400)
         self.assertFalse(raised.exception.retryable)
 
+    def test_tool_serving_invalid_parameter_is_not_misclassified_as_model(self) -> None:
+        message = (
+            '{"error":{"code":"invalid_parameter_error",'
+            '"message":"An error occurred in model serving: Invalid request parameters",'
+            '"type":"invalid_request_error"}}'
+        )
+        self.assertEqual(_failure_category(400, message), "invalid_request")
+
     def test_video_configuration_failure_disables_capability_for_repairs(self) -> None:
         config = ApiConfig(
             api_key="test",
@@ -193,7 +207,7 @@ class ResilienceTests(unittest.TestCase):
         self.assertEqual(body["messages"][1:], prior_messages)
         self.assertEqual(body["tools"], tools)
         self.assertEqual(body["tool_choice"], "required")
-        self.assertTrue(body["parallel_tool_calls"])
+        self.assertFalse(body["parallel_tool_calls"])
 
     def test_review_model_uses_its_own_fallback_chain(self) -> None:
         config = ApiConfig(

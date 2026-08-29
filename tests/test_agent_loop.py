@@ -79,7 +79,7 @@ class NativeToolAgentLoopTests(unittest.TestCase):
         observation = next(item for item in second_turn_messages if item["role"] == "tool")
         self.assertIn("grounded", observation["content"])
 
-    def test_terminal_tool_is_not_executed_in_a_mixed_batch(self) -> None:
+    def test_parallel_batch_is_serialized_before_history_replay(self) -> None:
         class MixedClient:
             @staticmethod
             def chat_tool_step(system, messages, tools):
@@ -116,7 +116,10 @@ class NativeToolAgentLoopTests(unittest.TestCase):
 
         self.assertEqual(result.stop_reason, "max-turns")
         self.assertEqual(finished, [])
-        self.assertIn("must be called alone", result.final_observation["error"])
+        self.assertTrue(result.final_observation["seen"])
+        assistant = next(item for item in result.messages if item["role"] == "assistant")
+        self.assertEqual(len(assistant["tool_calls"]), 1)
+        self.assertEqual(assistant["tool_calls"][0]["id"], "inspect")
 
     def test_delivery_plan_rejection_is_observed_and_corrected_before_finish(self) -> None:
         safe_prompt = (

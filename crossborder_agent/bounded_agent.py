@@ -421,7 +421,11 @@ class BoundedDeliveryAgent:
         }
 
     def reconcile_facts(
-        self, facts: ProductFacts, vision: dict[str, Any]
+        self,
+        facts: ProductFacts,
+        vision: dict[str, Any],
+        *,
+        decision_context: str = "",
     ) -> dict[str, Any]:
         """Resolve structured/visual evidence conflicts without product-specific rules."""
 
@@ -455,7 +459,12 @@ Return exactly:
   buyer-facing appearance meaning is confirmed, contradicted, ambiguous, or superseded by source pixels.
 - canonical_visual_claims: array of objects with concept, value, confidence (0-1), and evidence (string array).
   Include only directly and consistently visible claims useful to downstream copy or media.
-- conflicts: array of concise objects with concept, structured_value, visual_value, resolution, and reason.
+- conflicts: array of objects with conflict_id, source_attribute_index, concept,
+  structured_value, visual_value, evidence_refs (string array), affected_surfaces
+  (any of buyer_copy, media_generation, marketplace_mapping), surface_resolutions
+  (an object whose keys are affected surfaces and whose values are concise proposed
+  evidence decisions), and reason. This is a data record for later agents, not a
+  request to invoke any particular repair tool.
 
 Rules:
 - Use attribute_index exactly as supplied; never invent an index.
@@ -474,6 +483,13 @@ Indexed structured attributes:
 
 Compact source-image evidence:
 {json.dumps(self._compact_visual_evidence(vision), ensure_ascii=False)}
+
+Current reconciliation ledger (empty on the initial pass):
+{json.dumps(facts.reconciled_fact_ledger, ensure_ascii=False)}
+
+Top-level orchestrator reconsideration context (may be empty; treat it as a
+question to investigate, never as evidence by itself):
+{json.dumps(decision_context[:3000], ensure_ascii=False)}
 """.strip()
 
         def call(model: str) -> tuple[str, dict[str, Any] | None, str]:
@@ -577,11 +593,70 @@ Compact source-image evidence:
                         else [],
                     }
                 )
-        conflicts = [
-            {str(key): str(value)[:1000] for key, value in item.items()}
-            for item in payload.get("conflicts", [])
-            if isinstance(item, dict)
-        ][:30] if isinstance(payload.get("conflicts"), list) else []
+        conflicts: list[dict[str, Any]] = []
+        raw_conflicts = payload.get("conflicts")
+        if isinstance(raw_conflicts, list):
+            allowed_surfaces = {
+                "buyer_copy",
+                "media_generation",
+                "marketplace_mapping",
+            }
+            for position, item in enumerate(raw_conflicts[:30]):
+                if not isinstance(item, dict):
+                    continue
+                source_index = item.get("source_attribute_index")
+                if (
+                    not isinstance(source_index, int)
+                    or not 0 <= source_index < attribute_count
+                ):
+                    continue
+                surfaces = item.get("affected_surfaces")
+                normalized_surfaces = (
+                    list(
+                        dict.fromkeys(
+                            str(value)
+                            for value in surfaces
+                            if str(value) in allowed_surfaces
+                        )
+                    )
+                    if isinstance(surfaces, list)
+                    else []
+                )
+                raw_resolutions = item.get("surface_resolutions")
+                resolutions = (
+                    {
+                        str(key): str(value)[:1000]
+                        for key, value in raw_resolutions.items()
+                        if str(key) in normalized_surfaces and str(value).strip()
+                    }
+                    if isinstance(raw_resolutions, dict)
+                    else {}
+                )
+                evidence = item.get("evidence_refs")
+                conflicts.append(
+                    {
+                        "conflict_id": str(
+                            item.get("conflict_id")
+                            or f"conflict-{source_index}-{position}"
+                        )[:200],
+                        "source_attribute_index": source_index,
+                        "concept": str(item.get("concept") or "")[:300],
+                        "structured_value": str(item.get("structured_value") or "")[:500],
+                        "visual_value": str(item.get("visual_value") or "")[:500],
+                        "evidence_refs": (
+                            [
+                                str(value)[:500]
+                                for value in evidence
+                                if str(value).strip()
+                            ][:20]
+                            if isinstance(evidence, list)
+                            else []
+                        ),
+                        "affected_surfaces": normalized_surfaces,
+                        "surface_resolutions": resolutions,
+                        "reason": str(item.get("reason") or "")[:1000],
+                    }
+                )
         title = str(payload.get("seller_title_decision") or "machine_only")
         if title not in {"publish", "machine_only"}:
             title = "machine_only"

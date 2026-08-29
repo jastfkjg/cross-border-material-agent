@@ -111,6 +111,29 @@ def _validate_arguments(schema: dict[str, Any], value: Any, path: str = "argumen
             raise ValueError(f"{path} must be at most {maximum}")
 
 
+def _normalize_single_tool_call(raw_call: Any, fallback_id: str) -> dict[str, Any]:
+    """Return the strict, single-call shape safe for provider history replay."""
+
+    call = raw_call if isinstance(raw_call, dict) else {}
+    function = call.get("function")
+    function = function if isinstance(function, dict) else {}
+    arguments = function.get("arguments")
+    if not isinstance(arguments, str):
+        arguments = json.dumps(
+            arguments if isinstance(arguments, dict) else {},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    return {
+        "id": str(call.get("id") or fallback_id),
+        "type": "function",
+        "function": {
+            "name": str(function.get("name") or ""),
+            "arguments": arguments,
+        },
+    }
+
+
 class NativeToolAgentLoop:
     """Run an OpenAI-compatible function-calling loop with bounded host authority."""
 
@@ -180,6 +203,21 @@ class NativeToolAgentLoop:
                     {"role": "user", "content": json.dumps(observation)}
                 )
                 continue
+            raw_call_count = len(calls)
+            # Defense in depth: some compatible providers ignore
+            # parallel_tool_calls=false.  Replaying multiple distinct call IDs
+            # from one assistant turn is rejected by the configured endpoint,
+            # so serialize the batch and let the model request remaining tools
+            # on later turns.  Rebuild the call to remove provider-only fields
+            # and guarantee that assistant/tool messages share a non-empty ID.
+            calls = [_normalize_single_tool_call(calls[0], f"agent-{turn}-0")]
+            if raw_call_count > 1 and self.trace is not None:
+                self.trace.emit(
+                    "orchestrator.parallel_tool_calls_serialized",
+                    turn=turn,
+                    received_call_count=raw_call_count,
+                    retained_tool=calls[0]["function"]["name"],
+                )
             self.messages.append(
                 {
                     "role": "assistant",

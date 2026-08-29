@@ -1145,6 +1145,121 @@ class FactAndTaxonomyTests(unittest.TestCase):
                 "https://example.test/slot-2-current.jpg",
             )
 
+    def test_global_detail_pool_preserves_current_candidate_and_review_evidence(self) -> None:
+        facts = load_product_facts(DATA / "product_info/product_8822221153828.json")
+        taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
+        plan = fallback_creative_plan(facts, taxonomy)
+        source_url = facts.product_image_urls[0]
+        observed: dict[str, object] = {}
+
+        class SetReviewer:
+            @staticmethod
+            def select_best_detail_set(
+                _facts,
+                _sources,
+                _hero,
+                candidate_urls,
+                candidate_jobs,
+                current_selection,
+                **_kwargs,
+            ):
+                observed["urls"] = list(candidate_urls)
+                observed["jobs"] = list(candidate_jobs)
+                observed["current"] = dict(current_selection)
+                return {
+                    "candidates": [],
+                    "selections": [],
+                    "current_set_score": 80,
+                    "selected_set_score": 80,
+                    "selection_improves_current_set": False,
+                }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=root / "out",
+                logger=logging.getLogger("candidate-state-integrity-test"),
+                offline=True,
+            )
+            pipeline.client = SetReviewer()
+            pipeline.deadline += 600
+            pipeline._source_image_observations[source_url] = {
+                "inspection_complete": True,
+                "safe_for_generation_reference": True,
+                "role": "hero",
+            }
+            pipeline._detail_candidate_pools = {
+                1: {
+                    "slot": "detail_image_1.jpeg",
+                    "current_url": "https://example.test/slot-1-current.jpg",
+                    "candidates": [
+                        {"url": "https://example.test/slot-1-a.jpg"},
+                        {"url": "https://example.test/slot-1-b.jpg"},
+                        {
+                            "url": "https://example.test/slot-1-current.jpg",
+                            "local_review": {"usable": True, "reason": "selected locally"},
+                        },
+                    ],
+                },
+                2: {
+                    "slot": "detail_image_2.jpeg",
+                    "current_url": "https://example.test/slot-2-current.jpg",
+                    "candidates": [
+                        {"url": "https://example.test/slot-2-a.jpg"},
+                        {"url": "https://example.test/slot-2-current.jpg"},
+                    ],
+                },
+            }
+            detail_assets = {
+                index: AssetResult(
+                    f"detail_image_{index}.jpeg",
+                    str(root / f"detail_image_{index}.jpeg"),
+                    source_url=f"https://example.test/slot-{index}-current.jpg",
+                    generated=True,
+                )
+                for index in (1, 2)
+            }
+            pipeline._apply_global_detail_candidate_selection(
+                facts=facts,
+                creative_plan=plan,
+                main_asset=AssetResult(
+                    "main_image.jpeg",
+                    str(root / "main_image.jpeg"),
+                    source_url="https://example.test/main.jpg",
+                    generated=True,
+                ),
+                detail_assets=detail_assets,
+                work_dir=root,
+                downloads_dir=root,
+            )
+
+        urls = observed["urls"]
+        current = observed["current"]
+        jobs = observed["jobs"]
+        self.assertEqual(len(urls), 5)
+        self.assertEqual(
+            urls[current["detail_image_1.jpeg"]],
+            "https://example.test/slot-1-current.jpg",
+        )
+        current_job = jobs[current["detail_image_1.jpeg"]]
+        self.assertTrue(current_job["current"])
+        self.assertEqual(current_job["local_review"]["reason"], "selected locally")
+
+    def test_repair_registry_exposes_semantic_reconsideration_without_routing(self) -> None:
+        registry = Pipeline._create_tool_registry()
+        catalog = {item["name"]: item for item in registry.catalog()}
+        self.assertEqual(
+            catalog["reconcile_fact_ledger"]["allowed_targets"], ["fact_ledger"]
+        )
+        self.assertEqual(
+            catalog["reconsider_taxonomy"]["allowed_targets"], ["taxonomy"]
+        )
+        self.assertEqual(
+            catalog["reselect_detail_set"]["allowed_targets"],
+            ["detail_image_set"],
+        )
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.tree = load_json(DATA / "clothing_categories.json")

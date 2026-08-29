@@ -199,7 +199,8 @@ class Pipeline:
         self._raw_counter = 0
         self._raw_counter_lock = threading.Lock()
         self._detail_candidate_pool_lock = threading.Lock()
-        self._detail_candidate_pools: dict[int, list[str]] = {}
+        self._detail_candidate_pools: dict[int, dict[str, Any]] = {}
+        self._detail_candidate_reviews: dict[int, dict[str, Any]] = {}
         self._source_image_observations: dict[str, dict[str, Any]] = {}
         self._source_selection_warnings: set[str] = set()
         self._size_chart_source_url = ""
@@ -254,6 +255,33 @@ class Pipeline:
                 targets=("product_video.mp4",),
                 estimated_seconds=210,
                 side_effects="replaces product_video.mp4 only after download, audio stripping, and playback validation",
+            )
+        )
+        registry.add_spec(
+            ToolSpec(
+                name="reconcile_fact_ledger",
+                description="Ask independent evidence reconcilers to reconsider the structured-versus-visual fact ledger using the supplied investigation context.",
+                targets=("fact_ledger",),
+                estimated_seconds=90,
+                side_effects="replaces only the grounded reconciliation and claim ledgers when the evidence decision changes",
+            )
+        )
+        registry.add_spec(
+            ToolSpec(
+                name="reconsider_taxonomy",
+                description="Reopen generic taxonomy/schema exploration with current source evidence and the reconciled fact ledger; exact returned IDs are validated against the supplied snapshots.",
+                targets=("taxonomy",),
+                estimated_seconds=210,
+                side_effects="replaces grounded category/mappings and deterministically rerenders machine appendices only after successful exploration",
+            )
+        )
+        registry.add_spec(
+            ToolSpec(
+                name="reselect_detail_set",
+                description="Give the complete retained candidate state, current selection, and local-review evidence to the image-set editor for a new joint selection.",
+                targets=("detail_image_set",),
+                estimated_seconds=90,
+                side_effects="atomically installs only a source-grounded, hard-safe combination selected for the existing slots",
             )
         )
         return registry
@@ -602,6 +630,8 @@ class Pipeline:
                 localization_sources=localization_sources,
                 work_dir=work_dir,
                 downloads_dir=downloads_dir,
+                category_tree=category_tree,
+                attribute_data=attribute_data,
             )
             if not self.fast_mode:
                 self._run_agentic_delivery_loop(
@@ -619,20 +649,17 @@ class Pipeline:
                 self.trace.emit(
                     "agent.evaluation_skipped", reason="fast-profile"
                 )
-            # A catalog video is rebuilt from the final image set only when video
-            # generation was unavailable from the outset; this is not an evaluator fallback.
-            self._enhance_fallback_video(state.assets, work_dir)
-            self._record_visual_delivery_quality(state.assets)
-            self._write_localized_descriptions(
-                facts,
-                taxonomy,
-                creative_plan,
-                localization_payloads,
-                state.assets,
-                work_dir,
-                state.visual_set_review,
-                set(),
-            )
+            if not self.fast_mode:
+                final_fingerprint = self._delivery_fingerprint(
+                    state=state,
+                    localization_payloads=localization_payloads,
+                    localization_sources=localization_sources,
+                    work_dir=work_dir,
+                )
+                if final_fingerprint != state.accepted_artifact_fingerprint:
+                    raise PipelineError(
+                        "交付在最终评审后发生变化，拒绝提交未评审的产物状态"
+                    )
             if self.client is not None:
                 state.api_calls = self.client.metrics
             self._write_strategy_document(
@@ -918,6 +945,8 @@ class Pipeline:
         localization_sources: dict[str, str],
         work_dir: Path,
         downloads_dir: Path,
+        category_tree: dict[str, Any],
+        attribute_data: dict[str, Any],
     ) -> None:
         registry.bind(
             "regenerate_main_image",
@@ -968,6 +997,43 @@ class Pipeline:
                 state.assets,
                 work_dir,
                 downloads_dir,
+            ),
+        )
+        registry.bind(
+            "reconcile_fact_ledger",
+            lambda target, instruction: self._repair_fact_ledger(
+                instruction,
+                facts=facts,
+                taxonomy=taxonomy,
+                vision=vision,
+                state=state,
+            ),
+        )
+        registry.bind(
+            "reconsider_taxonomy",
+            lambda target, instruction: self._repair_taxonomy(
+                instruction,
+                facts=facts,
+                taxonomy=taxonomy,
+                category_tree=category_tree,
+                attribute_data=attribute_data,
+                creative_plan=creative_plan,
+                state=state,
+                localization_payloads=localization_payloads,
+                work_dir=work_dir,
+            ),
+        )
+        registry.bind(
+            "reselect_detail_set",
+            lambda target, instruction: self._repair_detail_set_selection(
+                instruction,
+                facts=facts,
+                creative_plan=creative_plan,
+                state=state,
+                localization_payloads=localization_payloads,
+                taxonomy=taxonomy,
+                work_dir=work_dir,
+                downloads_dir=downloads_dir,
             ),
         )
 
@@ -1041,10 +1107,216 @@ class Pipeline:
                 return False, "no safe video first frame"
             return True, "video model and safe first frame available"
 
+        def evidence_precondition(target: str) -> tuple[bool, str]:
+            available, reason = operation_available("chat")
+            if not available:
+                return available, reason
+            if not vision:
+                return False, "no inspected source-image evidence is available"
+            return True, "structured and visual evidence are available"
+
+        def taxonomy_precondition(target: str) -> tuple[bool, str]:
+            available, reason = operation_available("chat")
+            if not available:
+                return available, reason
+            if not category_tree or not attribute_data:
+                return False, "taxonomy snapshots are unavailable"
+            return True, "taxonomy snapshots and current evidence are available"
+
+        def detail_set_precondition(target: str) -> tuple[bool, str]:
+            available, reason = operation_available("review")
+            if not available:
+                return available, reason
+            with self._detail_candidate_pool_lock:
+                pool_count = sum(
+                    1 for value in self._detail_candidate_pools.values() if value
+                )
+            if pool_count < 2:
+                return False, "fewer than two detail slots retain candidate state"
+            return True, f"candidate state retained for {pool_count} detail slots"
+
         registry.bind_precondition("regenerate_main_image", main_precondition)
         registry.bind_precondition("regenerate_detail_image", detail_precondition)
         registry.bind_precondition("revise_localized_copy", copy_precondition)
         registry.bind_precondition("regenerate_video", video_precondition)
+        registry.bind_precondition("reconcile_fact_ledger", evidence_precondition)
+        registry.bind_precondition("reconsider_taxonomy", taxonomy_precondition)
+        registry.bind_precondition("reselect_detail_set", detail_set_precondition)
+
+    def _repair_fact_ledger(
+        self,
+        instruction: str,
+        *,
+        facts: ProductFacts,
+        taxonomy: TaxonomyResult,
+        vision: dict[str, Any],
+        state: RunState,
+    ) -> ToolExecution:
+        before = json.dumps(
+            facts.reconciled_fact_ledger,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        revised = self.agent.reconcile_facts(
+            facts,
+            vision,
+            decision_context=instruction,
+        )
+        if not revised:
+            return ToolExecution(
+                "failed", "fact reconcilers returned no grounded ledger"
+            )
+        after = json.dumps(revised, ensure_ascii=False, sort_keys=True, default=str)
+        if after == before:
+            return ToolExecution(
+                "completed",
+                "fact ledger was reconsidered but the evidence decision did not change",
+                {"changed": False},
+            )
+        facts.reconciled_fact_ledger = revised
+        state.claim_ledger = build_claim_ledger(facts, taxonomy, vision)
+        return ToolExecution(
+            "completed",
+            "fact and claim ledgers were replaced from a fresh evidence reconciliation",
+            {
+                "changed": True,
+                "conflict_count": len(revised.get("conflicts", [])),
+                "decision_count": len(revised.get("attribute_decisions", [])),
+            },
+        )
+
+    def _repair_taxonomy(
+        self,
+        instruction: str,
+        *,
+        facts: ProductFacts,
+        taxonomy: TaxonomyResult,
+        category_tree: dict[str, Any],
+        attribute_data: dict[str, Any],
+        creative_plan: CreativePlan,
+        state: RunState,
+        localization_payloads: dict[str, dict[str, Any]],
+        work_dir: Path,
+    ) -> ToolExecution:
+        before = json.dumps(
+            {
+                "category": taxonomy.category.category_id,
+                "schema": taxonomy.attribute_schema_category_id,
+                "attributes": [
+                    (item.attr_id, item.value_id, item.source_name, item.source_value)
+                    for item in taxonomy.attributes
+                ],
+                "missing_required": taxonomy.missing_required,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        try:
+            revised = TaxonomyReActAgent(
+                self.client,
+                category_tree,
+                attribute_data,
+                skill_instructions=self.skills.compile(
+                    "taxonomy", "product-grounding", "aliexpress-taxonomy"
+                ),
+                trace=self.trace,
+                max_turns=20,
+            ).run(facts, decision_context=instruction)
+        except ApiError as exc:
+            return ToolExecution("failed", f"taxonomy reconsideration failed: {exc}")
+        provenance_warnings = filter_invalid_mapping_provenance(facts, revised)
+        after = json.dumps(
+            {
+                "category": revised.category.category_id,
+                "schema": revised.attribute_schema_category_id,
+                "attributes": [
+                    (item.attr_id, item.value_id, item.source_name, item.source_value)
+                    for item in revised.attributes
+                ],
+                "missing_required": revised.missing_required,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if after == before:
+            return ToolExecution(
+                "completed",
+                "taxonomy was re-explored but the grounded result did not change",
+                {"changed": False, "warnings": provenance_warnings},
+            )
+        taxonomy.category = revised.category
+        taxonomy.attributes = revised.attributes
+        taxonomy.missing_required = revised.missing_required
+        taxonomy.attribute_schema_category_id = revised.attribute_schema_category_id
+        state.claim_ledger = build_claim_ledger(facts, taxonomy, state.vision_observations)
+        self._write_localized_descriptions(
+            facts,
+            taxonomy,
+            creative_plan,
+            localization_payloads,
+            state.assets,
+            work_dir,
+            state.visual_set_review,
+        )
+        return ToolExecution(
+            "completed",
+            "taxonomy and deterministic machine appendices were replaced from grounded exploration",
+            {
+                "changed": True,
+                "category_id": taxonomy.category.category_id,
+                "schema_id": taxonomy.attribute_schema_category_id,
+                "mapping_count": len(taxonomy.attributes),
+                "warnings": provenance_warnings,
+            },
+        )
+
+    def _repair_detail_set_selection(
+        self,
+        instruction: str,
+        *,
+        facts: ProductFacts,
+        taxonomy: TaxonomyResult,
+        creative_plan: CreativePlan,
+        state: RunState,
+        localization_payloads: dict[str, dict[str, Any]],
+        work_dir: Path,
+        downloads_dir: Path,
+    ) -> ToolExecution:
+        detail_assets = {
+            index: self._find_asset(state.assets, f"detail_image_{index}.jpeg")
+            for index in range(1, 6)
+        }
+        changed = self._apply_global_detail_candidate_selection(
+            facts=facts,
+            creative_plan=creative_plan,
+            main_asset=self._find_asset(state.assets, "main_image.jpeg"),
+            detail_assets=detail_assets,
+            work_dir=work_dir,
+            downloads_dir=downloads_dir,
+            editorial_context=instruction,
+        )
+        if not changed:
+            return ToolExecution(
+                "completed",
+                "the set editor reconsidered the complete retained pool and kept the current combination",
+                {"changed": False},
+            )
+        state.visual_set_review = self._review_visual_set(facts, state.assets) or {}
+        self._write_localized_descriptions(
+            facts,
+            taxonomy,
+            creative_plan,
+            localization_payloads,
+            state.assets,
+            work_dir,
+            state.visual_set_review,
+        )
+        return ToolExecution(
+            "completed",
+            "the set editor installed and reviewed a different candidate combination",
+            {"changed": True},
+        )
 
     @staticmethod
     def _artifact_hash(path: Path) -> str:
@@ -1083,6 +1355,17 @@ class Pipeline:
             "localization_payloads": localization_payloads,
             "localization_sources": localization_sources,
             "visual_set_review": state.visual_set_review,
+            "reconciled_fact_ledger": state.facts.reconciled_fact_ledger,
+            "claim_ledger": [
+                {
+                    "claim_id": item.claim_id,
+                    "concept": item.concept,
+                    "value": item.value,
+                    "evidence_pointer": item.evidence_pointer,
+                    "allowed_surfaces": item.allowed_surfaces,
+                }
+                for item in state.claim_ledger
+            ],
             "taxonomy": {
                 "category_id": state.taxonomy.category.category_id,
                 "schema_id": state.taxonomy.attribute_schema_category_id,
@@ -1121,6 +1404,11 @@ class Pipeline:
             "localization_payloads": copy.deepcopy(localization_payloads),
             "localization_sources": copy.deepcopy(localization_sources),
             "visual_set_review": copy.deepcopy(state.visual_set_review),
+            "reconciled_fact_ledger": copy.deepcopy(
+                state.facts.reconciled_fact_ledger
+            ),
+            "taxonomy": copy.deepcopy(state.taxonomy),
+            "claim_ledger": copy.deepcopy(state.claim_ledger),
         }
 
     def _restore_repair_checkpoint(
@@ -1146,6 +1434,19 @@ class Pipeline:
         localization_sources.clear()
         localization_sources.update(copy.deepcopy(checkpoint["localization_sources"]))
         state.visual_set_review = copy.deepcopy(checkpoint["visual_set_review"])
+        state.facts.reconciled_fact_ledger = copy.deepcopy(
+            checkpoint["reconciled_fact_ledger"]
+        )
+        restored_taxonomy = checkpoint["taxonomy"]
+        state.taxonomy.category = copy.deepcopy(restored_taxonomy.category)
+        state.taxonomy.attributes = copy.deepcopy(restored_taxonomy.attributes)
+        state.taxonomy.missing_required = copy.deepcopy(
+            restored_taxonomy.missing_required
+        )
+        state.taxonomy.attribute_schema_category_id = (
+            restored_taxonomy.attribute_schema_category_id
+        )
+        state.claim_ledger = copy.deepcopy(checkpoint["claim_ledger"])
 
     def _capture_agent_snapshot(
         self,
@@ -1442,6 +1743,17 @@ class Pipeline:
         """Perform a local post-batch consistency checkpoint before re-evaluation."""
 
         affected = set(changed_targets)
+        conceptual_targets = {"fact_ledger", "taxonomy", "detail_image_set"}
+        affected.difference_update(conceptual_targets)
+        if "detail_image_set" in changed_targets:
+            affected.update(
+                f"detail_image_{index}.jpeg" for index in range(1, 6)
+            )
+        if "taxonomy" in changed_targets:
+            affected.update(
+                f"product_description_{language}.md"
+                for language in ("en", "ko", "pt")
+            )
         if any(name.endswith(".jpeg") for name in changed_targets):
             affected.update(
                 f"product_description_{language}.md"
@@ -1530,6 +1842,82 @@ class Pipeline:
         evaluations: dict[str, Any] = {}
         latest_evaluation: Any = None
         accepted = False
+        attempted_actions: set[tuple[str, str, str, str]] = set()
+
+        def open_problems() -> list[dict[str, Any]]:
+            return [
+                copy.deepcopy(item)
+                for item in state.defect_ledger
+                if item.get("status") == "open"
+            ]
+
+        def update_problem_ledger(evaluation: Any, current: str) -> None:
+            rows_by_id = {
+                str(item.get("defect_id") or ""): item
+                for item in state.defect_ledger
+                if str(item.get("defect_id") or "")
+            }
+            seen: set[str] = set()
+            for issue in evaluation.issues:
+                if not isinstance(issue, dict):
+                    continue
+                raw_id = str(issue.get("defect_id") or "").strip()
+                if not raw_id:
+                    identity = json.dumps(
+                        {
+                            "dimension": issue.get("dimension"),
+                            "criterion": issue.get("criterion"),
+                            "target": issue.get("target"),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    )
+                    raw_id = "finding-" + hashlib.sha256(
+                        identity.encode("utf-8")
+                    ).hexdigest()[:16]
+                seen.add(raw_id)
+                row = rows_by_id.get(raw_id)
+                if row is None:
+                    row = {
+                        "defect_id": raw_id,
+                        "status": "open",
+                        "first_seen_fingerprint": current,
+                        "last_seen_fingerprint": current,
+                        "review_count": 1,
+                        "attempts": [],
+                    }
+                    state.defect_ledger.append(row)
+                    rows_by_id[raw_id] = row
+                else:
+                    row["status"] = "open"
+                    row["last_seen_fingerprint"] = current
+                    row["review_count"] = int(row.get("review_count") or 0) + 1
+                row["finding"] = copy.deepcopy(issue)
+            for defect_id, row in rows_by_id.items():
+                if row.get("status") == "open" and defect_id not in seen:
+                    row["status"] = "resolved"
+                    row["resolved_at_fingerprint"] = current
+
+        def problem_state(_: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "artifact_fingerprint": fingerprint(),
+                "open_problems": open_problems(),
+                "attempt_history": [
+                    {
+                        "tool": item.tool,
+                        "target": item.target,
+                        "status": item.status,
+                        "changed": item.changed,
+                        "defect_id": item.defect_id,
+                        "before_hash": item.before_hash,
+                        "after_hash": item.after_hash,
+                    }
+                    for item in state.agent_actions
+                ],
+                "remaining_seconds": round(self.deadline - time.monotonic(), 1),
+                "available_tools": registry.catalog(),
+            }
 
         def fingerprint() -> str:
             return self._delivery_fingerprint(
@@ -1571,6 +1959,8 @@ class Pipeline:
             }
 
         def inspect_delivery(_: dict[str, Any]) -> dict[str, Any]:
+            with self._detail_candidate_pool_lock:
+                candidate_state = copy.deepcopy(self._detail_candidate_pools)
             return {
                 "artifacts": [
                     {
@@ -1583,6 +1973,28 @@ class Pipeline:
                     for item in state.assets
                 ],
                 "visual_set_review": state.visual_set_review,
+                "reconciled_fact_ledger": facts.reconciled_fact_ledger,
+                "taxonomy": {
+                    "category_id": taxonomy.category.category_id,
+                    "category": taxonomy.category.name,
+                    "path": taxonomy.category.path,
+                    "schema_id": taxonomy.attribute_schema_category_id,
+                    "attributes": [
+                        {
+                            "attr_id": item.attr_id,
+                            "value_id": item.value_id,
+                            "name": item.name,
+                            "value": item.platform_value,
+                            "source_name": item.source_name,
+                            "source_value": item.source_value,
+                            "evidence_pointer": item.source_evidence_pointer,
+                        }
+                        for item in taxonomy.attributes
+                    ],
+                    "missing_required": taxonomy.missing_required,
+                },
+                "detail_candidate_state": candidate_state,
+                "problem_state": problem_state({}),
                 "repair_tools": registry.catalog(),
                 "deterministic_validation": validate_current(),
             }
@@ -1617,6 +2029,7 @@ class Pipeline:
                 evaluations[current] = evaluation
                 state.agent_evaluations.append(evaluation)
                 latest_evaluation = evaluation
+                update_problem_ledger(evaluation, current)
                 self.trace.emit(
                     "orchestrator.delivery_review",
                     artifact_fingerprint=current,
@@ -1628,7 +2041,9 @@ class Pipeline:
                 "artifact_fingerprint": current,
                 "summary": latest_evaluation.summary,
                 "issues": latest_evaluation.issues,
+                "ready_for_delivery": latest_evaluation.ready_for_delivery,
                 "evaluator_models": latest_evaluation.evaluator_models,
+                "problem_state": problem_state({}),
                 "deterministic_validation": validate_current(),
             }
 
@@ -1639,6 +2054,12 @@ class Pipeline:
             defect_id = str(arguments.get("defect_id") or "")[:300]
             if len(instruction) < 12:
                 return {"ok": False, "error": "repair instruction is too vague"}
+            action_key = (
+                fingerprint(),
+                tool,
+                target,
+                " ".join(instruction.casefold().split()),
+            )
             available, reason = registry.availability(tool, target)
             if not available:
                 return {"ok": False, "error": reason, "tool": tool, "target": target}
@@ -1649,15 +2070,31 @@ class Pipeline:
                     "error": "insufficient time for this repair plus validation reserve",
                     "required_seconds": required,
                 }
+            if action_key in attempted_actions:
+                return {
+                    "ok": False,
+                    "error": "the exact same action was already attempted on this artifact fingerprint",
+                    "problem_state": problem_state({}),
+                }
+            attempted_actions.add(action_key)
             checkpoint = self._capture_repair_checkpoint(
                 state=state,
                 localization_payloads=localization_payloads,
                 localization_sources=localization_sources,
                 work_dir=work_dir,
             )
-            before_hash = self._artifact_hash(work_dir / target)
+            target_path = work_dir / target
+            before_hash = (
+                self._artifact_hash(target_path)
+                if target_path.is_file()
+                else fingerprint()
+            )
             result = registry.execute(tool, target, instruction)
-            after_hash = self._artifact_hash(work_dir / target)
+            after_hash = (
+                self._artifact_hash(target_path)
+                if target_path.is_file()
+                else fingerprint()
+            )
             changed = result.status == "completed" and before_hash != after_hash
             status = result.status if changed or result.status != "completed" else "no_change"
             detail = result.detail if changed or result.status != "completed" else "tool completed without changing the target"
@@ -1694,7 +2131,11 @@ class Pipeline:
                     changed = False
                     status = "rolled_back"
                     detail = consistency_detail
-                    after_hash = self._artifact_hash(work_dir / target)
+                    after_hash = (
+                        self._artifact_hash(target_path)
+                        if target_path.is_file()
+                        else fingerprint()
+                    )
             elif after_hash != before_hash or result.status == "completed":
                 self._restore_repair_checkpoint(
                     checkpoint,
@@ -1703,7 +2144,11 @@ class Pipeline:
                     localization_sources=localization_sources,
                     work_dir=work_dir,
                 )
-                after_hash = self._artifact_hash(work_dir / target)
+                after_hash = (
+                    self._artifact_hash(target_path)
+                    if target_path.is_file()
+                    else fingerprint()
+                )
             shutil.rmtree(checkpoint["directory"], ignore_errors=True)
             state.agent_actions.append(
                 AgentActionResult(
@@ -1719,6 +2164,26 @@ class Pipeline:
                     metadata=dict(result.metadata),
                 )
             )
+            if defect_id:
+                ledger_row = next(
+                    (
+                        item
+                        for item in state.defect_ledger
+                        if item.get("defect_id") == defect_id
+                    ),
+                    None,
+                )
+                if ledger_row is not None:
+                    ledger_row.setdefault("attempts", []).append(
+                        {
+                            "tool": tool,
+                            "target": target,
+                            "status": status,
+                            "changed": changed,
+                            "before_hash": before_hash,
+                            "after_hash": after_hash,
+                        }
+                    )
             return {
                 "tool": tool,
                 "target": target,
@@ -1727,6 +2192,7 @@ class Pipeline:
                 "changed": changed,
                 "artifact_fingerprint": fingerprint(),
                 "must_review_again": changed,
+                "problem_state": problem_state({}),
             }
 
         def finish_delivery(arguments: dict[str, Any]) -> AgentToolOutcome:
@@ -1759,6 +2225,7 @@ class Pipeline:
                     }
                 )
             accepted = True
+            state.accepted_artifact_fingerprint = current
             return AgentToolOutcome(
                 {
                     "accepted": True,
@@ -1781,6 +2248,12 @@ class Pipeline:
                 "Inspect current artifacts, prior visual-set evidence, available repairs, and deterministic validation.",
                 empty_schema,
                 inspect_delivery,
+            ),
+            AgentLoopTool(
+                "inspect_problem_state",
+                "Inspect open evidence-backed problems, prior attempts and no-change outcomes, current fingerprint, remaining time, and tool costs.",
+                empty_schema,
+                problem_state,
             ),
             AgentLoopTool(
                 "review_delivery",
@@ -1836,7 +2309,9 @@ class Pipeline:
             result = loop.run(
                 "Initial production is complete. Inspect and review it, choose any valuable targeted repairs, "
                 "review changed states, and call finish_delivery when the evidence is sufficient. Avoid cosmetic "
-                "churn; prioritize product identity, factual grounding, buyer-facing compliance, and artifact integrity.",
+                "churn; prioritize product identity, factual grounding, buyer-facing compliance, and artifact integrity. "
+                "Use inspect_problem_state whenever attempt history, no-change results, remaining time, or tool costs "
+                "would help you decide the next action. You own the repair strategy; no fixed repair order is implied.",
                 loop_tools,
                 max_turns=10,
                 deadline=self.deadline,
@@ -1845,7 +2320,7 @@ class Pipeline:
         except ApiError as exc:
             self.warnings.append(f"顶层交付编排器提前停止: {exc}")
             self.trace.emit("orchestrator.delivery_failed", error=str(exc))
-            return
+            raise PipelineError(f"顶层交付编排器未能接受当前交付: {exc}") from exc
         self.agent.orchestrator_messages = result.messages
         self.trace.emit(
             "orchestrator.delivery_complete",
@@ -1854,8 +2329,8 @@ class Pipeline:
             accepted=accepted,
         )
         if not accepted:
-            self.warnings.append(
-                f"顶层编排器未显式接受交付（{result.stop_reason}）；最终确定性校验仍将执行"
+            raise PipelineError(
+                f"顶层编排器未显式接受交付（{result.stop_reason}），拒绝提交未接受状态"
             )
 
     def _legacy_run_bounded_agent_loop(
@@ -3780,7 +4255,8 @@ Candidate 1:
         detail_assets: dict[int, AssetResult],
         work_dir: Path,
         downloads_dir: Path,
-    ) -> None:
+        editorial_context: str = "",
+    ) -> bool:
         """Jointly select the detail-image combination from all slot candidates.
 
         Per-slot review removes hard defects first. This second pass is deliberately
@@ -3789,27 +4265,63 @@ Candidate 1:
         """
 
         if self.client is None:
-            return
+            return False
         with self._detail_candidate_pool_lock:
-            pools = {
-                index: list(urls[:2])
-                for index, urls in self._detail_candidate_pools.items()
-                if index in detail_assets and urls
-            }
-        if len(pools) < 2 or sum(len(urls) for urls in pools.values()) <= len(pools):
+            raw_pools = copy.deepcopy(self._detail_candidate_pools)
+        pools: dict[int, list[dict[str, Any]]] = {}
+        for index, raw_pool in raw_pools.items():
+            if index not in detail_assets:
+                continue
+            if isinstance(raw_pool, dict):
+                raw_candidates = raw_pool.get("candidates")
+                records = [
+                    dict(item)
+                    for item in raw_candidates
+                    if isinstance(item, dict) and str(item.get("url") or "")
+                ] if isinstance(raw_candidates, list) else []
+            elif isinstance(raw_pool, list):
+                # Backward-compatible normalization for persisted/test state.
+                records = [
+                    {"url": str(url), "origin": "legacy", "local_review": {}}
+                    for url in raw_pool
+                    if str(url)
+                ]
+            else:
+                records = []
+            current_url = detail_assets[index].source_url
+            if current_url and all(item["url"] != current_url for item in records):
+                records.append(
+                    {
+                        "url": current_url,
+                        "origin": "current_artifact",
+                        "local_review": {},
+                    }
+                )
+            # Preserve generation order only as identity metadata.  No candidate
+            # is dropped or semantically ranked by the host.
+            seen_urls: set[str] = set()
+            unique_records: list[dict[str, Any]] = []
+            for record in records:
+                url = str(record.get("url") or "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    unique_records.append(record)
+            if unique_records:
+                pools[index] = unique_records
+        if len(pools) < 2 or sum(len(rows) for rows in pools.values()) <= len(pools):
             self.trace.emit(
                 "image.detail_pool_selection_skipped",
                 reason="no-cross-slot-alternatives",
                 pool_sizes={str(key): len(value) for key, value in pools.items()},
             )
-            return
+            return False
         if self.deadline - time.monotonic() <= 4 * 60:
             self.trace.emit(
                 "image.detail_pool_selection_skipped",
                 reason="insufficient-stage-budget",
                 remaining_seconds=round(self.deadline - time.monotonic(), 1),
             )
-            return
+            return False
 
         source_references = self._source_urls_for_use(
             _unique(
@@ -3825,7 +4337,7 @@ Candidate 1:
                 "image.detail_pool_selection_skipped",
                 reason="no-trusted-source-reference",
             )
-            return
+            return False
 
         candidate_urls: list[str] = []
         candidate_jobs: list[dict[str, Any]] = []
@@ -3839,7 +4351,8 @@ Candidate 1:
                 if index <= len(creative_plan.detail_roles)
                 else f"detail_slot_{index}"
             )
-            for url in pools[index]:
+            for record in pools[index]:
+                url = str(record["url"])
                 candidate_index = len(candidate_urls)
                 candidate_urls.append(url)
                 indices_by_slot[slot].add(candidate_index)
@@ -3849,12 +4362,23 @@ Candidate 1:
                         "slot": slot,
                         "canonical_role": role,
                         "current": url == detail_assets[index].source_url,
+                        "origin": str(record.get("origin") or "generated"),
+                        "local_review": record.get("local_review")
+                        if isinstance(record.get("local_review"), dict)
+                        else {},
                     }
                 )
                 if url == detail_assets[index].source_url:
                     current_selection[slot] = candidate_index
             if slot not in current_selection:
-                current_selection[slot] = min(indices_by_slot[slot])
+                # A missing current candidate is corrupted state, not permission
+                # to pretend that another candidate is current.
+                self.trace.emit(
+                    "image.detail_pool_selection_skipped",
+                    reason="current-candidate-missing",
+                    slot=slot,
+                )
+                return False
 
         try:
             review = self.client.select_best_detail_set(
@@ -3864,6 +4388,7 @@ Candidate 1:
                 candidate_urls,
                 candidate_jobs,
                 current_selection,
+                editorial_context=editorial_context,
             )
         except (ApiError, AttributeError) as exc:
             self.logger.warning("详情图候选池全局选片不可用，保留逐槽结果: %s", exc)
@@ -3872,7 +4397,7 @@ Candidate 1:
                 "image.detail_pool_selection_failed",
                 error=str(exc),
             )
-            return
+            return False
 
         current_score = review.get("current_set_score")
         selected_score = review.get("selected_set_score")
@@ -3880,19 +4405,19 @@ Candidate 1:
             review.get("selection_improves_current_set") is not True
             or not isinstance(current_score, (int, float))
             or not isinstance(selected_score, (int, float))
-            or float(selected_score) < float(current_score) + 3.0
+            or float(selected_score) <= float(current_score)
         ):
             self.trace.emit(
                 "image.detail_pool_selection_kept_current",
                 review=review,
             )
-            return
+            return False
 
         rows = review.get("candidates")
         selections = review.get("selections")
         if not isinstance(rows, list) or not isinstance(selections, list):
             self.warnings.append("详情图候选池评审结构不完整，保留逐槽结果")
-            return
+            return False
         by_index = {
             item.get("candidate_index"): item
             for item in rows
@@ -3905,7 +4430,7 @@ Candidate 1:
         }
         if set(selected_by_slot) != set(indices_by_slot):
             self.warnings.append("详情图候选池未覆盖全部可选槽位，保留逐槽结果")
-            return
+            return False
 
         staged: dict[int, tuple[Path, str]] = {}
         try:
@@ -3947,7 +4472,7 @@ Candidate 1:
                 path.unlink(missing_ok=True)
             self.logger.warning("详情图候选池全局组合安装失败，保留逐槽结果: %s", exc)
             self.warnings.append(f"详情图候选池全局组合未安装: {exc}")
-            return
+            return False
 
         for index, (path, selected_url) in staged.items():
             asset = detail_assets[index]
@@ -3961,6 +4486,7 @@ Candidate 1:
             selected_set_score=selected_score,
             review=review,
         )
+        return bool(staged)
 
     def _generate_detail_with_semantic_retry(
         self,
@@ -4000,15 +4526,27 @@ Candidate 1:
                 ),
             )
             if record_pool:
-                with self._detail_candidate_pool_lock:
-                    self._detail_candidate_pools[index] = _unique(candidate_urls)
+                # Installation happens only after local selection.  Candidate
+                # state is committed below together with the current selection
+                # and the selector's evidence.
+                pass
             if self.fast_mode:
                 self.trace.emit(
                     "image.detail_review_skipped",
                     asset=f"detail_image_{index}.jpeg",
                     reason="fast-profile",
                 )
-                return candidate_urls[0], model
+                selected = candidate_urls[0]
+                if record_pool:
+                    self._record_detail_candidate_pool(
+                        index,
+                        candidate_urls,
+                        selected_url=selected,
+                        model=model,
+                        purpose=active_prompt,
+                        review={},
+                    )
+                return selected, model
             reviewed_urls = (
                 [incumbent_url, *candidate_urls] if incumbent_url else candidate_urls
             )
@@ -4022,6 +4560,15 @@ Candidate 1:
                     incumbent_index=0 if incumbent_url else None,
                     minimum_improvement=minimum_improvement,
                 )
+                if record_pool:
+                    self._record_detail_candidate_pool(
+                        index,
+                        candidate_urls,
+                        selected_url=selected,
+                        model=model,
+                        purpose=active_prompt,
+                        review=self._detail_candidate_reviews.get(index, {}),
+                    )
                 return selected, model
             except SemanticRejection as exc:
                 last_rejection = exc
@@ -4039,6 +4586,51 @@ Candidate 1:
                     + "\nPreserve exact product identity and storyboard purpose."
                 )
         raise last_rejection or SemanticRejection(f"详情图 {index} 语义纠错失败")
+
+    def _record_detail_candidate_pool(
+        self,
+        index: int,
+        candidate_urls: list[str],
+        *,
+        selected_url: str,
+        model: str,
+        purpose: str,
+        review: dict[str, Any],
+    ) -> None:
+        """Commit complete, source-addressable candidate state for set editing."""
+
+        review_rows = review.get("candidates") if isinstance(review, dict) else []
+        by_index = {
+            item.get("index"): dict(item)
+            for item in review_rows
+            if isinstance(item, dict) and isinstance(item.get("index"), int)
+        } if isinstance(review_rows, list) else {}
+        records = [
+            {
+                "url": url,
+                "origin": "generated",
+                "generation_index": candidate_index,
+                "model": model,
+                "local_review": by_index.get(candidate_index, {}),
+            }
+            for candidate_index, url in enumerate(_unique(candidate_urls))
+        ]
+        if selected_url and all(item["url"] != selected_url for item in records):
+            records.append(
+                {
+                    "url": selected_url,
+                    "origin": "current_artifact",
+                    "model": model,
+                    "local_review": {},
+                }
+            )
+        with self._detail_candidate_pool_lock:
+            self._detail_candidate_pools[index] = {
+                "slot": f"detail_image_{index}.jpeg",
+                "purpose": purpose,
+                "current_url": selected_url,
+                "candidates": records,
+            }
 
     def _select_detail_candidate(
         self,
@@ -4066,6 +4658,11 @@ Candidate 1:
                 purpose=purpose,
             )
         except ApiError as exc:
+            self._detail_candidate_reviews[index] = {
+                "status": "unavailable",
+                "error": str(exc)[:1000],
+                "candidates": [],
+            }
             keep = (
                 incumbent_index
                 if isinstance(incumbent_index, int)
@@ -4080,6 +4677,7 @@ Candidate 1:
             )
             self.warnings.append(f"详情图 {index} 评审不可用，保留候选: {exc}")
             return candidate_urls[keep]
+        self._detail_candidate_reviews[index] = copy.deepcopy(review)
         candidates = review.get("candidates")
         selected = review.get("selected_index")
         self.trace.emit(
