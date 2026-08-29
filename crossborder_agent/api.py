@@ -714,6 +714,33 @@ class QwenClient:
             "temperature": 0.0,
             "enable_thinking": False,
         }
+        if self.trace is not None:
+            encoded_body = json.dumps(
+                body,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            encoded_tools = json.dumps(
+                tools,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            self.trace.emit(
+                "api.tool_request_shape",
+                model=selected_model,
+                request_bytes=len(encoded_body),
+                tool_schema_bytes=len(encoded_tools),
+                tool_count=len(tools),
+                message_count=len(body["messages"]),
+                role_sequence=[
+                    str(item.get("role") or "unknown")
+                    for item in body["messages"]
+                    if isinstance(item, dict)
+                ],
+                parallel_tool_calls=body["parallel_tool_calls"],
+            )
         models = [selected_model]
         selected_fallback = fallback_model or self.config.chat_fallback_model
         if selected_fallback and selected_fallback not in models:

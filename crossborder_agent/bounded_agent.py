@@ -147,35 +147,67 @@ class BoundedDeliveryAgent:
         )
         submitted: dict[str, Any] = {}
 
-        def inspect_product(_: dict[str, Any]) -> dict[str, Any]:
-            return {"facts": facts.compact_dict()}
-
-        def inspect_taxonomy(_: dict[str, Any]) -> dict[str, Any]:
+        def inspect_evidence(arguments: dict[str, Any]) -> dict[str, Any]:
+            section = str(arguments.get("section") or "")
+            if section == "product":
+                return {"section": section, "facts": facts.compact_dict()}
+            if section == "taxonomy":
+                return {
+                    "section": section,
+                    "category": {
+                        "id": taxonomy.category.category_id,
+                        "name": taxonomy.category.name,
+                        "path": taxonomy.category.path,
+                    },
+                    "mapped_attributes": [
+                        {
+                            "attribute": item.name,
+                            "source_name": item.source_name,
+                            "source_value": item.source_value,
+                            "platform_value": item.platform_value,
+                        }
+                        for item in taxonomy.attributes
+                    ],
+                    "missing_required": taxonomy.missing_required,
+                }
+            if section == "visual":
+                return {
+                    "section": section,
+                    "evidence": self._compact_visual_evidence(vision),
+                }
+            if section == "capabilities":
+                return {
+                    "section": section,
+                    "repair_tools": tools.catalog(),
+                    "candidate_count_range": [1, 4],
+                }
             return {
-                "category": {
-                    "id": taxonomy.category.category_id,
-                    "name": taxonomy.category.name,
-                    "path": taxonomy.category.path,
-                },
-                "mapped_attributes": [
-                    {
-                        "attribute": item.name,
-                        "source_name": item.source_name,
-                        "source_value": item.source_value,
-                        "platform_value": item.platform_value,
-                    }
-                    for item in taxonomy.attributes
-                ],
-                "missing_required": taxonomy.missing_required,
+                "ok": False,
+                "error": "section must be product, taxonomy, visual, or capabilities",
             }
 
-        def inspect_visual(_: dict[str, Any]) -> dict[str, Any]:
-            return self._compact_visual_evidence(vision)
-
-        def inspect_capabilities(_: dict[str, Any]) -> dict[str, Any]:
-            return {"repair_tools": tools.catalog(), "candidate_count_range": [1, 4]}
-
         def submit(arguments: dict[str, Any]) -> AgentToolOutcome:
+            errors: list[str] = []
+            direction = arguments.get("creative_direction")
+            if not isinstance(direction, str) or not 10 <= len(direction.strip()) <= 3000:
+                errors.append("creative_direction must contain 10 to 3000 characters")
+            locales = arguments.get("localization_priorities")
+            if not isinstance(locales, dict) or not all(
+                isinstance(locales.get(key), str)
+                and 5 <= len(locales[key].strip()) <= 1000
+                for key in ("en", "ko", "pt")
+            ):
+                errors.append(
+                    "localization_priorities must contain non-empty en, ko, and pt strings"
+                )
+            risks = arguments.get("risk_priorities")
+            if (
+                not isinstance(risks, list)
+                or not risks
+                or len(risks) != len(set(risks))
+                or any(item not in _RUBRIC_WEIGHTS for item in risks)
+            ):
+                errors.append("risk_priorities must contain unique rubric IDs A1 through A7")
             order = arguments.get("execution_order")
             if (
                 not isinstance(order, list)
@@ -183,21 +215,26 @@ class BoundedDeliveryAgent:
                 or set(order) != {"hero", "details", "copy", "video"}
                 or order[0] != "hero"
             ):
-                return AgentToolOutcome(
-                    {
-                        "ok": False,
-                        "error": "execution_order must contain every stage once and place the reference hero first",
-                    }
+                errors.append(
+                    "execution_order must contain every stage once and place the reference hero first"
                 )
+            video_strategy = arguments.get("video_strategy")
+            if not isinstance(video_strategy, str) or not 10 <= len(video_strategy.strip()) <= 2000:
+                errors.append("video_strategy must contain 10 to 2000 characters")
             creative = arguments.get("creative_plan")
             if not isinstance(creative, dict):
-                return AgentToolOutcome({"ok": False, "error": "creative_plan must be an object"})
-            validated_plan, validation_error = validate_creative_plan_payload(creative)
-            if validated_plan is None:
+                errors.append("creative_plan must be an object")
+                validated_plan = None
+            else:
+                validated_plan, validation_error = validate_creative_plan_payload(creative)
+                if validated_plan is None:
+                    errors.append(validation_error)
+            if errors:
                 return AgentToolOutcome(
                     {
                         "ok": False,
-                        "error": validation_error,
+                        "error": "; ".join(errors),
+                        "errors": errors,
                         "correction_required": True,
                     }
                 )
@@ -214,97 +251,89 @@ class BoundedDeliveryAgent:
                 terminate=True,
             )
 
-        empty_schema = {"type": "object", "properties": {}, "additionalProperties": False}
-        reference_roles = {
-            "type": "array",
-            "items": {
-                "type": "string",
-                "enum": ["hero", "front", "back", "side", "detail", "variant", "lifestyle"],
-            },
-            "maxItems": 5,
-        }
-        image_plan_schema = {
+        inspect_schema = {
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "minLength": 40, "maxLength": 5000},
-                "candidate_count": {"type": "integer", "minimum": 1, "maximum": 4},
-                "reference_roles": reference_roles,
+                "section": {
+                    "type": "string",
+                    "enum": ["product", "taxonomy", "visual", "capabilities"],
+                }
+            },
+            "required": ["section"],
+            "additionalProperties": False,
+        }
+        string_schema = {"type": "string"}
+        string_array_schema = {"type": "array", "items": string_schema}
+        image_job_schema = {
+            "type": "object",
+            "properties": {
+                "prompt": string_schema,
+                "candidate_count": {"type": "integer"},
+                "reference_roles": string_array_schema,
             },
             "required": ["prompt", "candidate_count", "reference_roles"],
-            "additionalProperties": False,
         }
-        detail_plan_schema = {
+        detail_job_schema = {
+            "type": "object",
+            "properties": {"role": string_schema, **image_job_schema["properties"]},
+            "required": ["role", *image_job_schema["required"]],
+        }
+        localized_schema = {
+            "type": "object",
+            "properties": {key: string_schema for key in ("en", "ko", "pt")},
+            "required": ["en", "ko", "pt"],
+        }
+        creative_plan_schema = {
             "type": "object",
             "properties": {
-                "role": {"type": "string", "minLength": 2, "maxLength": 100},
-                **image_plan_schema["properties"],
+                "visual_theme": string_schema,
+                "main": image_job_schema,
+                "details": {"type": "array", "items": detail_job_schema},
+                "video": {
+                    "type": "object",
+                    "properties": {"prompt": string_schema},
+                    "required": ["prompt"],
+                },
+                "market_angles": localized_schema,
             },
-            "required": ["role", *image_plan_schema["required"]],
-            "additionalProperties": False,
+            "required": ["visual_theme", "main", "details", "video", "market_angles"],
         }
+        # Keep the provider-facing schema compact. The endpoint currently
+        # rejects the full nested schema when it is combined with inspection
+        # tools, while the host-side validator below can enforce the exact same
+        # stable delivery contract and return actionable correction feedback.
         submit_schema = {
             "type": "object",
             "properties": {
-                "creative_direction": {"type": "string", "minLength": 10, "maxLength": 3000},
-                "localization_priorities": {
-                    "type": "object",
-                    "properties": {key: {"type": "string", "minLength": 5, "maxLength": 1000} for key in ("en", "ko", "pt")},
-                    "required": ["en", "ko", "pt"],
-                    "additionalProperties": False,
-                },
+                "creative_direction": {"type": "string"},
+                "localization_priorities": localized_schema,
                 "risk_priorities": {
                     "type": "array",
                     "items": {"type": "string", "enum": list(_RUBRIC_WEIGHTS)},
-                    "minItems": 1,
-                    "uniqueItems": True,
                 },
                 "execution_order": {
                     "type": "array",
-                    "items": {"type": "string", "enum": ["hero", "details", "copy", "video"]},
-                    "minItems": 4,
-                    "maxItems": 4,
-                    "uniqueItems": True,
-                },
-                "video_strategy": {"type": "string", "minLength": 10, "maxLength": 2000},
-                "creative_plan": {
-                    "type": "object",
-                    "properties": {
-                        "visual_theme": {"type": "string", "minLength": 10, "maxLength": 3000},
-                        "main": image_plan_schema,
-                        "details": {
-                            "type": "array",
-                            "items": detail_plan_schema,
-                            "minItems": 5,
-                            "maxItems": 5,
-                        },
-                        "video": {
-                            "type": "object",
-                            "properties": {"prompt": {"type": "string", "minLength": 40, "maxLength": 5000}},
-                            "required": ["prompt"],
-                            "additionalProperties": False,
-                        },
-                        "market_angles": {
-                            "type": "object",
-                            "properties": {key: {"type": "string", "minLength": 5, "maxLength": 1000} for key in ("en", "ko", "pt")},
-                            "required": ["en", "ko", "pt"],
-                            "additionalProperties": False,
-                        },
+                    "items": {
+                        "type": "string",
+                        "enum": ["hero", "details", "copy", "video"],
                     },
-                    "required": ["visual_theme", "main", "details", "video", "market_angles"],
-                    "additionalProperties": False,
                 },
+                "video_strategy": {"type": "string"},
+                "creative_plan": creative_plan_schema,
             },
             "required": ["creative_direction", "localization_priorities", "risk_priorities", "execution_order", "video_strategy", "creative_plan"],
             "additionalProperties": False,
         }
         agent_tools = [
-            AgentLoopTool("inspect_product", "Read seller-supplied product facts and source evidence pointers.", empty_schema, inspect_product),
-            AgentLoopTool("inspect_taxonomy", "Read resolved platform category and grounded attribute mappings.", empty_schema, inspect_taxonomy),
-            AgentLoopTool("inspect_visual_evidence", "Read compact observations from all inspected source images.", empty_schema, inspect_visual),
-            AgentLoopTool("inspect_delivery_capabilities", "Read available repair capabilities and resource bounds.", empty_schema, inspect_capabilities),
+            AgentLoopTool(
+                "inspect_evidence",
+                "Read one chosen evidence section.",
+                inspect_schema,
+                inspect_evidence,
+            ),
             AgentLoopTool(
                 "submit_delivery_plan",
-                "Submit the complete grounded execution and creative plan. This ends planning and must be called alone.",
+                "Submit the complete grounded plan and finish.",
                 submit_schema,
                 submit,
                 terminal=True,
@@ -325,7 +354,7 @@ class BoundedDeliveryAgent:
             result = loop.run(
                 prompt,
                 agent_tools,
-                max_turns=8,
+                max_turns=10,
                 deadline=deadline,
                 reserve_seconds=120,
             )

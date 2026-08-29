@@ -164,6 +164,20 @@ class ResilienceTests(unittest.TestCase):
         self.assertTrue(payload["recovered"])
         self.assertEqual(response.call_count, 2)
 
+    def test_chat_json_with_trace_does_not_require_tool_metadata(self) -> None:
+        config = ApiConfig(
+            api_key="test",
+            dashscope_base_url=self.base + "/dash",
+            openai_base_url=self.base + "/openai",
+        )
+        trace = mock.Mock()
+        client = QwenClient(
+            config, self.logger, time.monotonic() + 300, trace=trace
+        )
+        with mock.patch.object(client, "_chat_response", return_value='{"ok": true}'):
+            payload = client.chat_json("system", "prompt")
+        self.assertTrue(payload["ok"])
+
     def test_chat_tool_step_sends_native_tools_and_preserves_messages(self) -> None:
         config = ApiConfig(
             api_key="test",
@@ -208,6 +222,48 @@ class ResilienceTests(unittest.TestCase):
         self.assertEqual(body["tools"], tools)
         self.assertEqual(body["tool_choice"], "required")
         self.assertFalse(body["parallel_tool_calls"])
+
+    def test_chat_tool_step_traces_request_shape_without_content(self) -> None:
+        config = ApiConfig(
+            api_key="test",
+            dashscope_base_url=self.base + "/dash",
+            openai_base_url=self.base + "/openai",
+        )
+        trace = mock.Mock()
+        client = QwenClient(
+            config, self.logger, time.monotonic() + 300, trace=trace
+        )
+        assistant = {
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": "{}"},
+                }
+            ],
+        }
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "inspect",
+                    "description": "inspect",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        with mock.patch.object(client, "_chat_tool_response", return_value=assistant):
+            client.chat_tool_step("secret system content", [], tools)
+
+        shape = next(
+            call for call in trace.emit.call_args_list
+            if call.args and call.args[0] == "api.tool_request_shape"
+        )
+        self.assertGreater(shape.kwargs["request_bytes"], 0)
+        self.assertGreater(shape.kwargs["tool_schema_bytes"], 0)
+        self.assertEqual(shape.kwargs["tool_count"], 1)
+        self.assertNotIn("secret system content", repr(shape))
 
     def test_review_model_uses_its_own_fallback_chain(self) -> None:
         config = ApiConfig(

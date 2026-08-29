@@ -12,6 +12,7 @@ from crossborder_agent.agent_loop import (
     NativeToolAgentLoop,
 )
 from crossborder_agent.agent_tools import BoundedToolRegistry
+from crossborder_agent.api import ApiError
 from crossborder_agent.bounded_agent import BoundedDeliveryAgent
 
 
@@ -40,6 +41,48 @@ class ScriptedToolClient:
 
 
 class NativeToolAgentLoopTests(unittest.TestCase):
+    def test_delivery_planner_tool_surface_stays_within_provider_budget(self) -> None:
+        class CapturingClient:
+            config = SimpleNamespace(chat_model="planner")
+
+            def __init__(self):
+                self.http = SimpleNamespace(deadline=time.monotonic() + 300)
+                self.body: dict | None = None
+
+            def chat_tool_step(self, system, messages, tools):
+                self.body = {
+                    "model": "planner",
+                    "messages": [{"role": "system", "content": system}, *messages],
+                    "tools": tools,
+                    "tool_choice": "required",
+                    "parallel_tool_calls": False,
+                    "temperature": 0.0,
+                    "enable_thinking": False,
+                }
+                raise ApiError("captured", category="invalid_request")
+
+        client = CapturingClient()
+        agent = BoundedDeliveryAgent(client, logging.getLogger("plan-schema-budget"))
+        facts = SimpleNamespace(compact_dict=lambda: {"offer_id": "synthetic"})
+        taxonomy = SimpleNamespace(
+            category=SimpleNamespace(
+                category_id="leaf", name="Synthetic", path="Root > Synthetic"
+            ),
+            attributes=[],
+            missing_required=[],
+        )
+
+        agent.plan_delivery(facts, taxonomy, {}, BoundedToolRegistry())
+
+        self.assertIsNotNone(client.body)
+        body = client.body or {}
+        tool_names = [item["function"]["name"] for item in body["tools"]]
+        self.assertEqual(tool_names, ["inspect_evidence", "submit_delivery_plan"])
+        encoded = json.dumps(
+            body, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        self.assertLess(len(encoded), 7_500)
+
     def test_complete_protocol_exposes_observations_and_finishes(self) -> None:
         client = ScriptedToolClient()
         loop = NativeToolAgentLoop(client, system_prompt="Choose tools from evidence.")
@@ -167,6 +210,8 @@ class NativeToolAgentLoopTests(unittest.TestCase):
                 arguments = json.loads(json.dumps(plan_arguments))
                 if self.turn == 1:
                     arguments["creative_plan"]["main"]["prompt"] += " Include a coupon."
+                    arguments["risk_priorities"] = ["A1", "A1"]
+                    arguments["execution_order"] = ["copy", "hero", "details", "video"]
                 return {
                     "content": None,
                     "tool_calls": [
@@ -195,6 +240,9 @@ class NativeToolAgentLoopTests(unittest.TestCase):
             item for item in client.seen_messages[1] if item.get("role") == "tool"
         )
         self.assertIn("correction_required", rejection["content"])
+        self.assertIn("risk_priorities", rejection["content"])
+        self.assertIn("execution_order", rejection["content"])
+        self.assertIn("forbidden visual-prompt terms", rejection["content"])
         self.assertIn("creative_plan", result)
         self.assertEqual(
             result["creative_plan"]["main"]["prompt"], safe_prompt
