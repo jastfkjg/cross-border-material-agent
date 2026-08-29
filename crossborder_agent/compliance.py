@@ -33,11 +33,28 @@ def flatten_generated_text(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _phrase_present(text: str, term: str) -> bool:
+    """Match a prohibited phrase without firing on embedded substrings.
+
+    ``cures`` must not reject ``secures with a three-button front closure``;
+    a multiword phrase such as ``top rated`` still matches only its own words.
+    """
+
+    term = term.casefold()
+    for match in re.finditer(re.escape(term), text):
+        start, end = match.start(), match.end()
+        if (start == 0 or not text[start - 1].isalnum()) and (
+            end == len(text) or not text[end].isalnum()
+        ):
+            return True
+    return False
+
+
 def generated_copy_violations(language: str, payload: Any) -> list[str]:
     rules = load_rules()
     text = flatten_generated_text(payload).casefold()
     terms = rules.get("prohibited_claims", {}).get(language, [])
-    violations = [str(term) for term in terms if str(term).casefold() in text]
+    violations = [str(term) for term in terms if _phrase_present(text, str(term))]
     original_text = flatten_generated_text(payload)
     for pattern in rules.get("generated_text_regex", []):
         try:

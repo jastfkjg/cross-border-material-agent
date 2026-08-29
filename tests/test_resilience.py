@@ -150,6 +150,51 @@ class ResilienceTests(unittest.TestCase):
         self.assertTrue(payload["recovered"])
         self.assertEqual(response.call_count, 2)
 
+    def test_chat_tool_step_sends_native_tools_and_preserves_messages(self) -> None:
+        config = ApiConfig(
+            api_key="test",
+            dashscope_base_url=self.base + "/dash",
+            openai_base_url=self.base + "/openai",
+        )
+        client = QwenClient(config, self.logger, time.monotonic() + 300)
+        assistant = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "search_categories",
+                        "arguments": '{"query":"工装"}',
+                    },
+                }
+            ],
+        }
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_categories",
+                    "description": "search",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        prior_messages = [{"role": "user", "content": "product evidence"}]
+
+        with mock.patch.object(
+            client, "_chat_tool_response", return_value=assistant
+        ) as response:
+            result = client.chat_tool_step("system", prior_messages, tools)
+
+        self.assertEqual(result, assistant)
+        body = response.call_args.args[0]
+        self.assertEqual(body["messages"][1:], prior_messages)
+        self.assertEqual(body["tools"], tools)
+        self.assertEqual(body["tool_choice"], "required")
+        self.assertTrue(body["parallel_tool_calls"])
+
     def test_review_model_uses_its_own_fallback_chain(self) -> None:
         config = ApiConfig(
             api_key="test",

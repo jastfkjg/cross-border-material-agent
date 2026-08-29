@@ -515,6 +515,50 @@ class QwenClient:
             return "".join(text_parts).strip()
         return str(content).strip()
 
+    def _chat_tool_response(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Return one native assistant message, including function tool calls."""
+
+        started = time.monotonic()
+        selected_model = str(body.get("model") or "")
+        endpoint = _endpoint(self.config.openai_base_url, "chat/completions")
+        try:
+            response = self.http.request_json(
+                endpoint,
+                headers={"Authorization": f"Bearer {self.config.api_key}"},
+                body=body,
+                timeout=180,
+            )
+        except ApiError as exc:
+            self._record_metric(
+                operation="chat_tool_step",
+                model=selected_model,
+                started=started,
+                status="error",
+                error=str(exc),
+            )
+            raise
+        self._record_metric(
+            operation="chat_tool_step",
+            model=selected_model,
+            started=started,
+            status="ok",
+        )
+        try:
+            message = response["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ApiError(
+                f"Chat tool API 返回结构异常: {json.dumps(response, ensure_ascii=False)[:1000]}",
+                retryable=True,
+                category="response_format",
+            ) from exc
+        if not isinstance(message, dict):
+            raise ApiError(
+                "Chat tool API message 不是对象",
+                retryable=True,
+                category="response_format",
+            )
+        return message
+
     def chat_json(
         self,
         system_prompt: str,
@@ -611,6 +655,69 @@ class QwenClient:
                         last_error,
                     )
         raise last_error or ApiError("结构化模型调用失败")
+
+    def chat_tool_step(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        model: str = "",
+        fallback_model: str = "",
+    ) -> dict[str, Any]:
+        """Run one OpenAI-compatible assistant tool-call turn.
+
+        The caller owns the action/observation loop and appends the returned
+        assistant message plus ``role=tool`` results before invoking this again.
+        """
+
+        selected_model = model or self.config.chat_model
+        body = {
+            "model": selected_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                *messages,
+            ],
+            "tools": tools,
+            # Taxonomy has no free-text terminal response: ``finish`` is itself
+            # a validated tool. Qwen supports required tool choice when thinking
+            # is disabled, which prevents an unparseable prose-only turn.
+            "tool_choice": "required",
+            "parallel_tool_calls": True,
+            "temperature": 0.0,
+            "enable_thinking": False,
+        }
+        models = [selected_model]
+        selected_fallback = fallback_model or self.config.chat_fallback_model
+        if selected_fallback and selected_fallback not in models:
+            models.append(selected_fallback)
+        last_error: ApiError | None = None
+        with self._chat_slots:
+            for candidate_model in models:
+                body["model"] = candidate_model
+                try:
+                    message = self._chat_tool_response(body)
+                except ApiError as exc:
+                    last_error = exc
+                    if exc.category in {"authorization", "invalid_request"}:
+                        raise
+                    if candidate_model != models[-1] and self.http.remaining_seconds > 60:
+                        self.logger.warning(
+                            "模型 %s 的工具调用失败，切换回退模型: %s",
+                            candidate_model,
+                            exc,
+                        )
+                    continue
+                tool_calls = message.get("tool_calls")
+                if not isinstance(tool_calls, list) or not tool_calls:
+                    last_error = ApiError(
+                        "模型未调用任何 taxonomy 工具",
+                        retryable=True,
+                        category="response_format",
+                    )
+                    continue
+                return message
+        raise last_error or ApiError("模型工具调用失败")
 
     def analyze_product_images(
         self,

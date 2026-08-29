@@ -49,11 +49,8 @@ from .models import (
 from .planning import create_creative_plan
 from .qa import EXPECTED_FILES, _description_language_surfaces, validate_delivery
 from .skill_runtime import SkillLibrary
+from .taxonomy_agent import TaxonomyReActAgent
 from .taxonomy import (
-    apply_model_attribute_mappings,
-    attribute_schema_definition,
-    attribute_schema_candidates,
-    category_leaf_candidates,
     resolve_taxonomy,
 )
 
@@ -755,7 +752,7 @@ class Pipeline:
                 "main": "Clean studio hero showing one complete product.",
                 "video": "Eight-second product presentation based on the final hero image.",
                 "roles": {
-                    "complete_product": "Complete three-quarter view showing the full product.",
+                    "complete_product": "Complete alternate-angle view showing the full product.",
                     "primary_verified_detail": "Close view of the primary detail verified in the source images.",
                     "secondary_verified_detail": "Close view of a different detail verified in the source images.",
                     "verified_variants": "Catalog view comparing only seller-verified color variants.",
@@ -768,7 +765,7 @@ class Pipeline:
                 "main": "상품 한 개의 전체 형태를 보여 주는 깔끔한 스튜디오 대표 이미지입니다.",
                 "video": "최종 대표 이미지를 바탕으로 제작한 8초 상품 영상입니다.",
                 "roles": {
-                    "complete_product": "상품 전체를 보여 주는 완전한 3/4 각도 이미지입니다.",
+                    "complete_product": "상품 전체를 보여 주는 다른 각도의 전체 이미지입니다.",
                     "primary_verified_detail": "원본에서 확인된 핵심 디테일을 가까이 보여 줍니다.",
                     "secondary_verified_detail": "원본에서 확인된 다른 디테일을 가까이 보여 줍니다.",
                     "verified_variants": "판매자 원본에서 확인된 색상 옵션만 비교한 카탈로그 이미지입니다.",
@@ -2436,212 +2433,34 @@ Candidate 1:
     ) -> TaxonomyResult:
         if self.client is None:
             return taxonomy
-        leaves = category_leaf_candidates(category_tree)
-        schemas = attribute_schema_candidates(attribute_data)
-        allowed_ids = {str(item.get("category_id") or "") for item in leaves}
-        allowed_schema_ids = {
-            str(item.get("category_id") or "") for item in schemas
-        }
-        if not allowed_ids:
-            return taxonomy
-        # Product identifiers and URLs are deliberately excluded from semantic
-        # classification so neither the prompt nor a model can turn evaluation
-        # examples into a product-ID lookup table.
-        product_evidence = {
-            "source_title": facts.source_title,
-            "source_category_name": facts.source_category_name,
-            "attributes": [
-                {"name": item.name, "value": item.value}
-                for item in facts.attributes
-            ],
-            "sku_options": [
-                {"name": item.name, "value": item.value}
-                for sku in facts.skus
-                for item in sku.attributes
-            ],
-        }
-        system = (
-            "You are a conservative marketplace taxonomy classifier. Return JSON only. "
-            "Choose from the complete supplied leaf set; never invent an ID and never rely on a "
-            "product-specific lookup table. Use the seller title, source category, structured "
-            "attributes and SKU options together. Distinguish product family, audience, intended "
-            "use and specialization only when the supplied facts support them.\n\n"
-            + self.skills.compile(
-                "taxonomy", "product-grounding", "aliexpress-taxonomy"
-            )
-        )
-        # The supplied tree can contain thousands of leaves. Screening bounded
-        # batches with the same model keeps every leaf eligible without relying
-        # on a hard-coded or lexical Top-N gate that can hide an unseen category.
-        final_leaves = leaves
-        batch_size = 500
-        if len(leaves) > batch_size:
-            semifinal_ids: list[str] = []
-            for batch_index in range(0, len(leaves), batch_size):
-                batch = leaves[batch_index : batch_index + batch_size]
-                batch_ids = {
-                    str(item.get("category_id") or "") for item in batch
-                }
-                lines = "\n".join(
-                    f"{item['category_id']} | {item['path']}" for item in batch
-                )
-                screening_prompt = f"""
-Select up to three best leaf categories for this product from this batch only.
-Return JSON with selected_category_ids as an ordered array of one to three IDs.
-Do not invent an ID. Do not use product identifiers as evidence.
-
-Product evidence:
-{json.dumps(product_evidence, ensure_ascii=False)}
-
-LEAF BATCH {batch_index // batch_size + 1}:
-{lines}
-""".strip()
-                try:
-                    screened = self.client.chat_json(system, screening_prompt)
-                except ApiError as exc:
-                    self.logger.warning(
-                        "全叶子类目分片裁决失败，保留本地降级结果: %s", exc
-                    )
-                    self.trace.emit(
-                        "taxonomy.screening_failed",
-                        batch_index=batch_index // batch_size,
-                        error=str(exc),
-                    )
-                    return taxonomy
-                selected_batch_ids = screened.get("selected_category_ids")
-                if not isinstance(selected_batch_ids, list):
-                    selected_batch_ids = [screened.get("selected_category_id")]
-                valid_batch_ids = [
-                    str(item)
-                    for item in selected_batch_ids[:3]
-                    if str(item) in batch_ids
-                ]
-                if not valid_batch_ids:
-                    self.logger.warning(
-                        "全叶子类目分片返回无效 ID，保留本地降级结果"
-                    )
-                    return taxonomy
-                semifinal_ids.extend(valid_batch_ids)
-            semifinal_set = set(semifinal_ids)
-            final_leaves = [
-                item
-                for item in leaves
-                if str(item.get("category_id") or "") in semifinal_set
-            ]
-        prompt = f"""
-Choose the most accurate leaf category for the verified product.
-Return JSON with exactly:
-- selected_category_id: one ID from FINAL LEAF CANDIDATES
-- selected_attribute_schema_category_id: one ID from AVAILABLE ATTRIBUTE SCHEMAS;
-  use the selected leaf ID when its own schema exists, otherwise choose the most semantically
-  compatible schema. Return an empty string only when no supplied schema is compatible.
-- evidence: concise source-fact reasoning
-
-The lexical ranking result is included only as a weak hint. It is not authoritative and the
-correct answer may occur anywhere in the complete leaf list.
-
-Product evidence:
-{json.dumps(product_evidence, ensure_ascii=False)}
-
-Weak local hint:
-{json.dumps({"category_id": taxonomy.category.category_id, "name": taxonomy.category.name, "path": taxonomy.category.path, "top_candidates": taxonomy.category.candidates}, ensure_ascii=False)}
-
-FINAL LEAF CANDIDATES:
-{json.dumps(final_leaves, ensure_ascii=False)}
-
-AVAILABLE ATTRIBUTE SCHEMAS:
-{json.dumps(schemas, ensure_ascii=False)}
-""".strip()
         try:
-            response = self.client.chat_json(system, prompt)
+            resolved = TaxonomyReActAgent(
+                self.client,
+                category_tree,
+                attribute_data,
+                skill_instructions=self.skills.compile(
+                    "taxonomy", "product-grounding", "aliexpress-taxonomy"
+                ),
+                trace=self.trace,
+            ).run(facts)
         except ApiError as exc:
-            self.logger.warning("类目候选裁决失败，保留本地结果: %s", exc)
+            self.logger.warning("类目 ReAct 探索失败，保留离线降级结果: %s", exc)
             self.trace.emit(
-                "taxonomy.adjudication_failed",
+                "taxonomy.react_failed",
                 category=taxonomy.category.category_id,
                 confidence=taxonomy.category.confidence,
                 error=str(exc),
             )
             return taxonomy
-        selected_id = str(response.get("selected_category_id") or "")
-        final_ids = {
-            str(item.get("category_id") or "") for item in final_leaves
-        }
-        if selected_id not in final_ids:
-            self.logger.warning("类目裁决返回全量叶子集外 ID，已忽略: %s", selected_id)
-            self.trace.emit(
-                "taxonomy.adjudication_rejected",
-                selected_category_id=selected_id,
-                allowed_category_count=len(allowed_ids),
-            )
-            return taxonomy
-        selected_schema_id = str(
-            response.get("selected_attribute_schema_category_id") or ""
-        )
-        if selected_schema_id not in allowed_schema_ids:
-            selected_schema_id = ""
         self.trace.emit(
-            "taxonomy.adjudication",
-            local_category_id=taxonomy.category.category_id,
-            selected_category_id=selected_id,
-            selected_attribute_schema_category_id=selected_schema_id,
-            leaf_candidate_count=len(leaves),
-            final_candidate_count=len(final_leaves),
-            attribute_schema_candidate_count=len(schemas),
-            evidence=response.get("evidence"),
-        )
-        resolved = resolve_taxonomy(
-            facts,
-            category_tree,
-            attribute_data,
-            preferred_category_id=selected_id,
-            preferred_attribute_schema_id=selected_schema_id,
-        )
-        schema = attribute_schema_definition(
-            attribute_data, resolved.attribute_schema_category_id
-        )
-        if not schema:
-            return resolved
-        mapping_prompt = f"""
-Map source facts to the selected platform attribute schema. Return JSON with a mappings array.
-Each mapping must contain exactly:
-- scope: product or sales
-- platform_attr_id: an ID from the schema
-- platform_value_id: an allowed value ID, or an empty string only when the schema has no enum
-- source_kind: product or sku
-- source_name and source_value: an exact pair from Product evidence
-
-Map only explicit facts. For uncertain, inferred, or incompatible values, omit the mapping.
-Never invent, translate, normalize, or paraphrase source_name/source_value in the response.
-
-Product evidence:
-{json.dumps(product_evidence, ensure_ascii=False)}
-
-Selected category:
-{json.dumps({"category_id": resolved.category.category_id, "path": resolved.category.path}, ensure_ascii=False)}
-
-Selected attribute schema:
-{json.dumps(schema, ensure_ascii=False)}
-""".strip()
-        try:
-            mapping_response = self.client.chat_json(system, mapping_prompt)
-        except ApiError as exc:
-            self.logger.warning("模型属性映射失败，保留确定性降级结果: %s", exc)
-            return resolved
-        mapped = apply_model_attribute_mappings(
-            facts,
-            resolved,
-            attribute_data,
-            mapping_response.get("mappings"),
-        )
-        self.trace.emit(
-            "taxonomy.attribute_mapping",
+            "taxonomy.react_resolved",
+            local_fallback_category_id=taxonomy.category.category_id,
+            selected_category_id=resolved.category.category_id,
             schema_category_id=resolved.attribute_schema_category_id,
-            fallback_mapping_count=len(resolved.attributes),
-            accepted_model_mapping_count=len(mapped.attributes),
-            used_model_mapping=mapped is not resolved,
+            accepted_model_mapping_count=len(resolved.attributes),
+            missing_required=resolved.missing_required,
         )
-        return mapped
+        return resolved
 
     def _analyze_source_images(self, facts: ProductFacts) -> dict[str, Any]:
         if self.client is None:

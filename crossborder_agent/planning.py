@@ -151,8 +151,8 @@ def _detail_slot_specs(
     return (
         (
             "complete_product",
-            "This is detail slot 1: show one complete three-quarter product presentation, visibly different from "
-            "the square hero, with every source-visible section readable and unobstructed.",
+            "This is detail slot 1: show the complete product from a clearly different viewing angle than the "
+            "square hero, with every source-visible section readable and unobstructed.",
         ),
         (
             "primary_verified_detail",

@@ -10,7 +10,13 @@ from typing import Any
 from .api import ApiError, QwenClient
 from .claims import buyer_safe_source_name, publishable_claims
 from .compliance import generated_copy_violations
-from .models import ClaimEvidence, CreativePlan, ProductFacts, TaxonomyResult
+from .models import (
+    ClaimEvidence,
+    CreativePlan,
+    ProductAttribute,
+    ProductFacts,
+    TaxonomyResult,
+)
 
 
 LANGUAGES: dict[str, dict[str, str]] = {
@@ -320,6 +326,15 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "设计": "Design",
         "尺码类型": "Size type",
         "场合": "Occasion",
+        "毛呢": "Woolen",
+        "羊毛": "Wool",
+        "混纺": "Blend",
+        "兔毛": "Rabbit hair",
+        "人造皮毛": "Faux fur",
+        "人造毛": "Faux fur",
+        "仿皮草": "Faux fur",
+        "皮草": "Fur",
+        "短款": "Short length",
     },
     "ko": {
         "123批发网": "123 도매",
@@ -486,6 +501,15 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "设计": "디자인",
         "尺码类型": "사이즈 유형",
         "场合": "착용 상황",
+        "毛呢": "울 소재",
+        "羊毛": "울",
+        "混纺": "혼방",
+        "兔毛": "토끼털",
+        "人造皮毛": "인조 퍼",
+        "人造毛": "인조 퍼",
+        "仿皮草": "인조 퍼",
+        "皮草": "퍼",
+        "短款": "짧은 기장",
     },
     "pt": {
         "123批发网": "123 Atacado",
@@ -652,6 +676,15 @@ _TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
         "设计": "Design",
         "尺码类型": "Tipo de tamanho",
         "场合": "Ocasião",
+        "毛呢": "Lã",
+        "羊毛": "Lã",
+        "混纺": "Mistura",
+        "兔毛": "Pelo de coelho",
+        "人造皮毛": "Pele sintética",
+        "人造毛": "Pele sintética",
+        "仿皮草": "Pele sintética",
+        "皮草": "Pele",
+        "短款": "Comprimento curto",
     },
 }
 
@@ -744,6 +777,185 @@ _UNTRANSLATED_VALUES = {
     "판매자 원본 표기값",
     "Valor informado pelo vendedor",
 }
+
+
+# Reconciled appearance facts can carry an English value (the reconciler emits
+# ``faux fur``, ``solid``, ``wide lapel``) while seller attributes remain in
+# Chinese. These small, generic lexicons let the deterministic fallback and the
+# fact-coverage gate localize that reconciled truth for all three markets
+# without re-introducing a product-specific exception.
+_RECONCILED_MATERIAL_PHRASES: dict[str, dict[str, str]] = {
+    "faux fur": {"en": "Faux-fur", "ko": "인조 퍼", "pt": "pele sintética"},
+    "artificial fur": {"en": "Faux-fur", "ko": "인조 퍼", "pt": "pele sintética"},
+    "plush": {"en": "Plush", "ko": "플러시", "pt": "pelúcia"},
+    "denim": {"en": "Denim", "ko": "데님", "pt": "jeans"},
+    "leather": {"en": "Leather", "ko": "가죽", "pt": "couro"},
+    "cotton": {"en": "Cotton", "ko": "면", "pt": "algodão"},
+    "knit": {"en": "Knit", "ko": "니트", "pt": "malha"},
+    "silk": {"en": "Silk", "ko": "실크", "pt": "seda"},
+    "chiffon": {"en": "Chiffon", "ko": "시폰", "pt": "chiffon"},
+    "velvet": {"en": "Velvet", "ko": "벨벳", "pt": "veludo"},
+    "satin": {"en": "Satin", "ko": "새틴", "pt": "cetim"},
+    "linen": {"en": "Linen", "ko": "린넨", "pt": "linho"},
+    "wool": {"en": "Wool", "ko": "울", "pt": "lã"},
+    "cashmere": {"en": "Cashmere", "ko": "캐시미어", "pt": "caxemira"},
+    "fleece": {"en": "Fleece", "ko": "플리스", "pt": "moletom"},
+    "lace": {"en": "Lace", "ko": "레이스", "pt": "renda"},
+}
+
+_GARMENT_TYPE_KEYWORDS: tuple[tuple[str, dict[str, str]], ...] = (
+    ("羽绒服", {"en": "down jacket", "ko": "다운 재킷", "pt": "jaqueta acolchoada"}),
+    ("连衣裙", {"en": "dress", "ko": "원피스", "pt": "vestido"}),
+    ("半身裙", {"en": "skirt", "ko": "스커트", "pt": "saia"}),
+    ("针织衫", {"en": "knit top", "ko": "니트 톱", "pt": "blusa de malha"}),
+    ("卫衣", {"en": "hoodie", "ko": "후디", "pt": "moletom"}),
+    ("牛仔裤", {"en": "jeans", "ko": "청바지", "pt": "jeans"}),
+    ("T恤", {"en": "T-shirt", "ko": "티셔츠", "pt": "camiseta"}),
+    ("衬衫", {"en": "shirt", "ko": "셔츠", "pt": "camisa"}),
+    ("短裤", {"en": "shorts", "ko": "쇼츠", "pt": "bermuda"}),
+    ("长裤", {"en": "pants", "ko": "바지", "pt": "calça"}),
+    ("夹克", {"en": "jacket", "ko": "재킷", "pt": "jaqueta"}),
+    ("棉衣", {"en": "padded coat", "ko": "패딩", "pt": "casaco acolchoado"}),
+    ("外套", {"en": "coat", "ko": "코트", "pt": "casaco"}),
+    ("大衣", {"en": "coat", "ko": "코트", "pt": "casaco"}),
+    ("毛衣", {"en": "sweater", "ko": "스웨터", "pt": "suéter"}),
+    ("背心", {"en": "vest", "ko": "조끼", "pt": "colete"}),
+    ("马甲", {"en": "vest", "ko": "조끼", "pt": "colete"}),
+    ("上衣", {"en": "top", "ko": "상의", "pt": "top"}),
+    ("裙子", {"en": "skirt", "ko": "스커트", "pt": "saia"}),
+    ("长裙", {"en": "skirt", "ko": "스커트", "pt": "saia"}),
+    ("短裙", {"en": "skirt", "ko": "스커트", "pt": "saia"}),
+    ("裤", {"en": "pants", "ko": "바지", "pt": "calça"}),
+)
+
+
+def _reconciled_decision_rows(facts: ProductFacts) -> dict[int, dict[str, str]]:
+    ledger = facts.reconciled_fact_ledger
+    if not isinstance(ledger, dict):
+        return {}
+    rows: dict[int, dict[str, str]] = {}
+    for item in ledger.get("attribute_decisions", []):
+        if not isinstance(item, dict) or not isinstance(item.get("attribute_index"), int):
+            continue
+        rows[item["attribute_index"]] = {
+            "decision": str(item.get("decision") or "publish"),
+            "canonical_value": str(item.get("canonical_value") or ""),
+        }
+    return rows
+
+
+def _reconciled_material_phrase(language: str, facts: ProductFacts) -> str:
+    """Localized material adjective from reconciled visual claims, or empty."""
+
+    ledger = facts.reconciled_fact_ledger
+    if not isinstance(ledger, dict):
+        return ""
+    claims = ledger.get("canonical_visual_claims")
+    if not isinstance(claims, list):
+        return ""
+    combined = " ".join(
+        str(claim.get("value") or "").casefold()
+        for claim in claims
+        if isinstance(claim, dict)
+        and any(
+            key in str(claim.get("concept") or "").casefold()
+            for key in ("material", "texture", "surface", "composition")
+        )
+    )
+    for keyword, phrases in _RECONCILED_MATERIAL_PHRASES.items():
+        if keyword in combined:
+            return phrases[language]
+    return ""
+
+
+def _category_type_noun(language: str, category_label: str) -> str:
+    """Extract a generic garment noun from a category label, or empty."""
+
+    label = str(category_label or "")
+    for keyword, nouns in _GARMENT_TYPE_KEYWORDS:
+        if keyword in label:
+            return nouns[language]
+    return ""
+
+
+def _compose_reconciled_title(language: str, material: str, type_noun: str) -> str:
+    if not material:
+        return type_noun or {"en": "Product", "ko": "상품", "pt": "Produto"}[language]
+    if not type_noun:
+        return material
+    if language == "pt":
+        return f"{type_noun.capitalize()} de {material}"
+    return f"{material} {type_noun}".strip()
+
+
+# The reconcilers emit some short canonical values directly in English (``solid``,
+# ``wide lapel``, ``hip-length``) while most remain Chinese. Map that small set so
+# the deterministic path localizes them for every market.
+_RECONCILED_APPEARANCE_VALUES: dict[str, dict[str, str]] = {
+    "solid": {"en": "Solid color", "ko": "솔리드 컬러", "pt": "Cor lisa"},
+    "striped": {"en": "Striped", "ko": "스트라이프", "pt": "Listrado"},
+    "stripes": {"en": "Striped", "ko": "스트라이프", "pt": "Listrado"},
+    "wide lapel": {"en": "Wide lapel", "ko": "와이드 라펠", "pt": "lapela larga"},
+    "turn-down collar": {"en": "Turn-down collar", "ko": "테일러드 칼라", "pt": "gola dobrável"},
+    "button": {"en": "Button", "ko": "버튼", "pt": "Botão"},
+    "buttons": {"en": "Button", "ko": "버튼", "pt": "Botão"},
+    "hip-length": {"en": "Hip-length", "ko": "힙 기장", "pt": "comprimento no quadril"},
+    "short": {"en": "Short length", "ko": "짧은 기장", "pt": "Comprimento curto"},
+}
+
+
+def _localize_reconciled_value(
+    language: str, value: str, term_map: dict[str, Any]
+) -> str:
+    """Localize a reconciled canonical value whether it is Chinese or English."""
+
+    key = str(value).strip().casefold()
+    if not re.search(r"[一-鿿]", str(value)):
+        mapped = _RECONCILED_APPEARANCE_VALUES.get(key)
+        if mapped is not None:
+            return mapped[language]
+        return str(value)
+    return _localized_display(language, str(value), term_map)
+
+
+def _reconciled_feature_values(
+    language: str, facts: ProductFacts, term_map: dict[str, Any]
+) -> list[str]:
+    """Localized verified appearance concepts that buyer copy should substantiate.
+
+    Published seller attributes keep their value; rejected attributes contribute
+    their reconciled canonical value instead. This is the fact-coverage signal
+    the copy gate checks against, so correct copy never has to repeat a seller
+    claim the reconcilers overturned.
+    """
+
+    decision_rows = _reconciled_decision_rows(facts)
+    values: list[str] = []
+    for index, item in enumerate(facts.attributes):
+        if item.name not in _MARKETING_ATTRIBUTE_NAMES:
+            continue
+        row = decision_rows.get(index, {})
+        decision = row.get("decision", "publish")
+        if decision == "publish":
+            source_value = item.value
+        elif decision == "reject" and row.get("canonical_value") not in {"", "N/A"}:
+            source_value = row["canonical_value"]
+        else:
+            continue
+        localized = _localize_reconciled_value(language, source_value, term_map)
+        if (
+            localized
+            and localized != "—"
+            and localized not in values
+            and localized.casefold()
+            not in {
+                "seller-declared source value",
+                "판매자 원본 표기값",
+                "valor informado pelo vendedor",
+            }
+        ):
+            values.append(localized)
+    return values
 
 
 def _source_terms(facts: ProductFacts, taxonomy: TaxonomyResult) -> set[str]:
@@ -1252,24 +1464,12 @@ def _payload_validation_error(
         in natural_text.casefold()
     ):
         return "incomplete-composition-marketing-guard"
-    localized_feature_values = {
-        str(localized_terms.get(item.value) or "").strip()
-        for item in facts.attributes
-        if item.name in _MARKETING_ATTRIBUTE_NAMES
-    }
-    localized_feature_values.discard("")
-    localized_feature_values.difference_update(
-        {
-            "seller-declared source value",
-            "판매자 원본 표기값",
-            "valor informado pelo vendedor",
-        }
-    )
+    feature_values = _reconciled_feature_values(language, facts, localized_terms)
     matched_features = sum(
         _localized_concept_is_mentioned(language, value, natural_text)
-        for value in localized_feature_values
+        for value in feature_values
     )
-    if matched_features < min(3, len(localized_feature_values)):
+    if matched_features < min(2, len(feature_values)):
         return "insufficient-verified-details"
     buyer_payload = {
         key: payload.get(key)
@@ -1311,7 +1511,16 @@ def _localized_concept_is_mentioned(
     tokens = {
         token
         for token in value.split()
-        if len(token) >= 3 and token not in _GENERIC_FEATURE_TOKENS[language]
+        if token not in _GENERIC_FEATURE_TOKENS[language]
+        and (
+            # Korean and Chinese content words are often one or two syllables;
+            # requiring three characters would drop every valid Korean concept.
+            len(token) >= 3
+            or (
+                len(token) >= 2
+                and bool(re.search(r"[가-힣一-鿿]", token))
+            )
+        )
     }
     return any(token in text for token in tokens)
 
@@ -1386,18 +1595,20 @@ def _attribute_display_values(
     term_map: dict[str, Any],
     names: tuple[str, ...],
 ) -> list[str]:
-    decisions = {
-        item.get("attribute_index"): str(item.get("decision") or "publish")
-        for item in facts.reconciled_fact_ledger.get("attribute_decisions", [])
-        if isinstance(item, dict) and isinstance(item.get("attribute_index"), int)
-    } if isinstance(facts.reconciled_fact_ledger, dict) else {}
+    decision_rows = _reconciled_decision_rows(facts)
     values: list[str] = []
     for index, item in enumerate(facts.attributes):
-        if decisions.get(index, "publish") != "publish":
-            continue
+        row = decision_rows.get(index, {})
+        decision = row.get("decision", "publish")
         if item.name not in names:
             continue
-        localized = _localized_display(language, item.value, term_map)
+        if decision == "publish":
+            source_value = item.value
+        elif decision == "reject" and row.get("canonical_value") not in {"", "N/A"}:
+            source_value = row["canonical_value"]
+        else:
+            continue
+        localized = _localize_reconciled_value(language, source_value, term_map)
         if localized != "—" and localized not in values:
             values.append(localized)
     return values
@@ -1625,25 +1836,40 @@ def _fallback_payload(
         if taxonomy.category.method == "model-constrained-all-leaves"
         else facts.source_category_name or taxonomy.category.name
     )
-    base_title = _localized_category_title(language, category_label)
-    selected_features: list[tuple[str, str]] = []
-    feature_by_source: dict[str, str] = {}
-    seen_values: set[str] = set()
-    decisions = {
-        item.get("attribute_index"): str(item.get("decision") or "publish")
-        for item in facts.reconciled_fact_ledger.get("attribute_decisions", [])
-        if isinstance(item, dict) and isinstance(item.get("attribute_index"), int)
-    } if isinstance(facts.reconciled_fact_ledger, dict) else {}
-    publishable_attributes = [
-        item
-        for index, item in enumerate(facts.attributes)
-        if decisions.get(index, "publish") == "publish"
-    ]
     title_is_publishable = (
         not facts.reconciled_fact_ledger
         or facts.reconciled_fact_ledger.get("seller_title_decision", "publish")
         == "publish"
     )
+    reconciled_material = _reconciled_material_phrase(language, facts)
+    if reconciled_material and not title_is_publishable:
+        # The seller title/category embeds a material that visual reconciliation
+        # refuted (e.g. a "wool" category on a faux-fur garment). Lead with the
+        # reconciled material over a generic type noun instead of repeating the
+        # refuted material in the shopper-facing title.
+        base_title = _compose_reconciled_title(
+            language,
+            reconciled_material,
+            _category_type_noun(language, category_label),
+        )
+    else:
+        base_title = _localized_category_title(language, category_label)
+    selected_features: list[tuple[str, str]] = []
+    feature_by_source: dict[str, str] = {}
+    seen_values: set[str] = set()
+    decision_rows = _reconciled_decision_rows(facts)
+    # Published attributes stay as-is. A rejected attribute contributes its
+    # reconciled canonical value instead of the refuted seller value, so the
+    # deterministic fallback never reasserts a fact the reconcilers overturned.
+    publishable_attributes: list[tuple[int, ProductAttribute, str]] = []
+    for index, item in enumerate(facts.attributes):
+        decision = decision_rows.get(index, {}).get("decision", "publish")
+        if decision == "publish":
+            publishable_attributes.append((index, item, item.value))
+        elif decision == "reject":
+            canonical = decision_rows[index].get("canonical_value", "")
+            if canonical and canonical not in {"N/A", ""}:
+                publishable_attributes.append((index, item, canonical))
     buyer_title_source = facts.source_title if title_is_publishable else ""
     mapped_product_source_names = [
         item.source_name
@@ -1662,7 +1888,7 @@ def _fallback_payload(
                 *_MARKETING_ATTRIBUTE_NAMES,
                 *[
                     item.name
-                    for item in publishable_attributes
+                    for _, item, _ in publishable_attributes
                     if buyer_safe_source_name(item.name)
                 ],
                 *mapped_sales_source_names,
@@ -1670,22 +1896,21 @@ def _fallback_payload(
         )
     )
     for attribute_name in attribute_priority:
-        item = next(
+        found = next(
             (
-                attribute
-                for attribute in publishable_attributes
-                if attribute.name == attribute_name
+                (item, source_value)
+                for _, item, source_value in publishable_attributes
+                if item.name == attribute_name
             ),
             None,
         )
-        if item is None:
+        if found is None:
             continue
+        item, source_value = found
         localized_name = term_map.get(
             item.name, _static_localize_term(language, item.name)
         )
-        localized_value = term_map.get(
-            item.value, _static_localize_term(language, item.value)
-        )
+        localized_value = _localize_reconciled_value(language, source_value, term_map)
         if item.name == "图案" and any(
             token in buyer_title_source for token in ("花卉", "花朵", "花印")
         ):
@@ -1703,7 +1928,7 @@ def _fallback_payload(
         if (
             localized_value in seen_values
             or re.fullmatch(r"\d{6,}", str(localized_value).strip()) is not None
-            or (item.name == "图案" and item.value in {"图片色", "图色"})
+            or (item.name == "图案" and source_value in {"图片色", "图色"})
             or localized_value
             in {
                 "Seller-declared source value",

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import tempfile
 import unittest
 from dataclasses import replace
@@ -83,6 +82,22 @@ class ComplianceTests(unittest.TestCase):
             generated_copy_violations(
                 "en", {"overview": "For help, use LINE: seller_support"}
             )
+        )
+
+    def test_single_word_claim_does_not_match_embedded_substring(self) -> None:
+        # "cures" (medical claim) must not reject the ordinary verb "secures".
+        self.assertEqual(
+            generated_copy_violations(
+                "en",
+                {"overview": "The piece secures with a three-button front closure."},
+            ),
+            [],
+        )
+        self.assertIn(
+            "cures",
+            generated_copy_violations(
+                "en", {"overview": "This ingredient cures dry skin."}
+            ),
         )
 
     def test_source_observations_are_bound_by_index_and_hard_risk_rejected(self) -> None:
@@ -891,6 +906,51 @@ class FactAndTaxonomyTests(unittest.TestCase):
             _localized_concept_is_mentioned("en", "Knee-Length Shorts", text)
         )
 
+    def test_fallback_copy_prefers_reconciled_facts_over_refuted_seller_data(self) -> None:
+        facts = load_product_facts(
+            DATA / "product_info/product_5977010166484.json"
+        )
+
+        def index_of(name: str) -> int:
+            return next(
+                i for i, item in enumerate(facts.attributes) if item.name == name
+            )
+
+        facts.reconciled_fact_ledger = {
+            "seller_title_decision": "machine_only",
+            "attribute_decisions": [
+                {
+                    "attribute_index": index_of("图案"),
+                    "decision": "reject",
+                    "canonical_value": "solid",
+                },
+                {
+                    "attribute_index": index_of("领型"),
+                    "decision": "reject",
+                    "canonical_value": "翻领",
+                },
+                {
+                    "attribute_index": index_of("主面料成分"),
+                    "decision": "reject",
+                    "canonical_value": "人造皮毛",
+                },
+            ],
+            "canonical_visual_claims": [
+                {"concept": "Material Texture", "value": "Faux Fur / Plush"},
+                {"concept": "pattern", "value": "solid"},
+            ],
+        }
+        taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
+        payload = _fallback_payload("en", facts, taxonomy)
+        title = payload["title"].casefold()
+        # The seller category/title says "woolen" and the seller attributes say
+        # "striped"/"high neck"; the reconciled visual ledger says faux fur, solid.
+        self.assertIn("faux-fur", title)
+        self.assertNotIn("woolen", title)
+        self.assertNotIn("wool", title)
+        self.assertNotIn("striped", title)
+        self.assertNotIn("high neck", title)
+
     def test_natural_copy_is_not_discarded_for_canonical_wording_difference(self) -> None:
         facts = load_product_facts(DATA / "product_info/product_9493156931235.json")
         taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
@@ -1203,37 +1263,56 @@ Natural localized overview.
                 result.category.method, "model-constrained-all-leaves"
             )
 
-    def test_online_taxonomy_considers_every_leaf_and_validates_model_mapping(self) -> None:
-        target_id = "30408"
-
-        class FullLeafClient:
+    def test_online_taxonomy_uses_react_exploration_and_validates_model_mapping(self) -> None:
+        class ExplorationClient:
             def __init__(self) -> None:
                 self.prompts: list[str] = []
+                self.index = 0
 
             def chat_json(self, _system, prompt):
                 self.prompts.append(prompt)
-                if "LEAF BATCH" in prompt:
-                    batch_ids = re.findall(r"(?m)^(\d+) \|", prompt)
-                    selected = target_id if target_id in batch_ids else batch_ids[0]
-                    return {"selected_category_ids": [selected]}
-                if "Map source facts" in prompt:
-                    return {
-                        "mappings": [
-                            {
-                                "scope": "product",
-                                "platform_attr_id": "100157",
-                                "platform_value_id": "1000011",
-                                "source_kind": "product",
-                                "source_name": "主面料成分",
-                                "source_value": "聚酯纤维（涤纶）",
-                            }
-                        ]
-                    }
-                return {
-                    "selected_category_id": target_id,
-                    "selected_attribute_schema_category_id": "39107",
-                    "evidence": "title, source category and attributes",
-                }
+                actions = [
+                    {
+                        "action": "search_categories",
+                        "arguments": {"query": "工装", "leaf_only": True},
+                    },
+                    {
+                        "action": "get_attribute_schema",
+                        "arguments": {"category_id": "30408"},
+                    },
+                    {
+                        "action": "get_attribute_schema",
+                        "arguments": {"category_id": "30382"},
+                    },
+                    {
+                        "action": "get_attribute_definition",
+                        "arguments": {
+                            "schema_category_id": "30382",
+                            "attr_id": "100157",
+                            "limit": 60,
+                        },
+                    },
+                    {
+                        "action": "finish",
+                        "arguments": {
+                            "selected_category_id": "30408",
+                            "selected_attribute_schema_category_id": "30382",
+                            "mappings": [
+                                {
+                                    "scope": "product",
+                                    "platform_attr_id": "100157",
+                                    "platform_value_id": "1000011",
+                                    "source_kind": "product",
+                                    "source_name": "主面料成分",
+                                    "source_value": "聚酯纤维（涤纶）",
+                                }
+                            ],
+                        },
+                    },
+                ]
+                response = actions[self.index]
+                self.index += 1
+                return response
 
         facts = load_product_facts(
             DATA / "product_info/product_6837006744133.json"
@@ -1246,24 +1325,19 @@ Natural localized overview.
                 logger=logging.getLogger("full-leaf-taxonomy-test"),
                 offline=True,
             )
-            client = FullLeafClient()
+            client = ExplorationClient()
             pipeline.client = client
             result = pipeline._adjudicate_taxonomy(
                 facts, initial, self.tree, self.attributes
             )
 
-        all_leaf_ids = {
-            item["category_id"] for item in category_leaf_candidates(self.tree)
-        }
-        screened_ids = {
-            item
-            for prompt in client.prompts
-            if "LEAF BATCH" in prompt
-            for item in re.findall(r"(?m)^(\d+) \|", prompt)
-        }
-        self.assertEqual(screened_ids, all_leaf_ids)
-        self.assertEqual(result.category.category_id, target_id)
-        self.assertEqual(result.attribute_schema_category_id, "39107")
+        self.assertEqual(len(client.prompts), 5)
+        self.assertIn("search_categories", client.prompts[0])
+        self.assertIn("30408", client.prompts[1])
+        self.assertNotIn("LEAF BATCH", "\n".join(client.prompts))
+        self.assertEqual(result.category.category_id, "30408")
+        self.assertEqual(result.category.method, "model-react-exploration")
+        self.assertEqual(result.attribute_schema_category_id, "30382")
         self.assertEqual(len(result.attributes), 1)
         self.assertEqual(result.attributes[0].source_name, "主面料成分")
 
