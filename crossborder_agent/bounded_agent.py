@@ -7,9 +7,11 @@ import hashlib
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
 
+from .agent_loop import AgentLoopTool, AgentToolOutcome, NativeToolAgentLoop
 from .agent_tools import BoundedToolRegistry
 from .api import ApiError, QwenClient
 from .media import MediaError, inspect_image, inspect_image_quality, inspect_video
@@ -21,6 +23,7 @@ from .models import (
     ProductFacts,
     TaxonomyResult,
 )
+from .planning import validate_creative_plan_payload
 from .qa import _description_language_surfaces
 from .skill_runtime import SkillLibrary
 
@@ -95,6 +98,8 @@ class BoundedDeliveryAgent:
         self.client = client
         self.logger = logger
         self.skills = skills or SkillLibrary()
+        self.orchestrator_messages: list[dict[str, Any]] = []
+        self.orchestrator_system_prompt = ""
 
     def plan_delivery(
         self,
@@ -113,63 +118,225 @@ class BoundedDeliveryAgent:
                 "pt": "natural pt-BR commerce copy",
             },
             "risk_priorities": ["A1", "A5", "A6", "A7"],
-            "visual_sequence": [
-                "hero",
-                "overall",
-                "construction",
-                "verified feature",
-                "variants",
-                "fit or size guidance",
-            ],
+            "execution_order": ["hero", "details", "copy", "video"],
             "video_strategy": "stable product-led short presentation",
-            "minimum_weighted_score": int(_INTERNAL_MINIMUM_WEIGHTED_SCORE),
         }
         if self.client is None or not use_model:
             return default
-        system = (
-            "You are the manager of a bounded cross-border commerce material agent. "
-            "Return JSON only. Plan outcomes and priorities; do not invent product facts. "
-            "The executor exposes only the listed tools and a deterministic final specification gate.\n\n"
+        self.orchestrator_system_prompt = (
+            "You are the top-level autonomous orchestrator for one cross-border commerce delivery. "
+            "You own semantic decisions: what evidence to inspect, the creative storyboard and its order, "
+            "reference selection, candidate breadth, localization emphasis, and later repair priorities. "
+            "Use tools to inspect runtime evidence before deciding. Never invent a product fact, unseen visual "
+            "feature, platform identifier, measurement, material, certification, or brand. The host owns only "
+            "resource limits, tool authorization, product-identity/content safety, file integrity, and the final "
+            "delivery schema. Call submit_delivery_plan only when its entire plan is grounded.\n\n"
             + self.skills.compile(
                 "manager",
                 "delivery-quality",
                 "product-grounding",
                 "aliexpress-taxonomy",
+                "marketplace-materials",
+            )
+            + "\n\n"
+            + self.skills.compile(
+                "creative-plan",
+                "product-grounding",
+                "marketplace-materials",
             )
         )
-        prompt = f"""
-Create an execution policy for one AliExpress-ready delivery under a 30-minute total limit.
-The initial production skeleton is fixed for reliability, but your plan controls creative emphasis,
-localization priorities and evaluation threshold. The executor independently
-evaluates each distinct artifact fingerprint once and performs bounded repairs
-only after adjudicated findings when the remaining time allows.
+        submitted: dict[str, Any] = {}
 
-Return exactly these keys:
-- creative_direction: concise English direction that can be passed to creative models
-- localization_priorities: object with en, ko, pt strings
-- risk_priorities: ordered array containing only A1 through A7
-- visual_sequence: exactly six concise slot objectives, main image first
-- video_strategy: concise English shot and motion strategy
-- minimum_weighted_score: integer 95
+        def inspect_product(_: dict[str, Any]) -> dict[str, Any]:
+            return {"facts": facts.compact_dict()}
 
-Verified product facts:
-{json.dumps(facts.compact_dict(), ensure_ascii=False)}
+        def inspect_taxonomy(_: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "category": {
+                    "id": taxonomy.category.category_id,
+                    "name": taxonomy.category.name,
+                    "path": taxonomy.category.path,
+                },
+                "mapped_attributes": [
+                    {
+                        "attribute": item.name,
+                        "source_name": item.source_name,
+                        "source_value": item.source_value,
+                        "platform_value": item.platform_value,
+                    }
+                    for item in taxonomy.attributes
+                ],
+                "missing_required": taxonomy.missing_required,
+            }
 
-Resolved platform taxonomy:
-{json.dumps({"category": taxonomy.category.name, "category_id": taxonomy.category.category_id, "path": taxonomy.category.path, "missing_required": taxonomy.missing_required}, ensure_ascii=False)}
+        def inspect_visual(_: dict[str, Any]) -> dict[str, Any]:
+            return self._compact_visual_evidence(vision)
 
-Source visual observations:
-{json.dumps(vision, ensure_ascii=False)}
+        def inspect_capabilities(_: dict[str, Any]) -> dict[str, Any]:
+            return {"repair_tools": tools.catalog(), "candidate_count_range": [1, 4]}
 
-Available repair tools for later rounds:
-{json.dumps(tools.catalog(), ensure_ascii=False)}
-""".strip()
+        def submit(arguments: dict[str, Any]) -> AgentToolOutcome:
+            order = arguments.get("execution_order")
+            if (
+                not isinstance(order, list)
+                or len(order) != 4
+                or set(order) != {"hero", "details", "copy", "video"}
+                or order[0] != "hero"
+            ):
+                return AgentToolOutcome(
+                    {
+                        "ok": False,
+                        "error": "execution_order must contain every stage once and place the reference hero first",
+                    }
+                )
+            creative = arguments.get("creative_plan")
+            if not isinstance(creative, dict):
+                return AgentToolOutcome({"ok": False, "error": "creative_plan must be an object"})
+            validated_plan, validation_error = validate_creative_plan_payload(creative)
+            if validated_plan is None:
+                return AgentToolOutcome(
+                    {
+                        "ok": False,
+                        "error": validation_error,
+                        "correction_required": True,
+                    }
+                )
+            submitted.update(arguments)
+            return AgentToolOutcome(
+                {
+                    "accepted": True,
+                    "detail_roles": validated_plan.detail_roles,
+                    "candidate_counts": {
+                        "main": validated_plan.main_candidate_count,
+                        "details": validated_plan.detail_candidate_counts,
+                    },
+                },
+                terminate=True,
+            )
+
+        empty_schema = {"type": "object", "properties": {}, "additionalProperties": False}
+        reference_roles = {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": ["hero", "front", "back", "side", "detail", "variant", "lifestyle"],
+            },
+            "maxItems": 5,
+        }
+        image_plan_schema = {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "minLength": 40, "maxLength": 5000},
+                "candidate_count": {"type": "integer", "minimum": 1, "maximum": 4},
+                "reference_roles": reference_roles,
+            },
+            "required": ["prompt", "candidate_count", "reference_roles"],
+            "additionalProperties": False,
+        }
+        detail_plan_schema = {
+            "type": "object",
+            "properties": {
+                "role": {"type": "string", "minLength": 2, "maxLength": 100},
+                **image_plan_schema["properties"],
+            },
+            "required": ["role", *image_plan_schema["required"]],
+            "additionalProperties": False,
+        }
+        submit_schema = {
+            "type": "object",
+            "properties": {
+                "creative_direction": {"type": "string", "minLength": 10, "maxLength": 3000},
+                "localization_priorities": {
+                    "type": "object",
+                    "properties": {key: {"type": "string", "minLength": 5, "maxLength": 1000} for key in ("en", "ko", "pt")},
+                    "required": ["en", "ko", "pt"],
+                    "additionalProperties": False,
+                },
+                "risk_priorities": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": list(_RUBRIC_WEIGHTS)},
+                    "minItems": 1,
+                    "uniqueItems": True,
+                },
+                "execution_order": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["hero", "details", "copy", "video"]},
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "uniqueItems": True,
+                },
+                "video_strategy": {"type": "string", "minLength": 10, "maxLength": 2000},
+                "creative_plan": {
+                    "type": "object",
+                    "properties": {
+                        "visual_theme": {"type": "string", "minLength": 10, "maxLength": 3000},
+                        "main": image_plan_schema,
+                        "details": {
+                            "type": "array",
+                            "items": detail_plan_schema,
+                            "minItems": 5,
+                            "maxItems": 5,
+                        },
+                        "video": {
+                            "type": "object",
+                            "properties": {"prompt": {"type": "string", "minLength": 40, "maxLength": 5000}},
+                            "required": ["prompt"],
+                            "additionalProperties": False,
+                        },
+                        "market_angles": {
+                            "type": "object",
+                            "properties": {key: {"type": "string", "minLength": 5, "maxLength": 1000} for key in ("en", "ko", "pt")},
+                            "required": ["en", "ko", "pt"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["visual_theme", "main", "details", "video", "market_angles"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["creative_direction", "localization_priorities", "risk_priorities", "execution_order", "video_strategy", "creative_plan"],
+            "additionalProperties": False,
+        }
+        agent_tools = [
+            AgentLoopTool("inspect_product", "Read seller-supplied product facts and source evidence pointers.", empty_schema, inspect_product),
+            AgentLoopTool("inspect_taxonomy", "Read resolved platform category and grounded attribute mappings.", empty_schema, inspect_taxonomy),
+            AgentLoopTool("inspect_visual_evidence", "Read compact observations from all inspected source images.", empty_schema, inspect_visual),
+            AgentLoopTool("inspect_delivery_capabilities", "Read available repair capabilities and resource bounds.", empty_schema, inspect_capabilities),
+            AgentLoopTool(
+                "submit_delivery_plan",
+                "Submit the complete grounded execution and creative plan. This ends planning and must be called alone.",
+                submit_schema,
+                submit,
+                terminal=True,
+            ),
+        ]
+        prompt = (
+            "Plan this delivery. Inspect whatever evidence you need, then submit one complete plan. "
+            "The output contract requires one square hero, exactly five vertical detail images, one short video, "
+            "and localized en-US, ko-KR, and pt-BR copy. Detail jobs and their order are yours to choose. "
+            "Also choose the production launch order after placing the reference hero first."
+        )
         try:
-            payload = self.client.chat_json(system, prompt)
+            loop = NativeToolAgentLoop(
+                self.client,
+                system_prompt=self.orchestrator_system_prompt,
+            )
+            deadline = float(getattr(self.client.http, "deadline", time.monotonic() + 600))
+            result = loop.run(
+                prompt,
+                agent_tools,
+                max_turns=8,
+                deadline=deadline,
+                reserve_seconds=120,
+            )
+            self.orchestrator_messages = result.messages
         except ApiError as exc:
-            self.logger.warning("LLM 交付规划不可用，采用保守有界策略: %s", exc)
+            self.logger.warning("LLM 编排规划不可用，采用保守有界策略: %s", exc)
             return default
-        return self._normalize_plan(payload, default)
+        if not submitted:
+            self.logger.warning("编排器未在预算内提交有效计划，采用保守计划")
+            return default
+        return self._normalize_plan(submitted, default)
 
     @staticmethod
     def _normalize_plan(payload: dict[str, Any], default: dict[str, Any]) -> dict[str, Any]:
@@ -191,6 +358,13 @@ Available repair tools for later rounds:
             clean = [item for item in risks if item in _RUBRIC_WEIGHTS]
             if clean:
                 result["risk_priorities"] = list(dict.fromkeys(clean))
+        order = payload.get("execution_order")
+        if (
+            isinstance(order, list)
+            and len(order) == 4
+            and set(order) == {"hero", "details", "copy", "video"}
+        ):
+            result["execution_order"] = list(order)
         sequence = payload.get("visual_sequence")
         if (
             isinstance(sequence, list)
@@ -198,9 +372,9 @@ Available repair tools for later rounds:
             and all(isinstance(item, str) and item.strip() for item in sequence)
         ):
             result["visual_sequence"] = [item.strip()[:500] for item in sequence]
-        # The internal acceptance bar is intentionally fixed. The manager may
-        # prioritize work, but it cannot lower the quality gate for a hard run.
-        result["minimum_weighted_score"] = int(_INTERNAL_MINIMUM_WEIGHTED_SCORE)
+        creative = payload.get("creative_plan")
+        if isinstance(creative, dict):
+            result["creative_plan"] = creative
         return result
 
     def _evaluation_models(self) -> tuple[str, ...]:

@@ -1,4 +1,4 @@
-"""Bounded creative planning for the fixed delivery contract."""
+"""Creative-plan validation and emergency fallback for the agent orchestrator."""
 
 from __future__ import annotations
 
@@ -310,35 +310,187 @@ def fallback_creative_plan(
             "pt": "clear variation guidance and practical styling",
         },
         detail_roles=[item[0] for item in slot_specs],
+        main_candidate_count=3,
+        detail_candidate_counts=[2] * 5,
+        main_reference_roles=["hero", "front", "variant", "detail"],
+        detail_reference_roles=[
+            ["front", "hero", "lifestyle"],
+            ["detail", "front", "side"],
+            ["detail", "side", "back"],
+            ["variant", "front", "hero"],
+            ["lifestyle", "front", "hero"],
+        ],
     )
 
 
-def _valid_plan_payload(payload: dict[str, Any]) -> bool:
-    required = {
-        "visual_theme",
-        "main_prompt",
-        "detail_prompts",
-        "video_prompt",
-        "market_angles",
-    }
-    if not required.issubset(payload):
-        return False
-    if (
-        not isinstance(payload.get("detail_prompts"), list)
-        or len(payload["detail_prompts"]) != 5
+def _candidate_count(value: Any, default: int) -> int:
+    """Candidate counts are a resource boundary, not a creative policy."""
+
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(parsed, 4))
+
+
+def _role_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(
+        dict.fromkeys(
+            clean
+            for item in value[:8]
+            if (clean := " ".join(str(item).split())[:80])
+        )
+    )
+
+
+def _normalize_creative_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Accept the native orchestrator shape and the legacy flat JSON shape."""
+
+    main = payload.get("main")
+    details = payload.get("details")
+    video = payload.get("video")
+    if isinstance(main, dict) and isinstance(details, list) and isinstance(video, dict):
+        if len(details) != 5 or not all(isinstance(item, dict) for item in details):
+            return None
+        normalized = {
+            "visual_theme": payload.get("visual_theme"),
+            "main_prompt": main.get("prompt"),
+            "main_candidate_count": main.get("candidate_count"),
+            "main_reference_roles": main.get("reference_roles"),
+            "detail_prompts": [item.get("prompt") for item in details],
+            "detail_roles": [item.get("role") for item in details],
+            "detail_candidate_counts": [item.get("candidate_count") for item in details],
+            "detail_reference_roles": [item.get("reference_roles") for item in details],
+            "video_prompt": video.get("prompt"),
+            "market_angles": payload.get("market_angles"),
+        }
+    else:
+        normalized = dict(payload)
+
+    prompts = normalized.get("detail_prompts")
+    roles = normalized.get("detail_roles")
+    market_angles = normalized.get("market_angles")
+    if not isinstance(prompts, list) or len(prompts) != 5:
+        return None
+    if not all(isinstance(item, str) and 40 <= len(item.strip()) <= 5000 for item in prompts):
+        return None
+    if roles is not None and (
+        not isinstance(roles, list)
+        or len(roles) != 5
+        or not all(isinstance(item, str) and item.strip() for item in roles)
     ):
-        return False
+        return None
+    if not isinstance(market_angles, dict):
+        return None
     if not all(
-        isinstance(item, str) and 80 <= len(item) <= 5000
-        for item in payload["detail_prompts"]
-    ):
-        return False
-    if not isinstance(payload.get("market_angles"), dict):
-        return False
-    return all(
-        isinstance(payload.get(key), str) and payload[key].strip()
+        isinstance(normalized.get(key), str) and normalized[key].strip()
         for key in ("visual_theme", "main_prompt", "video_prompt")
+    ):
+        return None
+    return normalized
+
+
+def validate_creative_plan_payload(
+    payload: dict[str, Any],
+) -> tuple[CreativePlan | None, str]:
+    """Validate and materialize the exact plan accepted by the orchestrator.
+
+    Returning a correction message lets a native tool loop expose rejection as
+    an observation instead of silently swapping in a different plan afterward.
+    """
+
+    normalized = _normalize_creative_payload(payload)
+    if normalized is None:
+        return None, (
+            "creative_plan schema is invalid: provide a non-empty visual_theme, main/video prompts, "
+            "exactly five detailed prompts and roles, and en/ko/pt market angles"
+        )
+    if not 40 <= len(normalized["main_prompt"].strip()) <= 5000:
+        return None, "creative_plan.main.prompt must contain 40 to 5000 characters"
+    if not 40 <= len(normalized["video_prompt"].strip()) <= 5000:
+        return None, "creative_plan.video.prompt must contain 40 to 5000 characters"
+    market_angles = normalized["market_angles"]
+    if not all(
+        isinstance(market_angles.get(key), str) and market_angles[key].strip()
+        for key in ("en", "ko", "pt")
+    ):
+        return None, "creative_plan.market_angles must contain non-empty en, ko and pt strings"
+    main_count = normalized.get("main_candidate_count")
+    if main_count is not None and (
+        isinstance(main_count, bool)
+        or not isinstance(main_count, int)
+        or not 1 <= main_count <= 4
+    ):
+        return None, "creative_plan.main.candidate_count must be an integer from 1 to 4"
+    detail_counts = normalized.get("detail_candidate_counts")
+    if detail_counts is not None and (
+        not isinstance(detail_counts, list)
+        or len(detail_counts) != 5
+        or any(
+            isinstance(item, bool) or not isinstance(item, int) or not 1 <= item <= 4
+            for item in detail_counts
+        )
+    ):
+        return None, "every creative_plan.details[].candidate_count must be an integer from 1 to 4"
+    prompt_rows = [
+        ("main", normalized["main_prompt"]),
+        ("video", normalized["video_prompt"]),
+        *[
+            (f"detail_{index}", prompt)
+            for index, prompt in enumerate(normalized["detail_prompts"], start=1)
+        ],
+    ]
+    rejected = {
+        name: visual_prompt_violations(prompt)
+        for name, prompt in prompt_rows
+        if visual_prompt_violations(prompt)
+    }
+    if rejected:
+        return None, (
+            "creative_plan contains forbidden visual-prompt terms; rewrite the affected prompts without "
+            f"requesting or naming them: {json.dumps(rejected, ensure_ascii=False)}"
+        )
+    theme = normalized["visual_theme"].strip()
+    roles = normalized.get("detail_roles") or [f"detail_{index}" for index in range(1, 6)]
+    counts = normalized.get("detail_candidate_counts")
+    counts = counts if isinstance(counts, list) and len(counts) == 5 else [2] * 5
+    reference_roles = normalized.get("detail_reference_roles")
+    reference_roles = (
+        reference_roles
+        if isinstance(reference_roles, list) and len(reference_roles) == 5
+        else [[] for _ in range(5)]
     )
+    return CreativePlan(
+        visual_theme=theme,
+        main_prompt=normalized["main_prompt"].strip() + " " + _PRESERVATION,
+        detail_prompts=[
+            item.strip()
+            + " Campaign styling: "
+            + theme
+            + " Keep one coherent full-frame composition for the assigned job. "
+            + _PRESERVATION
+            for item in normalized["detail_prompts"]
+        ],
+        video_prompt=(
+            normalized["video_prompt"].strip()
+            + " Preserve exact reference-product identity, construction, pattern and visible color in every frame."
+            " Do not add text, claims, marks, accessories, people or product components absent from trusted evidence."
+        ),
+        market_angles={
+            key: str(value).strip()[:1000]
+            for key, value in normalized["market_angles"].items()
+            if key in {"en", "ko", "pt"} and str(value).strip()
+        },
+        detail_roles=[" ".join(str(item).split())[:100] for item in roles],
+        main_candidate_count=_candidate_count(normalized.get("main_candidate_count"), 3),
+        detail_candidate_counts=[_candidate_count(item, 2) for item in counts],
+        main_reference_roles=_role_list(normalized.get("main_reference_roles")),
+        detail_reference_roles=[_role_list(item) for item in reference_roles],
+    ), ""
 
 
 def create_creative_plan(
@@ -351,6 +503,15 @@ def create_creative_plan(
     skill_instructions: str = "",
 ) -> tuple[CreativePlan, str]:
     fallback = fallback_creative_plan(facts, taxonomy, vision)
+    orchestrated = (
+        agent_guidance.get("creative_plan")
+        if isinstance(agent_guidance, dict)
+        else None
+    )
+    if isinstance(orchestrated, dict):
+        plan, _ = validate_creative_plan_payload(orchestrated)
+        if plan is not None:
+            return plan, "agent-orchestrator"
     if client is None:
         return fallback, "deterministic-fallback"
 
@@ -361,11 +522,16 @@ def create_creative_plan(
         + ("\n\n" + skill_instructions if skill_instructions else "")
     )
     prompt = f"""
-Plan exactly one main image, five detail images and one short product video.
+Plan exactly one main image, five complementary detail images and one short product video.
 Return JSON with exactly these keys:
 - visual_theme: string
 - main_prompt: detailed English image-edit prompt
 - detail_prompts: array of exactly five detailed English image-edit prompts
+- detail_roles: array of exactly five concise machine-readable commercial jobs
+- main_candidate_count: integer from 1 to 4
+- detail_candidate_counts: array of five integers from 1 to 4
+- main_reference_roles: source-image roles to prioritize
+- detail_reference_roles: array of five source-image role arrays
 - video_prompt: detailed English image-to-video prompt for 8 seconds
 - market_angles: object with en, ko, pt strings
 
@@ -377,15 +543,9 @@ The visual_theme must define a restrained campaign direction with explicit produ
 rules. It may accommodate every seller-verified product color. Palette, background, lighting, framing
 and product coverage may vary by commercial role and target-market context; do not impose one global
 color count, background system or coverage percentage.
-Details: vertical 4:5; assign exactly one primary commercial job to each slot. Cover the complete product,
-two distinct source-visible details, one verified alternate view or genuinely verified variant comparison,
-and a source-supported practical context. Never name a component merely because it is common for the category.
-A perceptually different pose is not sufficient if it repeats another slot's job.
+Details: vertical 4:5. Choose the five commercial jobs and their order from the verified evidence.
+Make the set useful and non-redundant. Never name a component merely because it is common for the category.
 Do not request measurements, care instructions, material performance, certification, price, discount or brand claims.
-
-The five slot jobs are fixed by code and cannot be reordered or redefined. Your detail_prompts are optional
-styling proposals only; they will not replace the canonical storyboard contract:
-{json.dumps([{"slot": index + 1, "role": role, "directive": directive} for index, (role, directive) in enumerate(_detail_slot_specs(taxonomy, facts, vision))], ensure_ascii=False)}
 
 Verified facts:
 {json.dumps(facts.compact_dict(), ensure_ascii=False)}
@@ -403,46 +563,7 @@ Bounded manager guidance:
         payload = client.chat_json(system, prompt)
     except ApiError:
         return fallback, "deterministic-fallback"
-    if not _valid_plan_payload(payload):
+    plan, _ = validate_creative_plan_payload(payload)
+    if plan is None:
         return fallback, "invalid-model-plan"
-    all_prompts = [
-        payload["main_prompt"],
-        payload["video_prompt"],
-        *payload["detail_prompts"],
-    ]
-    if any(visual_prompt_violations(prompt) for prompt in all_prompts):
-        return fallback, "content-compliance-guard"
-    # A previous implementation concatenated the model's independently planned
-    # storyboard with a second fixed storyboard.  Contradictory commands (for
-    # example, close-up + complete product) predictably produced split screens.
-    # The deterministic storyboard is now the single structural source of truth;
-    # the model contributes the campaign theme, hero/video treatment and market
-    # angles, but cannot silently reassign a detail slot.
-    canonical = fallback.detail_prompts
-    plan = CreativePlan(
-        visual_theme=payload["visual_theme"].strip(),
-        main_prompt=(
-            payload["main_prompt"].strip()
-            + " "
-            + _main_presentation(facts, taxonomy, vision)
-            + " "
-            + _PRESERVATION
-        ),
-        detail_prompts=[
-            item
-            + " Campaign styling lock: "
-            + payload["visual_theme"].strip()
-            + " The assigned slot has exactly one commercial job; do not add panels, insets, grids, or a second view."
-            for item in canonical
-        ],
-        video_prompt=(
-            payload["video_prompt"].strip()
-            + " "
-            + _video_guard(facts, taxonomy, vision)
-        ),
-        market_angles={
-            key: str(value) for key, value in payload["market_angles"].items()
-        },
-        detail_roles=list(fallback.detail_roles),
-    )
     return plan, client.config.chat_model

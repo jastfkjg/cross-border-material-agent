@@ -857,7 +857,7 @@ class FactAndTaxonomyTests(unittest.TestCase):
         self.assertNotEqual(taxonomy.category.category_id, facts.offer_id)
         self.assertNotIn(facts.offer_id, repr(taxonomy.category.candidates))
 
-    def test_canonical_storyboard_cannot_be_overridden_by_model_slots(self) -> None:
+    def test_model_can_choose_storyboard_without_bypassing_safety_guard(self) -> None:
         facts = load_product_facts(DATA / "product_info/product_9493156931235.json")
         taxonomy = resolve_taxonomy(
             facts,
@@ -875,29 +875,40 @@ class FactAndTaxonomyTests(unittest.TestCase):
                     "visual_theme": "neutral daylight, ivory and charcoal",
                     "main_prompt": base,
                     "detail_prompts": [
-                        base + "FOCUS EXCLUSIVELY ON WAISTBAND CLOSEUP"
-                        for _ in range(5)
+                        base + f"Show a distinct verified commercial view for job {index}."
+                        for index in range(1, 6)
                     ],
+                    "detail_roles": [
+                        "shape_overview",
+                        "closure_evidence",
+                        "surface_evidence",
+                        "verified_option",
+                        "practical_context",
+                    ],
+                    "main_candidate_count": 4,
+                    "detail_candidate_counts": [1, 2, 3, 4, 2],
+                    "main_reference_roles": ["side", "front"],
+                    "detail_reference_roles": [["detail"]] * 5,
                     "video_prompt": base,
                     "market_angles": {"en": "clarity", "ko": "명확성", "pt": "clareza"},
                 }
 
         plan, _ = create_creative_plan(facts, taxonomy, {}, ConflictingPlanner())
-        self.assertNotIn("FOCUS EXCLUSIVELY", " ".join(plan.detail_prompts))
         self.assertEqual(
             plan.detail_roles,
             [
-                "complete_product",
-                "primary_verified_detail",
-                "secondary_verified_detail",
-                "verified_alternate_view",
-                "product_only_context",
+                "shape_overview",
+                "closure_evidence",
+                "surface_evidence",
+                "verified_option",
+                "practical_context",
             ],
         )
-        prompts = " ".join(plan.detail_prompts + [plan.video_prompt]).casefold()
-        self.assertNotIn("waistband", prompts)
-        self.assertNotIn("both legs", prompts)
-        self.assertNotIn("shoulder to hem", prompts)
+        self.assertEqual(plan.main_candidate_count, 4)
+        self.assertEqual(plan.detail_candidate_counts, [1, 2, 3, 4, 2])
+        self.assertEqual(plan.main_reference_roles, ["side", "front"])
+        self.assertIn("job 1", plan.detail_prompts[0])
+        self.assertIn("Preserve the exact product identity", plan.detail_prompts[0])
 
     def test_copy_concept_gate_accepts_natural_synonyms(self) -> None:
         text = "A straight-leg silhouette finishes at a knee-length hem."

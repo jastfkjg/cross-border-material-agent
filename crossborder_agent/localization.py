@@ -157,7 +157,10 @@ _FALLBACK_CONTENT: dict[str, dict[str, Any]] = {
 }
 
 
-_TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
+# Emergency/offline display fallback only. Online buyer-copy semantics and the
+# complete localized_terms map are authored by the model from runtime evidence;
+# this compatibility lexicon must never be used to route or select a product.
+_EMERGENCY_TERM_TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
         "123批发网": "123 Wholesale",
         "T恤": "T-shirt",
@@ -803,7 +806,7 @@ _RECONCILED_MATERIAL_PHRASES: dict[str, dict[str, str]] = {
     "lace": {"en": "Lace", "ko": "레이스", "pt": "renda"},
 }
 
-_GARMENT_TYPE_KEYWORDS: tuple[tuple[str, dict[str, str]], ...] = (
+_EMERGENCY_GARMENT_TYPE_KEYWORDS: tuple[tuple[str, dict[str, str]], ...] = (
     ("羽绒服", {"en": "down jacket", "ko": "다운 재킷", "pt": "jaqueta acolchoada"}),
     ("连衣裙", {"en": "dress", "ko": "원피스", "pt": "vestido"}),
     ("半身裙", {"en": "skirt", "ko": "스커트", "pt": "saia"}),
@@ -872,7 +875,7 @@ def _category_type_noun(language: str, category_label: str) -> str:
     """Extract a generic garment noun from a category label, or empty."""
 
     label = str(category_label or "")
-    for keyword, nouns in _GARMENT_TYPE_KEYWORDS:
+    for keyword, nouns in _EMERGENCY_GARMENT_TYPE_KEYWORDS:
         if keyword in label:
             return nouns[language]
     return ""
@@ -986,7 +989,7 @@ def _static_localize_term(language: str, value: str) -> str:
     raw = str(value).strip()
     if not raw or not re.search(r"[\u4e00-\u9fff]", raw):
         return raw
-    translations = _TERM_TRANSLATIONS[language]
+    translations = _EMERGENCY_TERM_TRANSLATIONS[language]
     if raw in translations:
         return translations[raw]
     season_match = re.fullmatch(

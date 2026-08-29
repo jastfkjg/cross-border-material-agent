@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .agent_loop import AgentLoopTool, AgentToolOutcome, NativeToolAgentLoop
 from .agent_tools import BoundedToolRegistry, ToolExecution, ToolSpec
 from .api import ApiConfig, ApiError, HttpJsonClient, QwenClient
 from .bounded_agent import BoundedDeliveryAgent
@@ -429,55 +430,79 @@ class Pipeline:
                 # without bursting nine model jobs into provider rate/queue limits.
                 max_workers=4, thread_name_prefix="asset"
             ) as executor:
-                video_future = executor.submit(
-                    self._build_video,
-                    facts,
-                    creative_plan,
-                    main_reference_url,
-                    Path(main_asset.path),
-                    work_dir,
-                    downloads_dir,
-                    (
-                        main_asset.generated
-                        or self._safe_generation_reference(main_reference_url)
+                video_future: concurrent.futures.Future[AssetResult] | None = None
+                detail_futures: dict[concurrent.futures.Future[AssetResult], int] = {}
+                copy_futures: dict[concurrent.futures.Future[Any], str] = {}
+                execution_order = [
+                    item
+                    for item in agent_plan.get(
+                        "execution_order", ["hero", "details", "copy", "video"]
                     )
-                    and not self.fast_mode,
-                )
-                detail_futures = {
-                    executor.submit(
-                        self._build_detail_image,
-                        index,
-                        facts,
-                        creative_plan,
-                        main_reference_url,
-                        work_dir,
-                        downloads_dir,
-                    ): index
-                    for index in range(1, 6)
-                }
-                copy_futures = {
-                    executor.submit(
-                        generate_copy_payload,
-                        language,
-                        facts,
-                        taxonomy,
-                        creative_plan,
-                        self.client,
-                        claim_ledger=claim_ledger,
-                        agent_guidance=str(
-                            agent_plan.get("localization_priorities", {}).get(
-                                language, ""
+                    if item != "hero"
+                ]
+                for stage in execution_order:
+                    if stage == "video":
+                        video_future = executor.submit(
+                            self._build_video,
+                            facts,
+                            creative_plan,
+                            main_reference_url,
+                            Path(main_asset.path),
+                            work_dir,
+                            downloads_dir,
+                            (
+                                main_asset.generated
+                                or self._safe_generation_reference(main_reference_url)
                             )
-                        ),
-                        skill_instructions=self.skills.compile(
-                            "copy",
-                            "product-grounding",
-                            "marketplace-materials",
-                        ),
-                        audit_valid_draft=not self.fast_mode,
-                    ): language
-                    for language in ("en", "ko", "pt")
-                }
+                            and not self.fast_mode,
+                        )
+                    elif stage == "details":
+                        detail_futures.update(
+                            {
+                                executor.submit(
+                                    self._build_detail_image,
+                                    index,
+                                    facts,
+                                    creative_plan,
+                                    main_reference_url,
+                                    work_dir,
+                                    downloads_dir,
+                                ): index
+                                for index in range(1, 6)
+                            }
+                        )
+                    elif stage == "copy":
+                        copy_futures.update(
+                            {
+                                executor.submit(
+                                    generate_copy_payload,
+                                    language,
+                                    facts,
+                                    taxonomy,
+                                    creative_plan,
+                                    self.client,
+                                    claim_ledger=claim_ledger,
+                                    agent_guidance=str(
+                                        agent_plan.get("localization_priorities", {}).get(
+                                            language, ""
+                                        )
+                                    ),
+                                    skill_instructions=self.skills.compile(
+                                        "copy",
+                                        "product-grounding",
+                                        "marketplace-materials",
+                                    ),
+                                    audit_valid_draft=not self.fast_mode,
+                                ): language
+                                for language in ("en", "ko", "pt")
+                            }
+                        )
+                self.trace.emit(
+                    "orchestrator.production_order",
+                    requested=agent_plan.get("execution_order", []),
+                    actual=["hero", *execution_order],
+                    dependency="hero precedes video because video requires its accepted first frame",
+                )
 
                 for future, index in detail_futures.items():
                     try:
@@ -510,19 +535,14 @@ class Pipeline:
                 state.visual_set_review = self._review_visual_set(
                     facts, state.assets
                 )
-                if not self.fast_mode:
-                    state.visual_set_review = self._repair_visual_set_once(
-                        facts=facts,
-                        creative_plan=creative_plan,
-                        state=state,
-                        review=state.visual_set_review,
-                        work_dir=work_dir,
-                        downloads_dir=downloads_dir,
-                    )
-                else:
-                    self.trace.emit(
-                        "image.set_repair_skipped", reason="fast-profile"
-                    )
+                self.trace.emit(
+                    "image.set_repair_deferred",
+                    reason=(
+                        "top-level-orchestrator-owns-repair-selection"
+                        if not self.fast_mode
+                        else "fast-profile"
+                    ),
+                )
                 for future, language in copy_futures.items():
                     try:
                         payload, source = future.result()
@@ -531,6 +551,8 @@ class Pipeline:
                     localization_sources[language] = source
                     localization_payloads[language] = payload
                 try:
+                    if video_future is None:
+                        raise PipelineError("编排计划未提交视频生产步骤")
                     video_result = video_future.result()
                 except Exception as exc:
                     raise PipelineError(f"视频构建失败: {exc}") from exc
@@ -582,7 +604,7 @@ class Pipeline:
                 downloads_dir=downloads_dir,
             )
             if not self.fast_mode:
-                self._run_bounded_agent_loop(
+                self._run_agentic_delivery_loop(
                     tool_registry,
                     facts=facts,
                     taxonomy=taxonomy,
@@ -961,7 +983,9 @@ class Pipeline:
             available, reason = operation_available("image")
             if not available:
                 return available, reason
-            references = self._ordered_source_urls(facts, vision)
+            references = self._ordered_source_urls(
+                facts, vision, preferred_roles=creative_plan.main_reference_roles
+            )
             if not references:
                 return False, "no trusted hero generation reference"
             return True, "trusted hero reference available"
@@ -978,7 +1002,14 @@ class Pipeline:
                 return False, "verified deterministic size chart is protected"
             main_asset = self._find_asset(state.assets, "main_image.jpeg")
             references = self._detail_reference_selection(
-                index, facts, main_asset.source_url
+                index,
+                facts,
+                main_asset.source_url,
+                preferred_roles=(
+                    creative_plan.detail_reference_roles[index - 1]
+                    if index <= len(creative_plan.detail_reference_roles)
+                    else ()
+                ),
             )
             if not references:
                 return False, f"no trusted detail reference for slot {index}"
@@ -1472,7 +1503,7 @@ class Pipeline:
                     return False, f"set review rejects synchronized image: {row.get('name')}"
         return True, "post-batch files, payloads, and explicit set-review gates are consistent"
 
-    def _run_bounded_agent_loop(
+    def _run_agentic_delivery_loop(
         self,
         registry: BoundedToolRegistry,
         *,
@@ -1485,7 +1516,362 @@ class Pipeline:
         localization_sources: dict[str, str],
         work_dir: Path,
     ) -> None:
-        """Evidence -> adjudication -> planning -> execution -> verification controller."""
+        """Give the top model direct review/repair/finish authority.
+
+        Tool handlers enforce authorization, rollback, file integrity and factual
+        safety.  They do not encode a preferred repair order or a fixed number of
+        repair cycles; those decisions stay in the model transcript.
+        """
+
+        if self.client is None:
+            self.trace.emit("orchestrator.delivery_skipped", reason="no-model-client")
+            return
+
+        evaluations: dict[str, Any] = {}
+        latest_evaluation: Any = None
+        accepted = False
+
+        def fingerprint() -> str:
+            return self._delivery_fingerprint(
+                state=state,
+                localization_payloads=localization_payloads,
+                localization_sources=localization_sources,
+                work_dir=work_dir,
+            )
+
+        def validate_current() -> dict[str, Any]:
+            # The strategy narrative is written after control finishes. Install a
+            # temporary contract-valid stub so the existing public validator can
+            # inspect the otherwise complete delivery without a second validator.
+            strategy_path = work_dir / "strategy_document.md"
+            created_stub = not strategy_path.exists()
+            if created_stub:
+                strategy_path.write_text(
+                    "\n".join(
+                        (
+                            "# Agent control preview",
+                            f"商品事实: {facts.offer_id}",
+                            f"平台类目: {taxonomy.category.category_id}",
+                            "本地化: en-US, ko-KR, pt-BR",
+                            "质检: deterministic artifact gate",
+                        )
+                    ),
+                    encoding="utf-8",
+                )
+            try:
+                report = validate_delivery(work_dir, facts, taxonomy)
+            finally:
+                if created_stub:
+                    strategy_path.unlink(missing_ok=True)
+            return {
+                "valid": report.valid,
+                "errors": report.errors[:30],
+                "warnings": report.warnings[:30],
+                "artifact_fingerprint": fingerprint(),
+            }
+
+        def inspect_delivery(_: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "artifacts": [
+                    {
+                        "name": item.name,
+                        "generated": item.generated,
+                        "model": item.model,
+                        "fallback_reason": item.fallback_reason,
+                        "description": item.description,
+                    }
+                    for item in state.assets
+                ],
+                "visual_set_review": state.visual_set_review,
+                "repair_tools": registry.catalog(),
+                "deterministic_validation": validate_current(),
+            }
+
+        def review_delivery(_: dict[str, Any]) -> dict[str, Any]:
+            nonlocal latest_evaluation
+            current = fingerprint()
+            if current in evaluations:
+                latest_evaluation = evaluations[current]
+            else:
+                evaluation = self.agent.evaluate_delivery(
+                    round_index=len(state.agent_evaluations),
+                    facts=facts,
+                    taxonomy=taxonomy,
+                    creative_plan=creative_plan,
+                    agent_plan=agent_plan,
+                    assets=state.assets,
+                    localization_payloads=localization_payloads,
+                    localization_sources=localization_sources,
+                    visual_set_review=state.visual_set_review,
+                    work_dir=work_dir,
+                    tools=registry,
+                    artifact_fingerprint=current,
+                )
+                if evaluation is None:
+                    return {
+                        "ok": False,
+                        "error": "independent review did not return sufficient valid evidence",
+                        "artifact_fingerprint": current,
+                    }
+                evaluation.artifact_fingerprint = current
+                evaluations[current] = evaluation
+                state.agent_evaluations.append(evaluation)
+                latest_evaluation = evaluation
+                self.trace.emit(
+                    "orchestrator.delivery_review",
+                    artifact_fingerprint=current,
+                    ready=evaluation.ready_for_delivery,
+                    issues=evaluation.issues,
+                    evaluator_models=evaluation.evaluator_models,
+                )
+            return {
+                "artifact_fingerprint": current,
+                "summary": latest_evaluation.summary,
+                "issues": latest_evaluation.issues,
+                "evaluator_models": latest_evaluation.evaluator_models,
+                "deterministic_validation": validate_current(),
+            }
+
+        def repair_artifact(arguments: dict[str, Any]) -> dict[str, Any]:
+            tool = str(arguments.get("tool") or "")
+            target = str(arguments.get("target") or "")
+            instruction = " ".join(str(arguments.get("instruction") or "").split())
+            defect_id = str(arguments.get("defect_id") or "")[:300]
+            if len(instruction) < 12:
+                return {"ok": False, "error": "repair instruction is too vague"}
+            available, reason = registry.availability(tool, target)
+            if not available:
+                return {"ok": False, "error": reason, "tool": tool, "target": target}
+            required = registry.estimated_seconds(tool) + 120
+            if self.deadline - time.monotonic() <= required:
+                return {
+                    "ok": False,
+                    "error": "insufficient time for this repair plus validation reserve",
+                    "required_seconds": required,
+                }
+            checkpoint = self._capture_repair_checkpoint(
+                state=state,
+                localization_payloads=localization_payloads,
+                localization_sources=localization_sources,
+                work_dir=work_dir,
+            )
+            before_hash = self._artifact_hash(work_dir / target)
+            result = registry.execute(tool, target, instruction)
+            after_hash = self._artifact_hash(work_dir / target)
+            changed = result.status == "completed" and before_hash != after_hash
+            status = result.status if changed or result.status != "completed" else "no_change"
+            detail = result.detail if changed or result.status != "completed" else "tool completed without changing the target"
+            if changed:
+                synchronized = self._synchronize_repair_dependencies(
+                    round_index=len(state.agent_evaluations),
+                    changed_targets={target},
+                    registry=registry,
+                    facts=facts,
+                    taxonomy=taxonomy,
+                    creative_plan=creative_plan,
+                    state=state,
+                    localization_payloads=localization_payloads,
+                    work_dir=work_dir,
+                )
+                consistent, consistency_detail = (
+                    self._repair_batch_consistent(
+                        {target},
+                        state=state,
+                        localization_payloads=localization_payloads,
+                        work_dir=work_dir,
+                    )
+                    if synchronized
+                    else (False, "dependency synchronization failed")
+                )
+                if not consistent:
+                    self._restore_repair_checkpoint(
+                        checkpoint,
+                        state=state,
+                        localization_payloads=localization_payloads,
+                        localization_sources=localization_sources,
+                        work_dir=work_dir,
+                    )
+                    changed = False
+                    status = "rolled_back"
+                    detail = consistency_detail
+                    after_hash = self._artifact_hash(work_dir / target)
+            elif after_hash != before_hash or result.status == "completed":
+                self._restore_repair_checkpoint(
+                    checkpoint,
+                    state=state,
+                    localization_payloads=localization_payloads,
+                    localization_sources=localization_sources,
+                    work_dir=work_dir,
+                )
+                after_hash = self._artifact_hash(work_dir / target)
+            shutil.rmtree(checkpoint["directory"], ignore_errors=True)
+            state.agent_actions.append(
+                AgentActionResult(
+                    round_index=len(state.agent_evaluations),
+                    tool=tool,
+                    target=target,
+                    status=status,
+                    detail=detail,
+                    defect_id=defect_id,
+                    before_hash=before_hash,
+                    after_hash=after_hash,
+                    changed=changed,
+                    metadata=dict(result.metadata),
+                )
+            )
+            return {
+                "tool": tool,
+                "target": target,
+                "status": status,
+                "detail": detail,
+                "changed": changed,
+                "artifact_fingerprint": fingerprint(),
+                "must_review_again": changed,
+            }
+
+        def finish_delivery(arguments: dict[str, Any]) -> AgentToolOutcome:
+            nonlocal accepted
+            validation = validate_current()
+            current = fingerprint()
+            if not validation["valid"]:
+                return AgentToolOutcome(
+                    {"ok": False, "error": "deterministic delivery contract failed", **validation}
+                )
+            if latest_evaluation is None or latest_evaluation.artifact_fingerprint != current:
+                return AgentToolOutcome(
+                    {"ok": False, "error": "review_delivery is required for the current artifact state"}
+                )
+            hard_issues = [
+                item
+                for item in latest_evaluation.issues
+                if str(item.get("severity") or "").casefold() in {"blocker", "critical"}
+                or (
+                    str(item.get("dimension") or "") in {"A1", "A2", "A5"}
+                    and str(item.get("severity") or "").casefold() == "major"
+                )
+            ]
+            if hard_issues:
+                return AgentToolOutcome(
+                    {
+                        "ok": False,
+                        "error": "unresolved safety, integrity, or product-grounding findings",
+                        "issues": hard_issues,
+                    }
+                )
+            accepted = True
+            return AgentToolOutcome(
+                {
+                    "accepted": True,
+                    "reason": str(arguments.get("reason") or "")[:1000],
+                    "artifact_fingerprint": current,
+                    "remaining_soft_issues": latest_evaluation.issues,
+                },
+                terminate=True,
+            )
+
+        catalog = registry.catalog()
+        tool_names = [item["name"] for item in catalog]
+        targets = sorted(
+            {target for item in catalog for target in item.get("allowed_targets", [])}
+        )
+        empty_schema = {"type": "object", "properties": {}, "additionalProperties": False}
+        loop_tools = [
+            AgentLoopTool(
+                "inspect_delivery",
+                "Inspect current artifacts, prior visual-set evidence, available repairs, and deterministic validation.",
+                empty_schema,
+                inspect_delivery,
+            ),
+            AgentLoopTool(
+                "review_delivery",
+                "Run independent evidence-based review for the current artifact fingerprint. Cached for unchanged artifacts.",
+                empty_schema,
+                review_delivery,
+            ),
+            AgentLoopTool(
+                "repair_artifact",
+                "Execute one targeted reversible repair. Choose the tool, target, and correction from review evidence.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "tool": {"type": "string", "enum": tool_names},
+                        "target": {"type": "string", "enum": targets},
+                        "instruction": {"type": "string", "minLength": 12, "maxLength": 3000},
+                        "defect_id": {"type": "string", "maxLength": 300},
+                    },
+                    "required": ["tool", "target", "instruction"],
+                    "additionalProperties": False,
+                },
+                repair_artifact,
+            ),
+            AgentLoopTool(
+                "validate_delivery",
+                "Run deterministic file, format, schema, localization, and data-integrity checks.",
+                empty_schema,
+                lambda _: validate_current(),
+            ),
+            AgentLoopTool(
+                "finish_delivery",
+                "Accept the current delivery and end the run. Call it alone. The host rejects stale review or unresolved hard safety/integrity findings.",
+                {
+                    "type": "object",
+                    "properties": {"reason": {"type": "string", "minLength": 5, "maxLength": 1000}},
+                    "required": ["reason"],
+                    "additionalProperties": False,
+                },
+                finish_delivery,
+                terminal=True,
+            ),
+        ]
+        system_prompt = self.agent.orchestrator_system_prompt or (
+            "You are the top-level delivery orchestrator. Use evidence and bounded tools; never invent product facts."
+        )
+        loop = NativeToolAgentLoop(
+            self.client,
+            system_prompt=system_prompt,
+            messages=self.agent.orchestrator_messages,
+            trace=self.trace,
+        )
+        try:
+            result = loop.run(
+                "Initial production is complete. Inspect and review it, choose any valuable targeted repairs, "
+                "review changed states, and call finish_delivery when the evidence is sufficient. Avoid cosmetic "
+                "churn; prioritize product identity, factual grounding, buyer-facing compliance, and artifact integrity.",
+                loop_tools,
+                max_turns=10,
+                deadline=self.deadline,
+                reserve_seconds=120,
+            )
+        except ApiError as exc:
+            self.warnings.append(f"顶层交付编排器提前停止: {exc}")
+            self.trace.emit("orchestrator.delivery_failed", error=str(exc))
+            return
+        self.agent.orchestrator_messages = result.messages
+        self.trace.emit(
+            "orchestrator.delivery_complete",
+            stop_reason=result.stop_reason,
+            turns=result.turns,
+            accepted=accepted,
+        )
+        if not accepted:
+            self.warnings.append(
+                f"顶层编排器未显式接受交付（{result.stop_reason}）；最终确定性校验仍将执行"
+            )
+
+    def _legacy_run_bounded_agent_loop(
+        self,
+        registry: BoundedToolRegistry,
+        *,
+        facts: ProductFacts,
+        taxonomy: TaxonomyResult,
+        creative_plan: CreativePlan,
+        agent_plan: dict[str, Any],
+        state: RunState,
+        localization_payloads: dict[str, dict[str, Any]],
+        localization_sources: dict[str, str],
+        work_dir: Path,
+    ) -> None:
+        """Deprecated pre-orchestrator controller retained for trace compatibility."""
 
         if self.client is None:
             self.warnings.append(
@@ -1916,7 +2302,9 @@ class Pipeline:
     ) -> ToolExecution:
         if self.client is None:
             return ToolExecution("failed", "image model unavailable")
-        source_urls = self._ordered_source_urls(facts, vision)
+        source_urls = self._ordered_source_urls(
+            facts, vision, preferred_roles=plan.main_reference_roles
+        )
         if not source_urls:
             return ToolExecution("failed", "no trusted hero reference")
         asset = self._find_asset(assets, target)
@@ -1935,6 +2323,7 @@ class Pipeline:
                 review_references=source_urls[:3],
                 incumbent_url=asset.source_url,
                 minimum_improvement=0.0,
+                candidate_count=plan.main_candidate_count,
             )
             if asset.source_url and selected == asset.source_url:
                 return ToolExecution(
@@ -1982,7 +2371,14 @@ class Pipeline:
             )
         main_asset = self._find_asset(assets, "main_image.jpeg")
         references = self._detail_reference_selection(
-            index, facts, main_asset.source_url
+            index,
+            facts,
+            main_asset.source_url,
+            preferred_roles=(
+                plan.detail_reference_roles[index - 1]
+                if index <= len(plan.detail_reference_roles)
+                else ()
+            ),
         )
         if not references:
             return ToolExecution("failed", "no trusted detail reference")
@@ -2002,6 +2398,11 @@ class Pipeline:
                 references=references[:3],
                 incumbent_url=asset.source_url,
                 minimum_improvement=0.0,
+                candidate_count=(
+                    plan.detail_candidate_counts[index - 1]
+                    if index <= len(plan.detail_candidate_counts)
+                    else None
+                ),
             )
             if asset.source_url and selected == asset.source_url:
                 return ToolExecution(
@@ -2021,7 +2422,7 @@ class Pipeline:
             asset.generated = True
             asset.fallback_reason = ""
             asset.description = (
-                "Canonical detail role: "
+                "Orchestrator-assigned detail role: "
                 f"{plan.detail_roles[index - 1] if index <= len(plan.detail_roles) else f'slot_{index}'}"
             )
             return ToolExecution("completed", f"detail slot {index} revision accepted")
@@ -2506,7 +2907,11 @@ Candidate 1:
         self.logger.info("从源详情图提取并核验 %d 行尺码表", len(rows))
 
     def _ordered_source_urls(
-        self, facts: ProductFacts, vision: dict[str, Any]
+        self,
+        facts: ProductFacts,
+        vision: dict[str, Any],
+        *,
+        preferred_roles: list[str] | tuple[str, ...] = (),
     ) -> list[str]:
         ordered = _unique(
             facts.product_image_urls
@@ -2532,7 +2937,8 @@ Candidate 1:
         ranked = self._source_urls_for_use(
             ordered,
             use="reference",
-            preferred_roles=("hero", "front", "variant", "detail"),
+            preferred_roles=tuple(preferred_roles)
+            or ("hero", "front", "variant", "detail"),
         )
         product_roles = {"hero", "front", "back", "side", "detail", "variant", "lifestyle"}
         inspected_product = [
@@ -2963,7 +3369,9 @@ Candidate 1:
         downloads_dir: Path,
     ) -> tuple[AssetResult, str]:
         destination = work_dir / "main_image.jpeg"
-        source_urls = self._ordered_source_urls(facts, vision)
+        source_urls = self._ordered_source_urls(
+            facts, vision, preferred_roles=plan.main_reference_roles
+        )
         generation_failure = (
             "image model unavailable"
             if self.client is None
@@ -2976,6 +3384,7 @@ Candidate 1:
                     plan.main_prompt,
                     generation_references=source_urls[:1],
                     review_references=source_urls[:3],
+                    candidate_count=(None if self.fast_mode else plan.main_candidate_count),
                 )
                 try:
                     self._download_and_normalize(
@@ -2998,6 +3407,7 @@ Candidate 1:
                         + "\nThe previous output URL or file failed physical validation. Produce a fresh clean asset.",
                         generation_references=source_urls[:1],
                         review_references=source_urls[:3],
+                        candidate_count=(None if self.fast_mode else plan.main_candidate_count),
                     )
                     self._download_and_normalize(
                         generated_url,
@@ -3050,6 +3460,7 @@ Candidate 1:
         review_references: list[str],
         incumbent_url: str = "",
         minimum_improvement: float = 0.0,
+        candidate_count: int | None = None,
     ) -> tuple[str, str]:
         if self.client is None:
             raise ApiError("image model unavailable")
@@ -3061,7 +3472,11 @@ Candidate 1:
                 generation_references,
                 size="1600*1600",
                 negative_prompt=_MAIN_NEGATIVE_PROMPT,
-                count=2 if self.fast_mode else 3,
+                count=(
+                    max(1, min(int(candidate_count), 4))
+                    if candidate_count is not None
+                    else (2 if self.fast_mode else 3)
+                ),
             )
             reviewed_urls = (
                 [incumbent_url, *candidate_urls] if incumbent_url else candidate_urls
@@ -3245,7 +3660,14 @@ Candidate 1:
             facts, index=index, main_reference_url=main_reference_url
         )
         reference_selection = self._detail_reference_selection(
-            index, facts, main_reference_url
+            index,
+            facts,
+            main_reference_url,
+            preferred_roles=(
+                plan.detail_reference_roles[index - 1]
+                if index <= len(plan.detail_reference_roles)
+                else ()
+            ),
         )
         generation_failure = (
             "image model unavailable"
@@ -3260,6 +3682,15 @@ Candidate 1:
                     plan.detail_prompts[index - 1],
                     references=reference_selection[:3],
                     record_pool=True,
+                    candidate_count=(
+                        None
+                        if self.fast_mode
+                        else (
+                            plan.detail_candidate_counts[index - 1]
+                            if index <= len(plan.detail_candidate_counts)
+                            else None
+                        )
+                    ),
                 )
                 try:
                     self._download_and_normalize(
@@ -3284,6 +3715,15 @@ Candidate 1:
                         + "\nThe previous output URL or file failed physical validation. Produce a fresh asset.",
                         references=reference_selection[:3],
                         record_pool=True,
+                        candidate_count=(
+                            None
+                            if self.fast_mode
+                            else (
+                                plan.detail_candidate_counts[index - 1]
+                                if index <= len(plan.detail_candidate_counts)
+                                else None
+                            )
+                        ),
                     )
                     self._download_and_normalize(
                         generated_url,
@@ -3299,7 +3739,7 @@ Candidate 1:
                     model=model,
                     generated=True,
                     description=(
-                        f"Canonical detail role: "
+                        f"Orchestrator-assigned detail role: "
                         f"{plan.detail_roles[index - 1] if index <= len(plan.detail_roles) else f'slot_{index}'}"
                     ),
                 )
@@ -3532,6 +3972,7 @@ Candidate 1:
         incumbent_url: str = "",
         minimum_improvement: float = 0.0,
         record_pool: bool = False,
+        candidate_count: int | None = None,
     ) -> tuple[str, str]:
         if self.client is None:
             raise ApiError("image model unavailable")
@@ -3552,7 +3993,11 @@ Candidate 1:
                         else ", collage, montage, grid, duplicate product, multiple views"
                     )
                 ),
-                count=1 if self.fast_mode else 2,
+                count=(
+                    max(1, min(int(candidate_count), 4))
+                    if candidate_count is not None
+                    else (1 if self.fast_mode else 2)
+                ),
             )
             if record_pool:
                 with self._detail_candidate_pool_lock:
@@ -3701,7 +4146,12 @@ Candidate 1:
         )
 
     def _detail_reference_selection(
-        self, index: int, facts: ProductFacts, main_reference_url: str
+        self,
+        index: int,
+        facts: ProductFacts,
+        main_reference_url: str,
+        *,
+        preferred_roles: list[str] | tuple[str, ...] = (),
     ) -> list[str]:
         product = facts.product_image_urls
         sku = facts.sku_image_urls
@@ -3754,7 +4204,7 @@ Candidate 1:
         ranked = self._source_urls_for_use(
             candidate_pool,
             use="reference",
-            preferred_roles=role_preferences.get(index, ()),
+            preferred_roles=tuple(preferred_roles) or role_preferences.get(index, ()),
         )
         excluded_roles = {"size_chart", "packaging", "unknown"}
         role_safe = [
@@ -3829,7 +4279,7 @@ Candidate 1:
         downloads_dir: Path,
     ) -> None:
         # Kept as a compatibility hook for callers outside Pipeline.run. Semantic
-        # feedback is handled by _run_bounded_agent_loop and never triggers fallback.
+        # feedback is handled by the top-level delivery loop and never triggers fallback.
         del downloads_dir
         self._install_size_chart_detail(facts, assets, work_dir)
         self._enhance_fallback_video(assets, work_dir)
@@ -4328,7 +4778,7 @@ Candidate 1:
             "evidence_mode": "local-final-inspection",
         }
 
-    def _repair_visual_set_once(
+    def _legacy_repair_visual_set_once(
         self,
         *,
         facts: ProductFacts,
@@ -4338,7 +4788,7 @@ Candidate 1:
         work_dir: Path,
         downloads_dir: Path,
     ) -> dict[str, Any]:
-        """Repair at most one detail whose replacement improves the whole set."""
+        """Deprecated fixed repair selector; production uses the top-level loop."""
 
         if not review or review.get("set_usable") is True:
             return review
@@ -4452,7 +4902,6 @@ Candidate 1:
                 for value in raw_agent_plan.get("risk_priorities", [])
                 if value in {f"A{index}" for index in range(1, 8)}
             ],
-            "minimum_weighted_score": raw_agent_plan.get("minimum_weighted_score"),
         }
         agent_plan_controls = {
             key: value for key, value in agent_plan_controls.items() if value is not None
@@ -4545,9 +4994,9 @@ Candidate 1:
             f"- 置信度：{taxonomy.category.confidence:.2f}",
             f"- 命中的平台商品/销售属性数：{len(taxonomy.attributes)}",
             "",
-            "类目采用“源类目同义词精确映射 → 性别/年龄/品类规则过滤 → 本地叶子节点排序”的确定性优先流程，"
-            "父级属性元数据不进入可选类目集合。属性值只从对应类目允许的枚举中映射；多季节值按平台多选枚举逐项"
-            "展开，缺失的必填值会明确保留为空。",
+            "在线模式由 Taxonomy ReAct agent 使用通用 query/read 工具自行探索类目、schema、属性和值集合；"
+            "代码不预排语义候选，只校验最终叶子节点以及模型提交的每个 ID、枚举关系和来源字段。"
+            "本地词法排序仅在显式离线或模型协议失败时作为可审计降级。",
             schema_note,
             "",
             "## 4. 本地化策略",
@@ -4571,29 +5020,27 @@ Candidate 1:
             f"- Campaign Style Lock：{state.creative_plan.visual_theme}",
             f"- 创意计划来源：{plan_model}",
             f"- 模型配置：{json.dumps(model_summary, ensure_ascii=False)}",
-            "- 主图采用方形浅色棚拍构图；优先生成三个候选，再按身份、结构、颜色、完整度、干净背景、单品覆盖和瑕疵自动选优。",
+            f"- 顶层模型选择主图候选数 {state.creative_plan.main_candidate_count}，参考图角色优先级为 "
+            f"{json.dumps(state.creative_plan.main_reference_roles, ensure_ascii=False)}；候选仍须通过身份、结构、颜色和文件硬门禁。",
             "- 主图回退源图须优先满足无人物、无关道具、单一完整商品和干净中性背景；没有合格源图时明确记录质量降级。",
-            "- 五张详情图各承担唯一商业任务：整体轮廓、领口/门襟、袖口/垂感、背面/下摆或真实变体、使用情境；"
-            "感知哈希不同但任务重复的图片仍视为分镜失败。若源详情图存在可核验尺码表，"
-            "第5张改为确定性重绘的干净尺码图。",
-            "- Full 模式下每个生成式详情槽保留两个候选，先执行逐槽身份与结构硬门禁，再把固定主图和全部详情候选"
+            f"- 五张详情图的商业职责由顶层模型按当前证据选择：{json.dumps(state.creative_plan.detail_roles, ensure_ascii=False)}。"
+            "若源详情图存在可核验尺码表，确定性重绘是事实/可读性边界，不依赖品类关键词推断。",
+            f"- 各详情图候选数由顶层模型选择：{json.dumps(state.creative_plan.detail_candidate_counts, ensure_ascii=False)}。"
+            "候选先执行逐槽身份与结构硬门禁，再把主图和全部详情候选"
             "交给集合级编辑器联合选片；只有六图组合至少提升 3 分且所有替换图无硬伤时才原子安装。",
-            "- 视频以最终主图或其源 URL 为首帧，按上装、下装、连衣裙或童装使用不同结构保护镜头；默认移除未审核音轨。",
+            "- 视频以最终主图或其源 URL 为首帧，镜头语义由顶层模型规划，代码仅维护身份稳定、禁用不受支持内容并默认移除未审核音轨。",
             f"- 本次模型直接生成并通过校验的素材数：{generated_count}。",
             "",
             "## 6. 有界 Agent 规划、评估与定向修复",
             "",
-            "交付管理器先依据事实账本、A1–A7 权重、源图观察和可用工具生成本次执行策略。初稿完成后，"
-            "两个或三个独立多模态评估器读取全套文案 payload、类目属性、素材清单、图片/视频及本地物理检查，"
-            "只输出有具体证据的缺陷，不输出分数、工具或修复决定。代码先规范化 defect_id；共同发现直接进入已裁决集合，"
-            "分歧项由独立 Adjudicator 逐项判断。A1–A7 分数由已裁决缺陷的固定惩罚规则计算，不平均模型的主观标尺。"
-            "Repair planner 只能把已裁决 defect_id 映射到白名单工具，不能新增问题。",
+            "同一个顶层工具调用 Agent 对话贯穿规划和成品控制。它可按需查看商品事实、类目、源图证据、产物状态与工具能力，"
+            "并自主选择分镜、参考角色、候选数量、生产启动次序、评审时机、返修目标和完成时机。独立多模态评估器只向顶层 Agent"
+            "返回有证据的缺陷；宿主不再通过固定 repair planner 规定修复路线。",
             "所有修复均先写入临时文件，完成候选语义选优、文案事实/schema 校验或视频播放校验后才原子替换；"
             "修复失败会保留上一版，不会因为评估意见自动降级为源图或幻灯片。",
-            "控制器对完整交付生成内容指纹，同一指纹只评估一次。工具报告 completed 后还必须确认目标 hash 变化；"
-            "每个目标独立保存检查点，完成依赖同步、本地一致性和独立 Verifier 的目标缺陷/关键回归检查后才提交。"
-            "无变化或拒绝原因作为 observation 返回 planner，同一指纹最多重规划一次；仍无有效变化就停止，不进入下一轮"
-            "全量评估。ready 时立即停止，最终提交最新一个已经评估且通过 Verifier 的状态，不按多次随机分数挑最高值。",
+            "控制器对完整交付生成内容指纹，同一指纹的独立评审只执行一次。工具报告 completed 后仍须确认目标 hash 变化；"
+            "每个目标独立保存检查点，并在依赖同步和本地一致性通过后提交。变化后的状态必须再次 review；finish 工具会拒绝"
+            "过期评审、文件契约失败，以及未解决的 A1/A2/A5 重大问题。除此之外，是否继续优化由顶层模型结合剩余预算判断。",
             "- LLM 自由文本计划仅用于内部生成提示，不作为商品事实写入交付；策略文档只披露经过白名单筛选的控制参数。",
             f"- Agent 控制参数：{json.dumps(agent_plan_controls, ensure_ascii=False)}",
             f"- 已完成全局评估轮次：{len(state.agent_evaluations)}。",

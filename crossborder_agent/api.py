@@ -679,9 +679,9 @@ class QwenClient:
                 *messages,
             ],
             "tools": tools,
-            # Taxonomy has no free-text terminal response: ``finish`` is itself
-            # a validated tool. Qwen supports required tool choice when thinking
-            # is disabled, which prevents an unparseable prose-only turn.
+            # Agent protocols in this project use validated terminal tools rather
+            # than free-text completion. Required tool choice keeps every turn
+            # observable and machine-checkable.
             "tool_choice": "required",
             "parallel_tool_calls": True,
             "temperature": 0.0,
@@ -711,7 +711,7 @@ class QwenClient:
                 tool_calls = message.get("tool_calls")
                 if not isinstance(tool_calls, list) or not tool_calls:
                     last_error = ApiError(
-                        "模型未调用任何 taxonomy 工具",
+                        "模型未调用任何可用工具",
                         retryable=True,
                         category="response_format",
                     )
@@ -996,7 +996,7 @@ Verified facts:
         )
         prompt = f"""
 The first {len(source_image_urls)} images are trusted source references. The next image is the already
-accepted fixed hero. The following {len(candidate_urls)} images form a candidate pool for several fixed detail slots. Candidate indices
+accepted hero. The following {len(candidate_urls)} images form a candidate pool for the orchestrator-assigned detail jobs. Candidate indices
 below are zero-based within that candidate pool, not within the full visual input list.
 
 Compare the proposed combination with current_selection. Return JSON with exactly these keys:
