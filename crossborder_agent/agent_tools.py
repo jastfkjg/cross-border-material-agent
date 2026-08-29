@@ -14,6 +14,8 @@ class ToolSpec:
     estimated_seconds: int
     retry_safe: bool = True
     side_effects: str = ""
+    repair_stage: str = "artifact"
+    invalidates: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -23,6 +25,8 @@ class ToolSpec:
             "estimated_seconds": self.estimated_seconds,
             "retry_safe": self.retry_safe,
             "side_effects": self.side_effects,
+            "repair_stage": self.repair_stage,
+            "invalidates": list(self.invalidates),
         }
 
 

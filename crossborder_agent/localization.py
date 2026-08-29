@@ -2600,11 +2600,14 @@ def render_description(
         ]
     )
 
+    decision_rows = _reconciled_decision_rows(facts)
     main_material_content = next(
         (
             item
-            for item in facts.attributes
-            if item.name == "主面料成分含量" and item.value
+            for index, item in enumerate(facts.attributes)
+            if item.name == "主面料成分含量"
+            and item.value
+            and decision_rows.get(index, {}).get("decision", "publish") == "publish"
         ),
         None,
     )
@@ -2630,7 +2633,9 @@ def render_description(
     mapped_source_names = {
         item.source_name for item in taxonomy.attributes if item.source_name
     }
-    for item in facts.attributes:
+    for attribute_index, item in enumerate(facts.attributes):
+        if decision_rows.get(attribute_index, {}).get("decision", "publish") != "publish":
+            continue
         localized_value = _localized_display(language, item.value, term_map)
         mentioned_in_buyer_copy = (
             buyer_safe_source_name(item.name)

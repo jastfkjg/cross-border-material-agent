@@ -347,6 +347,18 @@ def _role_list(value: Any) -> list[str]:
     )
 
 
+def _index_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    result: list[int] = []
+    for item in value[:8]:
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            continue
+        if item not in result:
+            result.append(item)
+    return result
+
+
 def _normalize_creative_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Accept the native orchestrator shape and the legacy flat JSON shape."""
 
@@ -361,10 +373,12 @@ def _normalize_creative_payload(payload: dict[str, Any]) -> dict[str, Any] | Non
             "main_prompt": main.get("prompt"),
             "main_candidate_count": main.get("candidate_count"),
             "main_reference_roles": main.get("reference_roles"),
+            "main_reference_indexes": main.get("reference_indexes"),
             "detail_prompts": [item.get("prompt") for item in details],
             "detail_roles": [item.get("role") for item in details],
             "detail_candidate_counts": [item.get("candidate_count") for item in details],
             "detail_reference_roles": [item.get("reference_roles") for item in details],
+            "detail_reference_indexes": [item.get("reference_indexes") for item in details],
             "video_prompt": video.get("prompt"),
             "market_angles": payload.get("market_angles"),
         }
@@ -396,6 +410,9 @@ def _normalize_creative_payload(payload: dict[str, Any]) -> dict[str, Any] | Non
 
 def validate_creative_plan_payload(
     payload: dict[str, Any],
+    *,
+    available_reference_indexes: set[int] | None = None,
+    require_reference_indexes: bool = False,
 ) -> tuple[CreativePlan | None, str]:
     """Validate and materialize the exact plan accepted by the orchestrator.
 
@@ -464,6 +481,29 @@ def validate_creative_plan_payload(
         if isinstance(reference_roles, list) and len(reference_roles) == 5
         else [[] for _ in range(5)]
     )
+    main_reference_indexes = _index_list(normalized.get("main_reference_indexes"))
+    detail_reference_indexes = normalized.get("detail_reference_indexes")
+    detail_reference_indexes = (
+        [_index_list(item) for item in detail_reference_indexes]
+        if isinstance(detail_reference_indexes, list)
+        and len(detail_reference_indexes) == 5
+        else [[] for _ in range(5)]
+    )
+    requested_indexes = set(main_reference_indexes)
+    for item in detail_reference_indexes:
+        requested_indexes.update(item)
+    if require_reference_indexes and (
+        not main_reference_indexes
+        or any(not item for item in detail_reference_indexes)
+    ):
+        return None, (
+            "creative_plan must bind the main job and every detail job to at least one "
+            "inspected safe source image index"
+        )
+    if available_reference_indexes is not None:
+        unknown = sorted(requested_indexes - available_reference_indexes)
+        if unknown:
+            return None, f"creative_plan references unavailable source image indexes: {unknown}"
     return CreativePlan(
         visual_theme=theme,
         main_prompt=normalized["main_prompt"].strip() + " " + _PRESERVATION,
@@ -490,6 +530,8 @@ def validate_creative_plan_payload(
         detail_candidate_counts=[_candidate_count(item, 2) for item in counts],
         main_reference_roles=_role_list(normalized.get("main_reference_roles")),
         detail_reference_roles=[_role_list(item) for item in reference_roles],
+        main_reference_indexes=main_reference_indexes,
+        detail_reference_indexes=detail_reference_indexes,
     ), ""
 
 
@@ -532,6 +574,8 @@ Return JSON with exactly these keys:
 - detail_candidate_counts: array of five integers from 1 to 4
 - main_reference_roles: source-image roles to prioritize
 - detail_reference_roles: array of five source-image role arrays
+- main_reference_indexes: inspected safe source-image indexes to use as evidence
+- detail_reference_indexes: array of five inspected safe source-image index arrays
 - video_prompt: detailed English image-to-video prompt for 8 seconds
 - market_angles: object with en, ko, pt strings
 

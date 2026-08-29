@@ -24,6 +24,12 @@ from .bounded_agent import BoundedDeliveryAgent
 from .claims import build_claim_ledger, filter_invalid_mapping_provenance
 from .compliance import normalize_source_image_observations
 from .debug_trace import DebugTrace
+from .decision_state import (
+    DependencyState,
+    assess_evidence_sufficiency,
+    build_canonical_product_state,
+    build_expected_delivery_spec,
+)
 from .input_loader import discover_input_files, load_json, load_product_facts
 from .localization import generate_copy_payload, render_description
 from .media import (
@@ -91,10 +97,6 @@ _VIDEO_NEGATIVE_PROMPT = (
     "hands covering product, text, subtitles, watermark, logo animation, speech, music"
 )
 
-_AGENT_MIN_NEW_REPAIR_SECONDS = 8 * 60
-_AGENT_POST_REPAIR_REVIEW_RESERVE_SECONDS = 4 * 60
-_AGENT_MAX_REPAIR_CYCLES = 3
-_AGENT_MAX_REPLANS_PER_FINGERPRINT = 1
 _AGENT_SNAPSHOT_FILES = tuple(
     sorted(EXPECTED_FILES - {"strategy_document.md"})
 )
@@ -222,6 +224,8 @@ class Pipeline:
                 targets=("main_image.jpeg",),
                 estimated_seconds=150,
                 side_effects="replaces main_image.jpeg only after a candidate is downloaded and validated",
+                repair_stage="artifact",
+                invalidates=("video", "media_descriptions", "review"),
             )
         )
         registry.add_spec(
@@ -234,6 +238,8 @@ class Pipeline:
                 ),
                 estimated_seconds=120,
                 side_effects="replaces only the named detail image after candidate acceptance",
+                repair_stage="artifact",
+                invalidates=("video", "media_descriptions", "review"),
             )
         )
         registry.add_spec(
@@ -246,6 +252,8 @@ class Pipeline:
                 ),
                 estimated_seconds=75,
                 side_effects="replaces only the named localized description after schema and factual validation",
+                repair_stage="projection",
+                invalidates=("review",),
             )
         )
         registry.add_spec(
@@ -255,6 +263,8 @@ class Pipeline:
                 targets=("product_video.mp4",),
                 estimated_seconds=210,
                 side_effects="replaces product_video.mp4 only after download, audio stripping, and playback validation",
+                repair_stage="artifact",
+                invalidates=("review",),
             )
         )
         registry.add_spec(
@@ -263,7 +273,9 @@ class Pipeline:
                 description="Ask independent evidence reconcilers to reconsider the structured-versus-visual fact ledger using the supplied investigation context.",
                 targets=("fact_ledger",),
                 estimated_seconds=90,
-                side_effects="replaces only the grounded reconciliation and claim ledgers when the evidence decision changes",
+                side_effects="rebuilds canonical facts, claims and expected delivery state when the evidence decision changes",
+                repair_stage="evidence",
+                invalidates=("taxonomy", "localization", "visual_plan", "artifacts", "review"),
             )
         )
         registry.add_spec(
@@ -272,7 +284,9 @@ class Pipeline:
                 description="Reopen generic taxonomy/schema exploration with current source evidence and the reconciled fact ledger; exact returned IDs are validated against the supplied snapshots.",
                 targets=("taxonomy",),
                 estimated_seconds=210,
-                side_effects="replaces grounded category/mappings and deterministically rerenders machine appendices only after successful exploration",
+                side_effects="atomically replaces grounded category/mappings, localized projections and delivery specification after successful exploration",
+                repair_stage="decision",
+                invalidates=("localization", "delivery_spec", "review"),
             )
         )
         registry.add_spec(
@@ -282,6 +296,8 @@ class Pipeline:
                 targets=("detail_image_set",),
                 estimated_seconds=90,
                 side_effects="atomically installs only a source-grounded, hard-safe combination selected for the existing slots",
+                repair_stage="artifact_set",
+                invalidates=("video", "media_descriptions", "review"),
             )
         )
         return registry
@@ -320,6 +336,32 @@ class Pipeline:
             )
             category_tree = load_json(categories_path)
             attribute_data = load_json(attributes_path)
+            # Establish visual evidence and one canonical product decision before
+            # any downstream projection is allowed to choose taxonomy or claims.
+            vision = self._analyze_source_images(facts)
+            self.trace.emit("vision.source_review", result=vision)
+            facts.reconciled_fact_ledger = self.agent.reconcile_facts(facts, vision)
+            canonical_state = build_canonical_product_state(
+                facts, facts.reconciled_fact_ledger
+            )
+            evidence_sufficiency = assess_evidence_sufficiency(
+                vision, canonical_state
+            )
+            self.trace.emit(
+                "facts.reconciled",
+                ledger=facts.reconciled_fact_ledger,
+                canonical_state=canonical_state.to_dict(),
+                evidence_sufficiency=evidence_sufficiency.to_dict(),
+                models=facts.reconciled_fact_ledger.get("models", []),
+                conflict_count=len(facts.reconciled_fact_ledger.get("conflicts", [])),
+            )
+            self.logger.info(
+                "事实证据裁决完成: models=%s conflicts=%d attribute_decisions=%d",
+                ",".join(facts.reconciled_fact_ledger.get("models", [])) or "none",
+                len(facts.reconciled_fact_ledger.get("conflicts", [])),
+                len(facts.reconciled_fact_ledger.get("attribute_decisions", [])),
+            )
+            self._apply_size_chart_observations(facts, vision)
             taxonomy = resolve_taxonomy(facts, category_tree, attribute_data)
             if not self.fast_mode:
                 taxonomy = self._adjudicate_taxonomy(
@@ -368,24 +410,6 @@ class Pipeline:
                 taxonomy.category.method,
             )
 
-            vision = self._analyze_source_images(facts)
-            self.trace.emit("vision.source_review", result=vision)
-            facts.reconciled_fact_ledger = self.agent.reconcile_facts(facts, vision)
-            self.trace.emit(
-                "facts.reconciled",
-                ledger=facts.reconciled_fact_ledger,
-                models=facts.reconciled_fact_ledger.get("models", []),
-                conflict_count=len(
-                    facts.reconciled_fact_ledger.get("conflicts", [])
-                ),
-            )
-            self.logger.info(
-                "事实证据裁决完成: models=%s conflicts=%d attribute_decisions=%d",
-                ",".join(facts.reconciled_fact_ledger.get("models", [])) or "none",
-                len(facts.reconciled_fact_ledger.get("conflicts", [])),
-                len(facts.reconciled_fact_ledger.get("attribute_decisions", [])),
-            )
-            self._apply_size_chart_observations(facts, vision)
             claim_ledger = build_claim_ledger(facts, taxonomy, vision)
             self.trace.emit(
                 "claims.ledger",
@@ -430,6 +454,37 @@ class Pipeline:
                 },
             )
 
+            expected_delivery_spec = build_expected_delivery_spec(
+                canonical=canonical_state,
+                taxonomy=taxonomy,
+                claim_ledger=claim_ledger,
+                evidence=evidence_sufficiency,
+                required_files=EXPECTED_FILES,
+            )
+            dependencies = DependencyState()
+            dependencies.record("evidence", evidence_sufficiency.to_dict())
+            dependencies.record(
+                "canonical", canonical_state.to_dict(), evidence=evidence_sufficiency.version
+            )
+            dependencies.record(
+                "taxonomy",
+                {
+                    "category": taxonomy.category.category_id,
+                    "schema": taxonomy.attribute_schema_category_id,
+                    "attributes": [
+                        (item.attr_id, item.value_id, item.source_name, item.source_value)
+                        for item in taxonomy.attributes
+                    ],
+                },
+                canonical=canonical_state.version,
+            )
+            dependencies.record(
+                "delivery_spec",
+                expected_delivery_spec.to_dict(),
+                canonical=canonical_state.version,
+                taxonomy=expected_delivery_spec.taxonomy_version,
+            )
+
             state = RunState(
                 started_at=datetime.now(timezone.utc).isoformat(),
                 input_dir=str(self.input_dir),
@@ -441,6 +496,10 @@ class Pipeline:
                 vision_observations=vision,
                 warnings=self.warnings,
                 agent_plan=agent_plan,
+                canonical_product_state=canonical_state.to_dict(),
+                evidence_sufficiency=evidence_sufficiency.to_dict(),
+                expected_delivery_spec=expected_delivery_spec.to_dict(),
+                dependency_state=dependencies.to_dict(),
             )
 
             main_asset, main_reference_url = self._build_main_image(
@@ -618,6 +677,34 @@ class Pipeline:
                 work_dir,
                 state.visual_set_review,
             )
+            # The strategy document is part of the delivery contract and must
+            # exist before the final orchestrator validates the current state.
+            self._write_strategy_document(
+                state,
+                localization_sources,
+                localization_payloads,
+                plan_model,
+                work_dir,
+            )
+            dependencies.record(
+                "localization",
+                localization_payloads,
+                taxonomy=expected_delivery_spec.taxonomy_version,
+                canonical=canonical_state.version,
+            )
+            dependencies.record(
+                "artifacts",
+                [
+                    (item.name, item.model, item.source_url, item.generated)
+                    for item in state.assets
+                ],
+                creative_plan=plan_model,
+                canonical=canonical_state.version,
+            )
+            dependencies.invalidate(
+                "artifacts", ["review"], "initial production requires independent review"
+            )
+            state.dependency_state = dependencies.to_dict()
             self._bind_repair_tools(
                 tool_registry,
                 facts=facts,
@@ -649,7 +736,7 @@ class Pipeline:
                 self.trace.emit(
                     "agent.evaluation_skipped", reason="fast-profile"
                 )
-            if not self.fast_mode:
+            if not self.fast_mode and self.client is not None:
                 final_fingerprint = self._delivery_fingerprint(
                     state=state,
                     localization_payloads=localization_payloads,
@@ -681,6 +768,24 @@ class Pipeline:
                 self.logger.warning("交付告警: %s", warning)
             if not report.valid:
                 raise PipelineError("交付校验失败: " + "; ".join(report.errors))
+
+            self.trace.emit(
+                "decision.final_snapshot",
+                canonical_version=state.canonical_product_state.get("version", ""),
+                delivery_spec_version=state.expected_delivery_spec.get("version", ""),
+                category_id=taxonomy.category.category_id,
+                schema_id=taxonomy.attribute_schema_category_id,
+                mapping_count=len(taxonomy.attributes),
+                dependency_state=state.dependency_state,
+            )
+            self.logger.info(
+                "最终决策快照: category=%s schema=%s mappings=%d canonical=%s spec=%s",
+                taxonomy.category.category_id,
+                taxonomy.attribute_schema_category_id,
+                len(taxonomy.attributes),
+                str(state.canonical_product_state.get("version") or "")[:12],
+                str(state.expected_delivery_spec.get("version") or "")[:12],
+            )
 
             self._commit_delivery(work_dir)
             final_report = validate_delivery(self.output_dir, facts, taxonomy)
@@ -897,7 +1002,7 @@ class Pipeline:
                 elif name == "product_video.mp4":
                     kind = (
                         "video"
-                        if asset.model == "ffmpeg-catalog-fallback"
+                        if asset.model.startswith("ffmpeg-")
                         else "single_video"
                     )
                 elif name == "main_image.jpeg":
@@ -1020,6 +1125,7 @@ class Pipeline:
                 creative_plan=creative_plan,
                 state=state,
                 localization_payloads=localization_payloads,
+                localization_sources=localization_sources,
                 work_dir=work_dir,
             ),
         )
@@ -1050,7 +1156,10 @@ class Pipeline:
             if not available:
                 return available, reason
             references = self._ordered_source_urls(
-                facts, vision, preferred_roles=creative_plan.main_reference_roles
+                facts,
+                vision,
+                preferred_roles=creative_plan.main_reference_roles,
+                preferred_indexes=creative_plan.main_reference_indexes,
             )
             if not references:
                 return False, "no trusted hero generation reference"
@@ -1074,6 +1183,11 @@ class Pipeline:
                 preferred_roles=(
                     creative_plan.detail_reference_roles[index - 1]
                     if index <= len(creative_plan.detail_reference_roles)
+                    else ()
+                ),
+                preferred_indexes=(
+                    creative_plan.detail_reference_indexes[index - 1]
+                    if index <= len(creative_plan.detail_reference_indexes)
                     else ()
                 ),
             )
@@ -1176,9 +1290,40 @@ class Pipeline:
             )
         facts.reconciled_fact_ledger = revised
         state.claim_ledger = build_claim_ledger(facts, taxonomy, vision)
+        canonical_state = build_canonical_product_state(facts, revised)
+        evidence_sufficiency = assess_evidence_sufficiency(
+            vision, canonical_state
+        )
+        expected_delivery_spec = build_expected_delivery_spec(
+            canonical=canonical_state,
+            taxonomy=taxonomy,
+            claim_ledger=state.claim_ledger,
+            evidence=evidence_sufficiency,
+            required_files=state.expected_delivery_spec.get(
+                "required_files", EXPECTED_FILES
+            ),
+            preserve_mapping_sources=state.expected_delivery_spec.get(
+                "required_mapping_sources", []
+            ),
+        )
+        state.canonical_product_state = canonical_state.to_dict()
+        state.evidence_sufficiency = evidence_sufficiency.to_dict()
+        state.expected_delivery_spec = expected_delivery_spec.to_dict()
+        dependency_state = DependencyState.from_dict(state.dependency_state)
+        dependency_state.record("canonical", canonical_state.to_dict())
+        dependency_state.record(
+            "delivery_spec",
+            expected_delivery_spec.to_dict(),
+            canonical=canonical_state.version,
+            taxonomy=expected_delivery_spec.taxonomy_version,
+        )
+        dependency_state.invalidate(
+            "canonical", ["review"], "fact reconciliation changed"
+        )
+        state.dependency_state = dependency_state.to_dict()
         return ToolExecution(
             "completed",
-            "fact and claim ledgers were replaced from a fresh evidence reconciliation",
+            "canonical fact state, claim projection, and expected delivery specification were rebuilt",
             {
                 "changed": True,
                 "conflict_count": len(revised.get("conflicts", [])),
@@ -1197,6 +1342,7 @@ class Pipeline:
         creative_plan: CreativePlan,
         state: RunState,
         localization_payloads: dict[str, dict[str, Any]],
+        localization_sources: dict[str, str],
         work_dir: Path,
     ) -> ToolExecution:
         before = json.dumps(
@@ -1245,11 +1391,119 @@ class Pipeline:
                 "taxonomy was re-explored but the grounded result did not change",
                 {"changed": False, "warnings": provenance_warnings},
             )
+        required_sources = state.expected_delivery_spec.get("required_mapping_sources", [])
+        revised_sources = {
+            (
+                "sales" if item.sales_attribute else "product",
+                item.source_name,
+                item.source_value,
+            )
+            for item in revised.attributes
+        }
+        lost_sources = [
+            item
+            for item in required_sources
+            if isinstance(item, dict)
+            and (
+                str(item.get("scope") or ""),
+                str(item.get("source_name") or ""),
+                str(item.get("source_value") or ""),
+            )
+            not in revised_sources
+        ]
+        if lost_sources:
+            return ToolExecution(
+                "rejected",
+                "taxonomy proposal would drop frozen source coverage; reconsider category/schema and mappings together",
+                {"missing_mapping_sources": lost_sources},
+            )
+        revised_claim_ledger = build_claim_ledger(
+            facts, revised, state.vision_observations
+        )
+        # Localized term maps and copy are projections of taxonomy. Rebuild them
+        # from the model instead of re-rendering stale pre-repair payloads.
+        if self.client is not None:
+            regenerated: dict[str, dict[str, Any]] = {}
+            regenerated_sources: dict[str, str] = {}
+            try:
+                for language in ("en", "ko", "pt"):
+                    payload, source = generate_copy_payload(
+                        language,
+                        facts,
+                        revised,
+                        creative_plan,
+                        self.client,
+                        claim_ledger=revised_claim_ledger,
+                        agent_guidance=str(
+                            state.agent_plan.get("localization_priorities", {}).get(
+                                language, ""
+                            )
+                        ),
+                        revision_feedback=(
+                            "Upstream taxonomy changed. Rebuild the complete locale projection "
+                            "from the current canonical evidence and taxonomy; do not reuse old terms."
+                        ),
+                        skill_instructions=self.skills.compile(
+                            "copy", "product-grounding", "marketplace-materials"
+                        ),
+                    )
+                    regenerated[language] = payload
+                    regenerated_sources[language] = source
+            except (ApiError, ValueError, TypeError) as exc:
+                return ToolExecution(
+                    "failed",
+                    f"taxonomy changed but dependent localization rebuild failed: {exc}",
+                )
+            localization_payloads.update(regenerated)
+            localization_sources.update(regenerated_sources)
         taxonomy.category = revised.category
         taxonomy.attributes = revised.attributes
         taxonomy.missing_required = revised.missing_required
         taxonomy.attribute_schema_category_id = revised.attribute_schema_category_id
-        state.claim_ledger = build_claim_ledger(facts, taxonomy, state.vision_observations)
+        state.claim_ledger = revised_claim_ledger
+        canonical_state = build_canonical_product_state(
+            facts, facts.reconciled_fact_ledger
+        )
+        evidence_sufficiency = assess_evidence_sufficiency(
+            state.vision_observations, canonical_state
+        )
+        expected_delivery_spec = build_expected_delivery_spec(
+            canonical=canonical_state,
+            taxonomy=taxonomy,
+            claim_ledger=state.claim_ledger,
+            evidence=evidence_sufficiency,
+            required_files=state.expected_delivery_spec.get(
+                "required_files", EXPECTED_FILES
+            ),
+            preserve_mapping_sources=required_sources,
+        )
+        state.expected_delivery_spec = expected_delivery_spec.to_dict()
+        dependency_state = DependencyState.from_dict(state.dependency_state)
+        taxonomy_version = dependency_state.record(
+            "taxonomy",
+            {
+                "category": taxonomy.category.category_id,
+                "schema": taxonomy.attribute_schema_category_id,
+                "attributes": [
+                    (item.attr_id, item.value_id, item.source_name, item.source_value)
+                    for item in taxonomy.attributes
+                ],
+            },
+            canonical=canonical_state.version,
+        )
+        dependency_state.record(
+            "localization", localization_payloads, taxonomy=taxonomy_version
+        )
+        dependency_state.record(
+            "delivery_spec",
+            expected_delivery_spec.to_dict(),
+            canonical=canonical_state.version,
+            taxonomy=expected_delivery_spec.taxonomy_version,
+        )
+        dependency_state.invalidate(
+            "taxonomy", ["review"], "taxonomy decision and projections changed"
+        )
+        state.dependency_state = dependency_state.to_dict()
         self._write_localized_descriptions(
             facts,
             taxonomy,
@@ -1259,9 +1513,15 @@ class Pipeline:
             work_dir,
             state.visual_set_review,
         )
+        self.logger.info(
+            "分类返修已原子提交: category=%s schema=%s mappings=%d",
+            taxonomy.category.category_id,
+            taxonomy.attribute_schema_category_id,
+            len(taxonomy.attributes),
+        )
         return ToolExecution(
             "completed",
-            "taxonomy and deterministic machine appendices were replaced from grounded exploration",
+            "taxonomy and all dependent localized projections were rebuilt from grounded exploration",
             {
                 "changed": True,
                 "category_id": taxonomy.category.category_id,
@@ -1374,6 +1634,9 @@ class Pipeline:
                     for item in state.taxonomy.attributes
                 ],
             },
+            "expected_delivery_spec_version": state.expected_delivery_spec.get(
+                "version", ""
+            ),
         }
         digest.update(
             json.dumps(mutable_state, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
@@ -1409,6 +1672,10 @@ class Pipeline:
             ),
             "taxonomy": copy.deepcopy(state.taxonomy),
             "claim_ledger": copy.deepcopy(state.claim_ledger),
+            "canonical_product_state": copy.deepcopy(state.canonical_product_state),
+            "evidence_sufficiency": copy.deepcopy(state.evidence_sufficiency),
+            "expected_delivery_spec": copy.deepcopy(state.expected_delivery_spec),
+            "dependency_state": copy.deepcopy(state.dependency_state),
         }
 
     def _restore_repair_checkpoint(
@@ -1447,90 +1714,16 @@ class Pipeline:
             restored_taxonomy.attribute_schema_category_id
         )
         state.claim_ledger = copy.deepcopy(checkpoint["claim_ledger"])
-
-    def _capture_agent_snapshot(
-        self,
-        *,
-        evaluation: Any,
-        state: RunState,
-        localization_payloads: dict[str, dict[str, Any]],
-        localization_sources: dict[str, str],
-        work_dir: Path,
-    ) -> dict[str, Any]:
-        """Save one fully evaluated delivery version and its in-memory state."""
-
-        snapshot_index = len(state.agent_snapshots)
-        snapshot_id = f"snapshot_{snapshot_index:02d}"
-        snapshot_dir = work_dir / ".agent-snapshots" / snapshot_id
-        snapshot_dir.mkdir(parents=True, exist_ok=False)
-        for filename in _AGENT_SNAPSHOT_FILES:
-            source = work_dir / filename
-            if not source.is_file():
-                raise PipelineError(
-                    f"无法保存 Agent 快照 {snapshot_id}，缺少文件: {filename}"
-                )
-            destination = snapshot_dir / filename
-            # Use independent copies: localized description rendering writes in
-            # place, so hard links would silently mutate older snapshots.
-            shutil.copy2(source, destination)
-
-        metadata = {
-            "snapshot_id": snapshot_id,
-            "after_repair_rounds": int(evaluation.round_index),
-            "artifact_fingerprint": str(evaluation.artifact_fingerprint),
-            "weighted_score": float(evaluation.weighted_score),
-            "dimension_scores": dict(evaluation.dimension_scores),
-            "evaluator_models": list(evaluation.evaluator_models),
-            "model_weighted_scores": dict(evaluation.model_weighted_scores),
-            "ready_for_delivery": bool(evaluation.ready_for_delivery),
-            "score_method": str(evaluation.score_method),
-            "disagreement": bool(evaluation.disagreement),
-            "selected": False,
-        }
-        state.agent_snapshots.append(metadata)
-        self.trace.emit("agent.snapshot_saved", **metadata)
-        return {
-            "metadata": metadata,
-            "directory": snapshot_dir,
-            "assets": copy.deepcopy(state.assets),
-            "localization_payloads": copy.deepcopy(localization_payloads),
-            "localization_sources": copy.deepcopy(localization_sources),
-            "visual_set_review": copy.deepcopy(state.visual_set_review),
-        }
-
-    def _restore_agent_snapshot(
-        self,
-        snapshot: dict[str, Any],
-        *,
-        state: RunState,
-        localization_payloads: dict[str, dict[str, Any]],
-        localization_sources: dict[str, str],
-        work_dir: Path,
-        mark_selected: bool,
-    ) -> None:
-        """Atomically restore files and mutable state from one delivery snapshot."""
-
-        snapshot_dir = snapshot["directory"]
-        for filename in _AGENT_SNAPSHOT_FILES:
-            source = snapshot_dir / filename
-            staged = work_dir / f".restore-{uuid.uuid4().hex}-{filename}"
-            shutil.copy2(source, staged)
-            os.replace(staged, work_dir / filename)
-        state.assets = copy.deepcopy(snapshot["assets"])
-        localization_payloads.clear()
-        localization_payloads.update(copy.deepcopy(snapshot["localization_payloads"]))
-        localization_sources.clear()
-        localization_sources.update(copy.deepcopy(snapshot["localization_sources"]))
-        state.visual_set_review = copy.deepcopy(snapshot["visual_set_review"])
-        if mark_selected:
-            for item in state.agent_snapshots:
-                item["selected"] = item is snapshot["metadata"]
-        self.trace.emit(
-            "agent.snapshot_restored",
-            snapshot_id=snapshot["metadata"]["snapshot_id"],
-            weighted_score=snapshot["metadata"]["weighted_score"],
-            selected=mark_selected,
+        state.canonical_product_state = copy.deepcopy(
+            checkpoint["canonical_product_state"]
         )
+        state.evidence_sufficiency = copy.deepcopy(
+            checkpoint["evidence_sufficiency"]
+        )
+        state.expected_delivery_spec = copy.deepcopy(
+            checkpoint["expected_delivery_spec"]
+        )
+        state.dependency_state = copy.deepcopy(checkpoint["dependency_state"])
 
     def _rebuild_synchronized_catalog_video(
         self,
@@ -2018,6 +2211,7 @@ class Pipeline:
                     work_dir=work_dir,
                     tools=registry,
                     artifact_fingerprint=current,
+                    expected_delivery_spec=state.expected_delivery_spec,
                 )
                 if evaluation is None:
                     return {
@@ -2037,6 +2231,18 @@ class Pipeline:
                     issues=evaluation.issues,
                     evaluator_models=evaluation.evaluator_models,
                 )
+            dependency_state = DependencyState.from_dict(state.dependency_state)
+            dependency_state.record(
+                "review",
+                {
+                    "artifact_fingerprint": current,
+                    "issues": latest_evaluation.issues,
+                    "models": latest_evaluation.evaluator_models,
+                },
+                artifacts=current,
+                delivery_spec=str(state.expected_delivery_spec.get("version") or ""),
+            )
+            state.dependency_state = dependency_state.to_dict()
             return {
                 "artifact_fingerprint": current,
                 "summary": latest_evaluation.summary,
@@ -2184,6 +2390,15 @@ class Pipeline:
                             "after_hash": after_hash,
                         }
                     )
+            if changed:
+                dependency_state = DependencyState.from_dict(state.dependency_state)
+                dependency_state.record(
+                    "artifacts", {"artifact_fingerprint": fingerprint()}
+                )
+                dependency_state.invalidate(
+                    "artifacts", ["review"], f"repair changed {target}"
+                )
+                state.dependency_state = dependency_state.to_dict()
             return {
                 "tool": tool,
                 "target": target,
@@ -2202,6 +2417,47 @@ class Pipeline:
             if not validation["valid"]:
                 return AgentToolOutcome(
                     {"ok": False, "error": "deterministic delivery contract failed", **validation}
+                )
+            required_sources = state.expected_delivery_spec.get(
+                "required_mapping_sources", []
+            )
+            actual_sources = {
+                (
+                    "sales" if item.sales_attribute else "product",
+                    item.source_name,
+                    item.source_value,
+                )
+                for item in taxonomy.attributes
+            }
+            mapping_gaps = [
+                item
+                for item in required_sources
+                if isinstance(item, dict)
+                and (
+                    str(item.get("scope") or ""),
+                    str(item.get("source_name") or ""),
+                    str(item.get("source_value") or ""),
+                )
+                not in actual_sources
+            ]
+            if mapping_gaps:
+                return AgentToolOutcome(
+                    {
+                        "ok": False,
+                        "error": "taxonomy repair dropped frozen source coverage",
+                        "missing_mapping_sources": mapping_gaps,
+                    }
+                )
+            stale_dependencies = DependencyState.from_dict(
+                state.dependency_state
+            ).stale_nodes()
+            if stale_dependencies:
+                return AgentToolOutcome(
+                    {
+                        "ok": False,
+                        "error": "downstream projections or review are stale",
+                        "stale_dependencies": stale_dependencies,
+                    }
                 )
             if latest_evaluation is None or latest_evaluation.artifact_fingerprint != current:
                 return AgentToolOutcome(
@@ -2320,7 +2576,33 @@ class Pipeline:
         except ApiError as exc:
             self.warnings.append(f"顶层交付编排器提前停止: {exc}")
             self.trace.emit("orchestrator.delivery_failed", error=str(exc))
-            raise PipelineError(f"顶层交付编排器未能接受当前交付: {exc}") from exc
+            # Some OpenAI-compatible endpoints expose chat but not native tool
+            # calls. Preserve the protocol smoke path with a clearly degraded,
+            # deterministic contract gate; never pretend an LLM review occurred.
+            if "未调用任何可用工具" not in str(exc):
+                raise PipelineError(f"顶层交付编排器未能接受当前交付: {exc}") from exc
+            report = validate_delivery(work_dir, facts, taxonomy)
+            if not report.valid:
+                raise PipelineError(
+                    "顶层工具协议不可用且确定性交付校验失败: "
+                    + "; ".join(report.errors)
+                ) from exc
+            current = self._delivery_fingerprint(
+                state=state,
+                localization_payloads=localization_payloads,
+                localization_sources=localization_sources,
+                work_dir=work_dir,
+            )
+            state.accepted_artifact_fingerprint = current
+            warning = "模型端不支持原生工具调用：本次仅通过确定性交付契约门禁"
+            if warning not in self.warnings:
+                self.warnings.append(warning)
+            self.trace.emit(
+                "orchestrator.delivery_degraded_acceptance",
+                artifact_fingerprint=current,
+                reason="native-tool-protocol-unavailable",
+            )
+            return
         self.agent.orchestrator_messages = result.messages
         self.trace.emit(
             "orchestrator.delivery_complete",
@@ -2332,430 +2614,6 @@ class Pipeline:
             raise PipelineError(
                 f"顶层编排器未显式接受交付（{result.stop_reason}），拒绝提交未接受状态"
             )
-
-    def _legacy_run_bounded_agent_loop(
-        self,
-        registry: BoundedToolRegistry,
-        *,
-        facts: ProductFacts,
-        taxonomy: TaxonomyResult,
-        creative_plan: CreativePlan,
-        agent_plan: dict[str, Any],
-        state: RunState,
-        localization_payloads: dict[str, dict[str, Any]],
-        localization_sources: dict[str, str],
-        work_dir: Path,
-    ) -> None:
-        """Deprecated pre-orchestrator controller retained for trace compatibility."""
-
-        if self.client is None:
-            self.warnings.append(
-                "显式离线模式：跳过角色分离的 Agent 评估返修控制器"
-                if self.offline
-                else "模型配置不可用，跳过角色分离的 Agent 评估返修控制器"
-            )
-            self.trace.emit(
-                "agent.evaluation_skipped",
-                reason="offline" if self.offline else "no-model-client",
-            )
-            return
-
-        evaluation_cache: dict[str, Any] = {}
-        observations_by_fingerprint: dict[str, list[dict[str, Any]]] = {}
-        evaluated_snapshots: list[dict[str, Any]] = []
-        last_evaluated_snapshot: dict[str, Any] | None = None
-        repair_cycles = 0
-        stop_reason = "controller-finished"
-
-        while True:
-            if (
-                self.deadline - time.monotonic()
-                <= _AGENT_POST_REPAIR_REVIEW_RESERVE_SECONDS
-            ):
-                stop_reason = "insufficient-evaluation-budget"
-                break
-
-            fingerprint = self._delivery_fingerprint(
-                state=state,
-                localization_payloads=localization_payloads,
-                localization_sources=localization_sources,
-                work_dir=work_dir,
-            )
-            if fingerprint in evaluation_cache:
-                stop_reason = "unchanged-artifact-fingerprint"
-                self.trace.emit(
-                    "agent.controller_stop",
-                    reason=stop_reason,
-                    artifact_fingerprint=fingerprint,
-                )
-                break
-
-            evaluation = self.agent.evaluate_delivery(
-                round_index=len(state.agent_evaluations),
-                facts=facts,
-                taxonomy=taxonomy,
-                creative_plan=creative_plan,
-                agent_plan=agent_plan,
-                assets=state.assets,
-                localization_payloads=localization_payloads,
-                localization_sources=localization_sources,
-                visual_set_review=state.visual_set_review,
-                work_dir=work_dir,
-                tools=registry,
-                artifact_fingerprint=fingerprint,
-            )
-            if evaluation is None:
-                stop_reason = "insufficient-valid-evaluators"
-                if last_evaluated_snapshot is not None and repair_cycles:
-                    self._restore_agent_snapshot(
-                        last_evaluated_snapshot,
-                        state=state,
-                        localization_payloads=localization_payloads,
-                        localization_sources=localization_sources,
-                        work_dir=work_dir,
-                        mark_selected=False,
-                    )
-                    stop_reason = "evaluation-failed-restored-last-evaluated-state"
-                break
-
-            evaluation.artifact_fingerprint = fingerprint
-            evaluation_cache[fingerprint] = evaluation
-            state.agent_evaluations.append(evaluation)
-            current_snapshot = self._capture_agent_snapshot(
-                evaluation=evaluation,
-                state=state,
-                localization_payloads=localization_payloads,
-                localization_sources=localization_sources,
-                work_dir=work_dir,
-            )
-            evaluated_snapshots.append(current_snapshot)
-            last_evaluated_snapshot = current_snapshot
-            self.trace.emit(
-                "agent.evaluation",
-                round_index=evaluation.round_index,
-                artifact_fingerprint=fingerprint,
-                evaluator_models=evaluation.evaluator_models,
-                model_dimension_scores=evaluation.model_dimension_scores,
-                model_weighted_scores=evaluation.model_weighted_scores,
-                score_method=evaluation.score_method,
-                disagreement=evaluation.disagreement,
-                adjudication=evaluation.adjudication,
-                ready=evaluation.ready_for_delivery,
-                weighted_score=evaluation.weighted_score,
-                dimension_scores=evaluation.dimension_scores,
-                summary=evaluation.summary,
-                issues=evaluation.issues,
-            )
-            if evaluation.ready_for_delivery:
-                stop_reason = "ready-for-delivery"
-                break
-            if repair_cycles >= _AGENT_MAX_REPAIR_CYCLES:
-                stop_reason = "max-repair-cycles-reached"
-                break
-            if self.deadline - time.monotonic() <= _AGENT_MIN_NEW_REPAIR_SECONDS:
-                stop_reason = "insufficient-repair-budget"
-                break
-
-            observations = observations_by_fingerprint.setdefault(fingerprint, [])
-            changed_in_cycle = False
-            for plan_attempt in range(_AGENT_MAX_REPLANS_PER_FINGERPRINT + 1):
-                actions = self.agent.plan_repairs(
-                    evaluation,
-                    tools=registry,
-                    previous_attempts=observations,
-                )
-                evaluation.repair_actions = actions
-                if not actions:
-                    observations.append(
-                        {
-                            "status": "no_plan",
-                            "detail": "repair planner returned no bounded action",
-                        }
-                    )
-                    if plan_attempt < _AGENT_MAX_REPLANS_PER_FINGERPRINT:
-                        continue
-                    stop_reason = "no-repair-plan"
-                    break
-
-                signature_payload = [
-                    (item.defect_id, item.tool, item.target, item.instruction)
-                    for item in actions
-                ]
-                signature = hashlib.sha256(
-                    json.dumps(signature_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-                ).hexdigest()
-                if any(item.get("plan_signature") == signature for item in observations):
-                    stop_reason = "repeated-repair-plan"
-                    break
-                observations.append(
-                    {
-                        "status": "planned",
-                        "plan_signature": signature,
-                        "actions": signature_payload,
-                    }
-                )
-
-                eligible, rejected = self._preflight_repair_actions(actions, registry)
-                observations.extend(rejected)
-                self.trace.emit(
-                    "agent.repair_plan",
-                    artifact_fingerprint=fingerprint,
-                    plan_attempt=plan_attempt,
-                    proposed=[
-                        {
-                            "defect_id": item.defect_id,
-                            "tool": item.tool,
-                            "target": item.target,
-                            "acceptance_criteria": item.acceptance_criteria,
-                        }
-                        for item in actions
-                    ],
-                    rejected=rejected,
-                )
-                if not eligible:
-                    if plan_attempt < _AGENT_MAX_REPLANS_PER_FINGERPRINT:
-                        continue
-                    stop_reason = "no-executable-repair"
-                    break
-
-                for batch in self._build_repair_batches(eligible):
-                    batch_actions = batch["actions"]
-                    required = (
-                        sum(registry.estimated_seconds(item.tool) for item in batch_actions)
-                        + _AGENT_POST_REPAIR_REVIEW_RESERVE_SECONDS
-                    )
-                    if self.deadline - time.monotonic() <= required:
-                        observations.append(
-                            {
-                                "status": "deferred_budget",
-                                "batch_id": batch["batch_id"],
-                                "required_seconds": required,
-                            }
-                        )
-                        continue
-
-                    checkpoint = self._capture_repair_checkpoint(
-                        state=state,
-                        localization_payloads=localization_payloads,
-                        localization_sources=localization_sources,
-                        work_dir=work_dir,
-                    )
-                    targets = {item.target for item in batch_actions}
-                    before_hashes = self._target_hashes(targets, work_dir)
-                    completed_actions: list[AgentAction] = []
-                    for action in batch_actions:
-                        result = registry.execute(
-                            action.tool, action.target, action.instruction
-                        )
-                        after_hash = self._artifact_hash(work_dir / action.target)
-                        changed = (
-                            result.status == "completed"
-                            and after_hash != before_hashes.get(action.target)
-                        )
-                        status = result.status
-                        detail = result.detail
-                        if result.status == "completed" and not changed:
-                            status = "no_change"
-                            detail = "tool reported completion but target content hash did not change"
-                        state.agent_actions.append(
-                            AgentActionResult(
-                                round_index=evaluation.round_index,
-                                tool=action.tool,
-                                target=action.target,
-                                status=status,
-                                detail=detail,
-                                defect_id=action.defect_id,
-                                before_hash=before_hashes.get(action.target, ""),
-                                after_hash=after_hash,
-                                changed=changed,
-                                metadata=dict(result.metadata),
-                            )
-                        )
-                        observation = {
-                            "defect_id": action.defect_id,
-                            "tool": action.tool,
-                            "target": action.target,
-                            "status": status,
-                            "detail": detail,
-                            "before_hash": before_hashes.get(action.target, ""),
-                            "after_hash": after_hash,
-                            "changed": changed,
-                        }
-                        observations.append(observation)
-                        self.trace.emit("agent.repair_result", **observation)
-                        if changed:
-                            completed_actions.append(action)
-
-                    if not completed_actions:
-                        self._restore_repair_checkpoint(
-                            checkpoint,
-                            state=state,
-                            localization_payloads=localization_payloads,
-                            localization_sources=localization_sources,
-                            work_dir=work_dir,
-                        )
-                        continue
-
-                    changed_targets = {item.target for item in completed_actions}
-                    synchronized = self._synchronize_repair_dependencies(
-                        round_index=evaluation.round_index,
-                        changed_targets=changed_targets,
-                        registry=registry,
-                        facts=facts,
-                        taxonomy=taxonomy,
-                        creative_plan=creative_plan,
-                        state=state,
-                        localization_payloads=localization_payloads,
-                        work_dir=work_dir,
-                    )
-                    consistent, consistency_detail = (
-                        self._repair_batch_consistent(
-                            changed_targets,
-                            state=state,
-                            localization_payloads=localization_payloads,
-                            work_dir=work_dir,
-                        )
-                        if synchronized
-                        else (False, "dependency synchronization failed")
-                    )
-                    if not consistent:
-                        self._restore_repair_checkpoint(
-                            checkpoint,
-                            state=state,
-                            localization_payloads=localization_payloads,
-                            localization_sources=localization_sources,
-                            work_dir=work_dir,
-                        )
-                        observations.append(
-                            {
-                                "status": "rolled_back",
-                                "batch_id": batch["batch_id"],
-                                "detail": consistency_detail,
-                            }
-                        )
-                        continue
-
-                    after_hashes = self._target_hashes(changed_targets, work_dir)
-                    verify_method = getattr(self.agent, "verify_repair_outcome", None)
-                    verification = (
-                        verify_method(
-                            completed_actions,
-                            facts=facts,
-                            taxonomy=taxonomy,
-                            assets=state.assets,
-                            visual_set_review=state.visual_set_review,
-                            work_dir=work_dir,
-                            before_hashes=before_hashes,
-                            after_hashes=after_hashes,
-                        )
-                        if callable(verify_method)
-                        else {
-                            "accepted": True,
-                            "status": "local-consistency-only",
-                            "fixed_defect_ids": [item.defect_id for item in completed_actions],
-                        }
-                    )
-                    if verification.get("accepted") is not True:
-                        self._restore_repair_checkpoint(
-                            checkpoint,
-                            state=state,
-                            localization_payloads=localization_payloads,
-                            localization_sources=localization_sources,
-                            work_dir=work_dir,
-                        )
-                        observations.append(
-                            {
-                                "status": "postcondition_failed",
-                                "batch_id": batch["batch_id"],
-                                "verification": verification,
-                            }
-                        )
-                        state.agent_actions.append(
-                            AgentActionResult(
-                                round_index=evaluation.round_index,
-                                tool="repair_verifier",
-                                target=batch["batch_id"],
-                                status="rolled_back",
-                                detail=str(verification.get("evidence") or verification.get("status") or "verification rejected"),
-                                metadata=verification,
-                            )
-                        )
-                        continue
-
-                    changed_in_cycle = True
-                    observations.append(
-                        {
-                            "status": "applied",
-                            "batch_id": batch["batch_id"],
-                            "fixed_defect_ids": verification.get("fixed_defect_ids", []),
-                            "verification": verification,
-                        }
-                    )
-                    self.trace.emit(
-                        "agent.repair_committed",
-                        batch_id=batch["batch_id"],
-                        targets=sorted(changed_targets),
-                        verification=verification,
-                    )
-
-                if changed_in_cycle:
-                    break
-                if plan_attempt >= _AGENT_MAX_REPLANS_PER_FINGERPRINT:
-                    stop_reason = "no-change-after-replan"
-
-            if not changed_in_cycle:
-                break
-
-            next_fingerprint = self._delivery_fingerprint(
-                state=state,
-                localization_payloads=localization_payloads,
-                localization_sources=localization_sources,
-                work_dir=work_dir,
-            )
-            if next_fingerprint == fingerprint:
-                stop_reason = "no-effective-delivery-change"
-                break
-            if next_fingerprint in evaluation_cache:
-                stop_reason = "returned-to-previous-artifact-state"
-                break
-            repair_cycles += 1
-
-        final_fingerprint = self._delivery_fingerprint(
-            state=state,
-            localization_payloads=localization_payloads,
-            localization_sources=localization_sources,
-            work_dir=work_dir,
-        )
-        selected_snapshot = next(
-            (
-                snapshot
-                for snapshot in reversed(evaluated_snapshots)
-                if snapshot["metadata"].get("artifact_fingerprint") == final_fingerprint
-            ),
-            last_evaluated_snapshot,
-        )
-        if selected_snapshot is not None:
-            for item in state.agent_snapshots:
-                item["selected"] = item is selected_snapshot["metadata"]
-        self.trace.emit(
-            "agent.final_selection",
-            snapshot_id=(
-                selected_snapshot["metadata"]["snapshot_id"]
-                if selected_snapshot is not None
-                else ""
-            ),
-            artifact_fingerprint=final_fingerprint,
-            selection_rule="latest-evaluated-verifier-accepted-state",
-            repair_cycles=repair_cycles,
-            stop_reason=stop_reason,
-        )
-        self.logger.info(
-            "Agent 控制器停止: reason=%s evaluations=%d repair_cycles=%d",
-            stop_reason,
-            len(state.agent_evaluations),
-            repair_cycles,
-        )
-
 
     @staticmethod
     def _find_asset(assets: list[AssetResult], name: str) -> AssetResult:
@@ -2778,7 +2636,10 @@ class Pipeline:
         if self.client is None:
             return ToolExecution("failed", "image model unavailable")
         source_urls = self._ordered_source_urls(
-            facts, vision, preferred_roles=plan.main_reference_roles
+            facts,
+            vision,
+            preferred_roles=plan.main_reference_roles,
+            preferred_indexes=plan.main_reference_indexes,
         )
         if not source_urls:
             return ToolExecution("failed", "no trusted hero reference")
@@ -2852,6 +2713,11 @@ class Pipeline:
             preferred_roles=(
                 plan.detail_reference_roles[index - 1]
                 if index <= len(plan.detail_reference_roles)
+                else ()
+            ),
+            preferred_indexes=(
+                plan.detail_reference_indexes[index - 1]
+                if index <= len(plan.detail_reference_indexes)
                 else ()
             ),
         )
@@ -3387,6 +3253,7 @@ Candidate 1:
         vision: dict[str, Any],
         *,
         preferred_roles: list[str] | tuple[str, ...] = (),
+        preferred_indexes: list[int] | tuple[int, ...] = (),
     ) -> list[str]:
         ordered = _unique(
             facts.product_image_urls
@@ -3409,12 +3276,21 @@ Candidate 1:
                 best_url = str(best_item.get("url") or "")
         if best_url in ordered:
             ordered.insert(0, ordered.pop(ordered.index(best_url)))
+        explicit = [
+            str(item.get("url") or "")
+            for item in (source_images if isinstance(source_images, list) else [])
+            if isinstance(item, dict)
+            and item.get("index") in preferred_indexes
+            and item.get("safe_for_generation_reference") is True
+        ]
         ranked = self._source_urls_for_use(
             ordered,
             use="reference",
             preferred_roles=tuple(preferred_roles)
             or ("hero", "front", "variant", "detail"),
         )
+        if explicit:
+            ranked = _unique(explicit + ranked)
         product_roles = {"hero", "front", "back", "side", "detail", "variant", "lifestyle"}
         inspected_product = [
             url
@@ -3845,7 +3721,10 @@ Candidate 1:
     ) -> tuple[AssetResult, str]:
         destination = work_dir / "main_image.jpeg"
         source_urls = self._ordered_source_urls(
-            facts, vision, preferred_roles=plan.main_reference_roles
+            facts,
+            vision,
+            preferred_roles=plan.main_reference_roles,
+            preferred_indexes=plan.main_reference_indexes,
         )
         generation_failure = (
             "image model unavailable"
@@ -4141,6 +4020,11 @@ Candidate 1:
             preferred_roles=(
                 plan.detail_reference_roles[index - 1]
                 if index <= len(plan.detail_reference_roles)
+                else ()
+            ),
+            preferred_indexes=(
+                plan.detail_reference_indexes[index - 1]
+                if index <= len(plan.detail_reference_indexes)
                 else ()
             ),
         )
@@ -4750,10 +4634,20 @@ Candidate 1:
         main_reference_url: str,
         *,
         preferred_roles: list[str] | tuple[str, ...] = (),
+        preferred_indexes: list[int] | tuple[int, ...] = (),
     ) -> list[str]:
         product = facts.product_image_urls
         sku = facts.sku_image_urls
         description = facts.description_image_urls
+        if preferred_indexes:
+            indexed = [
+                url
+                for url, observation in self._source_image_observations.items()
+                if observation.get("index") in preferred_indexes
+                and observation.get("safe_for_generation_reference") is True
+            ]
+            if indexed:
+                return indexed[:3]
         visual_variant_values = {
             str(attribute.value or "").strip().casefold()
             for item in facts.skus
@@ -5376,91 +5270,6 @@ Candidate 1:
             "evidence_mode": "local-final-inspection",
         }
 
-    def _legacy_repair_visual_set_once(
-        self,
-        *,
-        facts: ProductFacts,
-        creative_plan: CreativePlan,
-        state: RunState,
-        review: dict[str, Any],
-        work_dir: Path,
-        downloads_dir: Path,
-    ) -> dict[str, Any]:
-        """Deprecated fixed repair selector; production uses the top-level loop."""
-
-        if not review or review.get("set_usable") is True:
-            return review
-        if self.deadline - time.monotonic() <= 6 * 60:
-            self.trace.emit(
-                "image.set_repair_skipped",
-                reason="insufficient-stage-budget",
-                remaining_seconds=round(self.deadline - time.monotonic(), 1),
-            )
-            return review
-        targets = review.get("repair_targets")
-        if not isinstance(targets, list):
-            return review
-        target_index = next(
-            (
-                item
-                for item in targets
-                if isinstance(item, int)
-                and 1 <= item <= 5
-                and not (item == 5 and facts.size_chart_rows)
-            ),
-            None,
-        )
-        if target_index is None:
-            return review
-        rows = review.get("assets") if isinstance(review.get("assets"), list) else []
-        row = next(
-            (
-                item
-                for item in rows
-                if isinstance(item, dict) and item.get("index") == target_index
-            ),
-            {},
-        )
-        instruction = "; ".join(
-            item
-            for item in (
-                str(row.get("reason") or "").strip(),
-                str(review.get("summary") or "").strip(),
-                "Restore the canonical slot role and remove semantic duplication or split panels; use framing and product coverage appropriate to that role.",
-            )
-            if item
-        )[:1400]
-        target = f"detail_image_{target_index}.jpeg"
-        result = self._repair_detail_image(
-            target,
-            instruction,
-            facts,
-            creative_plan,
-            state.assets,
-            work_dir,
-            downloads_dir,
-        )
-        state.agent_actions.append(
-            AgentActionResult(
-                round_index=-1,
-                tool="regenerate_detail_image",
-                target=target,
-                status=result.status,
-                detail=result.detail,
-            )
-        )
-        self.trace.emit(
-            "image.set_repair_result",
-            target=target,
-            instruction=instruction,
-            status=result.status,
-            detail=result.detail,
-        )
-        if result.status != "completed":
-            return review
-        refreshed = self._review_visual_set(facts, state.assets)
-        return refreshed or review
-
     def _write_strategy_document(
         self,
         state: RunState,
@@ -5552,6 +5361,12 @@ Candidate 1:
             f"从源详情图核验并结构化 {len(facts.size_chart_rows)} 行服装尺码数据。",
             f"内部 Claim Ledger 共 {len(state.claim_ledger)} 条；每条记录来源类型、原始字段和证据指针，"
             "买家文案只开放 allowed_surfaces 包含 buyer_copy 的声明。",
+            f"Canonical Product State 版本：{state.canonical_product_state.get('version', '未生成')}。",
+            f"Evidence Sufficiency 版本：{state.evidence_sufficiency.get('version', '未生成')}；"
+            f"可用于生成的明确源图索引为 {state.evidence_sufficiency.get('generation_reference_indexes', [])}。",
+            f"Expected Delivery Spec 版本：{state.expected_delivery_spec.get('version', '未生成')}；"
+            f"冻结保留 {len(state.expected_delivery_spec.get('required_mapping_sources', []))} 条平台映射来源覆盖。",
+            f"当前依赖状态：{json.dumps(state.dependency_state, ensure_ascii=False)}。",
             "",
             "### Claim Ledger（可发布声明与证据）",
             "",

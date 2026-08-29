@@ -58,6 +58,20 @@ def filter_invalid_mapping_provenance(
     for sku in facts.skus:
         for item in sku.attributes:
             exact_sources.append((item.name, item.value, item.evidence_pointer))
+    canonical_claims = facts.reconciled_fact_ledger.get("canonical_visual_claims", [])
+    for index, item in enumerate(canonical_claims if isinstance(canonical_claims, list) else []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("concept") or "visible_design_feature")
+        value = str(item.get("value") or "")
+        if value:
+            exact_sources.append(
+                (
+                    name,
+                    value,
+                    f"reconciled_fact_ledger.canonical_visual_claims[{index}]",
+                )
+            )
 
     source_by_pointer = {
         pointer: (name, value)

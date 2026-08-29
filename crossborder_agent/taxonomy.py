@@ -440,6 +440,17 @@ def apply_model_attribute_mappings(
     for sku in facts.skus:
         for item in sku.attributes:
             source_rows.setdefault(("sku", item.name, item.value), item.evidence_pointer)
+    canonical_claims = facts.reconciled_fact_ledger.get("canonical_visual_claims", [])
+    for index, item in enumerate(canonical_claims if isinstance(canonical_claims, list) else []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("concept") or "visible_design_feature")
+        value = str(item.get("value") or "")
+        if value:
+            source_rows.setdefault(
+                ("canonical", name, value),
+                f"reconciled_fact_ledger.canonical_visual_claims[{index}]",
+            )
 
     if not isinstance(decisions, list):
         return taxonomy

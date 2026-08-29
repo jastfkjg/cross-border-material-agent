@@ -140,7 +140,7 @@ class TaxonomyExplorer:
             "scope": {"type": "string", "enum": ["product", "sales"]},
             "platform_attr_id": {"type": "string"},
             "platform_value_id": {"type": "string"},
-            "source_kind": {"type": "string", "enum": ["product", "sku"]},
+            "source_kind": {"type": "string", "enum": ["product", "sku", "canonical"]},
             "source_name": {"type": "string"},
             "source_value": {"type": "string"},
         }
@@ -909,6 +909,16 @@ class TaxonomyReActAgent:
             # decides whether a reconciled conflict changes category/schema or
             # only affects a particular publication surface.
             "reconciled_fact_ledger": facts.reconciled_fact_ledger,
+            "canonical_sources": [
+                {
+                    "name": str(item.get("concept") or "visible_design_feature"),
+                    "value": str(item.get("value") or ""),
+                }
+                for item in facts.reconciled_fact_ledger.get(
+                    "canonical_visual_claims", []
+                )
+                if isinstance(item, dict) and str(item.get("value") or "").strip()
+            ],
         }
         if decision_context:
             evidence["orchestrator_reconsideration_context"] = decision_context[:3000]
@@ -963,7 +973,8 @@ class TaxonomyReActAgent:
                 "filters using source names and values. Before finish_attributes, every submitted schema, attribute, "
                 "and enum value ID must have appeared in query/read output. Each mapping contains scope, "
                 "platform_attr_id, platform_value_id, source_kind, and source_name/source_value copied exactly from "
-                "PRODUCT EVIDENCE. Omit uncertain mappings; an empty mapping list is valid."
+                "PRODUCT EVIDENCE. Reconciled canonical_sources may use source_kind=canonical; never relabel a raw "
+                "contradictory seller field as canonical. Omit uncertain mappings; an empty mapping list is valid."
             )
         return (
             shared

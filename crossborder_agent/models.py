@@ -183,6 +183,10 @@ class CreativePlan:
     detail_candidate_counts: list[int] = field(default_factory=list)
     main_reference_roles: list[str] = field(default_factory=list)
     detail_reference_roles: list[list[str]] = field(default_factory=list)
+    # Exact inspected source-image evidence chosen by the model. Role labels are
+    # useful hints; these indexes make the production dependency auditable.
+    main_reference_indexes: list[int] = field(default_factory=list)
+    detail_reference_indexes: list[list[int]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -274,6 +278,10 @@ class RunState:
     # particular semantic repair.
     defect_ledger: list[dict[str, Any]] = field(default_factory=list)
     accepted_artifact_fingerprint: str = ""
+    canonical_product_state: dict[str, Any] = field(default_factory=dict)
+    evidence_sufficiency: dict[str, Any] = field(default_factory=dict)
+    expected_delivery_spec: dict[str, Any] = field(default_factory=dict)
+    dependency_state: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

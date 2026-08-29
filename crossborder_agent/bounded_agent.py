@@ -121,6 +121,15 @@ class BoundedDeliveryAgent:
             "execution_order": ["hero", "details", "copy", "video"],
             "video_strategy": "stable product-led short presentation",
         }
+        source_images = vision.get("source_images", []) if isinstance(vision, dict) else []
+        available_reference_indexes = {
+            int(item["index"])
+            for item in source_images
+            if isinstance(item, dict)
+            and isinstance(item.get("index"), int)
+            and item.get("inspection_complete") is True
+            and item.get("safe_for_generation_reference") is True
+        }
         if self.client is None or not use_model:
             return default
         self.orchestrator_system_prompt = (
@@ -151,6 +160,11 @@ class BoundedDeliveryAgent:
             section = str(arguments.get("section") or "")
             if section == "product":
                 return {"section": section, "facts": facts.compact_dict()}
+            if section == "canonical":
+                return {
+                    "section": section,
+                    "canonical_decisions": facts.reconciled_fact_ledger,
+                }
             if section == "taxonomy":
                 return {
                     "section": section,
@@ -174,6 +188,9 @@ class BoundedDeliveryAgent:
                 return {
                     "section": section,
                     "evidence": self._compact_visual_evidence(vision),
+                    "indexed_source_images": [
+                        item for item in source_images if isinstance(item, dict)
+                    ],
                 }
             if section == "capabilities":
                 return {
@@ -183,7 +200,7 @@ class BoundedDeliveryAgent:
                 }
             return {
                 "ok": False,
-                "error": "section must be product, taxonomy, visual, or capabilities",
+                "error": "section must be product, canonical, taxonomy, visual, or capabilities",
             }
 
         def submit(arguments: dict[str, Any]) -> AgentToolOutcome:
@@ -226,7 +243,11 @@ class BoundedDeliveryAgent:
                 errors.append("creative_plan must be an object")
                 validated_plan = None
             else:
-                validated_plan, validation_error = validate_creative_plan_payload(creative)
+                validated_plan, validation_error = validate_creative_plan_payload(
+                    creative,
+                    available_reference_indexes=available_reference_indexes,
+                    require_reference_indexes=bool(available_reference_indexes),
+                )
                 if validated_plan is None:
                     errors.append(validation_error)
             if errors:
@@ -256,7 +277,7 @@ class BoundedDeliveryAgent:
             "properties": {
                 "section": {
                     "type": "string",
-                    "enum": ["product", "taxonomy", "visual", "capabilities"],
+                    "enum": ["product", "canonical", "taxonomy", "visual", "capabilities"],
                 }
             },
             "required": ["section"],
@@ -264,12 +285,14 @@ class BoundedDeliveryAgent:
         }
         string_schema = {"type": "string"}
         string_array_schema = {"type": "array", "items": string_schema}
+        index_array_schema = {"type": "array", "items": {"type": "integer"}}
         image_job_schema = {
             "type": "object",
             "properties": {
                 "prompt": string_schema,
                 "candidate_count": {"type": "integer"},
                 "reference_roles": string_array_schema,
+                "reference_indexes": index_array_schema,
             },
             "required": ["prompt", "candidate_count", "reference_roles"],
         }
@@ -327,13 +350,13 @@ class BoundedDeliveryAgent:
         agent_tools = [
             AgentLoopTool(
                 "inspect_evidence",
-                "Read one chosen evidence section.",
+                "Read evidence.",
                 inspect_schema,
                 inspect_evidence,
             ),
             AgentLoopTool(
                 "submit_delivery_plan",
-                "Submit the complete grounded plan and finish.",
+                "Submit the grounded plan.",
                 submit_schema,
                 submit,
                 terminal=True,
@@ -343,6 +366,8 @@ class BoundedDeliveryAgent:
             "Plan this delivery. Inspect whatever evidence you need, then submit one complete plan. "
             "The output contract requires one square hero, exactly five vertical detail images, one short video, "
             "and localized en-US, ko-KR, and pt-BR copy. Detail jobs and their order are yours to choose. "
+            "Inspect the indexed source images and bind every visual job to the exact safe evidence indexes it needs. "
+            "When evidence is insufficient for a proposed view, choose a different grounded job. "
             "Also choose the production launch order after placing the reference hero first."
         )
         try:
@@ -819,6 +844,7 @@ question to investigate, never as evidence by itself):
         work_dir: Path,
         tools: BoundedToolRegistry,
         artifact_fingerprint: str = "",
+        expected_delivery_spec: dict[str, Any] | None = None,
     ) -> AgentEvaluation | None:
         """Run independent evidence finders, then adjudicate their disagreements.
 
@@ -879,11 +905,18 @@ Verified fact ledger:
 Resolved platform result:
 {json.dumps({"category_id": taxonomy.category.category_id, "category": taxonomy.category.name, "path": taxonomy.category.path, "attributes": [{"id": item.attr_id, "name": item.name, "value_id": item.value_id, "value": item.platform_value} for item in taxonomy.attributes], "missing_required": taxonomy.missing_required}, ensure_ascii=False)}
 
+Frozen expected delivery specification (independent of current artifacts):
+{json.dumps(expected_delivery_spec or {}, ensure_ascii=False)}
+
+Treat a missing frozen mapping source, publishable claim, required locale, required file, or visual evidence
+dependency as a defect even when the current artifacts agree with one another. The current output cannot redefine
+its own acceptance target.
+
 Manager plan:
 {json.dumps(agent_plan, ensure_ascii=False)}
 
 Creative plan actually used:
-{json.dumps({"theme": creative_plan.visual_theme, "main": creative_plan.main_prompt, "details": creative_plan.detail_prompts, "video": creative_plan.video_prompt}, ensure_ascii=False)}
+{json.dumps({"theme": creative_plan.visual_theme, "main": creative_plan.main_prompt, "main_reference_indexes": creative_plan.main_reference_indexes, "details": [{"role": creative_plan.detail_roles[index] if index < len(creative_plan.detail_roles) else f"detail_{index + 1}", "prompt": prompt, "reference_indexes": creative_plan.detail_reference_indexes[index] if index < len(creative_plan.detail_reference_indexes) else []} for index, prompt in enumerate(creative_plan.detail_prompts)], "video": creative_plan.video_prompt}, ensure_ascii=False)}
 
 Localized copy payloads:
 {json.dumps(localization_payloads, ensure_ascii=False)}
