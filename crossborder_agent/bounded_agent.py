@@ -84,7 +84,7 @@ _RUBRIC_DEFINITIONS = {
 
 
 class BoundedDeliveryAgent:
-    """Let the model decide what needs work while code enforces hard boundaries."""
+    """Host isolated evaluator, adjudicator, planner, and verifier role calls."""
 
     def __init__(
         self,
@@ -141,8 +141,8 @@ class BoundedDeliveryAgent:
 Create an execution policy for one AliExpress-ready delivery under a 30-minute total limit.
 The initial production skeleton is fixed for reliability, but your plan controls creative emphasis,
 localization priorities and evaluation threshold. The executor independently
-performs up to three whole-delivery evaluations and uses the intervals between
-them for bounded repairs when the remaining time allows.
+evaluates each distinct artifact fingerprint once and performs bounded repairs
+only after adjudicated findings when the remaining time allows.
 
 Return exactly these keys:
 - creative_direction: concise English direction that can be passed to creative models
@@ -540,7 +540,13 @@ Compact source-image evidence:
         visual_set_review: dict[str, Any],
         work_dir: Path,
         tools: BoundedToolRegistry,
+        artifact_fingerprint: str = "",
     ) -> AgentEvaluation | None:
+        """Run independent evidence finders, then adjudicate their disagreements.
+
+        Evaluators never choose tools and their scalar scores are ignored.  Code
+        derives scores from accepted findings after a separate adjudication role.
+        """
         if self.client is None:
             return None
         manifest, image_urls, video_urls = self._artifact_evidence(
@@ -548,10 +554,9 @@ Compact source-image evidence:
         )
         copy_artifacts = self._copy_artifact_evidence(work_dir)
         system = (
-            "You are an independent multimodal acceptance evaluator, not the producer. Return JSON only. "
-            "Judge the complete delivery against A1-A7 and select only high-value repairs. Do not replace a "
-            "weak generated asset with a source fallback: ask the matching tool to revise or regenerate it. "
-            "Do not reward strategy claims that are not evidenced by the artifact manifest or supplied media.\n\n"
+            "You are an independent multimodal defect finder, not a scorer, producer, repair planner, "
+            "or final decision maker. Return JSON only. Report only defects supported by concrete supplied "
+            "artifact evidence. Never choose tools and never decide whether your own finding was repaired.\n\n"
             + self.skills.compile(
                 "final-review",
                 "delivery-quality",
@@ -570,30 +575,21 @@ physical/hash/rendered-text evidence in the manifest. If that evidence cannot es
 defect, do not invent one and do not request a repair for it.
 
 Return exactly these keys:
-- ready_for_delivery: boolean
-- weighted_score: number from 0 to 100
-- dimension_scores: object with numeric A1,A2,A3,A4,A5,A6,A7 scores from 0 to 100
-- summary: concise diagnosis
-- issues: array of objects with dimension, severity (blocker/major/minor), target, evidence, expected
-- repair_actions: ordered array of all evidence-backed repair targets worth attempting, with:
-  tool, target, instruction, reason, dimension, priority (1 highest to 4 lowest)
+- summary: concise evidence-grounded diagnosis
+- findings: array of objects with dimension, criterion, severity (blocker/major/minor),
+  target, evidence, and expected
 
-Only choose tool/target combinations from the catalog. Each instruction must be an actionable,
-artifact-specific correction prompt grounded in the evidence. Prefer revising the weakest high-weight
-dimension. Do not request cosmetic changes that risk factual identity. Set ready_for_delivery true only
-when the weighted score is at least {max(_INTERNAL_MINIMUM_WEIGHTED_SCORE, float(agent_plan.get('minimum_weighted_score', _INTERNAL_MINIMUM_WEIGHTED_SCORE)))}, there are no blocker
-issues, and A1/A2/A5 have no major issue.
-Return a repair action for every reparable issue that has an allowed tool/target; there is no arbitrary
-per-round target-count cap. Do not omit a supported target merely because three other targets were listed.
+Do not return scores, readiness, repair actions, tools, or speculative improvements. An empty findings
+array means that you found no evidence-backed defect.
 Treat a deterministic or validation-error copy source as a quality degradation: inspect its rendered
-shopper preview and request revise_localized_copy when it is generic, process-oriented or misses a
+shopper preview and report the exact localized-copy target when it is generic, process-oriented or misses a
 distinctive source-title design detail. Do not reward raw evidence volume. Buyer-facing prose and media
 descriptions must use the requested locale and must not contain stray Chinese fragments. Do not treat
 an exact source URL, identifier, model code or necessary source label inside the clearly separated
 machine appendix as buyer-copy contamination. JSON pointers, canonical/evidence labels and duplicated
 audit tables remain defects.
 Treat the six-image set review below as independent evidence about semantic duplication and missing
-commercial roles. A set-level repair target is higher priority than a cosmetic per-image preference.
+commercial roles. A set-level defect is more important than a cosmetic per-image preference.
 It may predate repairs in later rounds, so corroborate it against the current manifest and media.
 
 Complete rubric definitions and weights (use these exact dimension meanings):
@@ -629,8 +625,8 @@ Artifact manifest and local physical inspection:
 Visual input map:
 {json.dumps([{"input_index": index, "url": url} for index, url in enumerate(image_urls)], ensure_ascii=False)}
 
-Available repair tools:
-{json.dumps(tools.catalog(), ensure_ascii=False)}
+Allowed artifact target names (use these exact names when applicable):
+{json.dumps(sorted({target for item in tools.catalog() for target in item.get('allowed_targets', [])}), ensure_ascii=False)}
 """.strip()
         minimum_score = max(
             _INTERNAL_MINIMUM_WEIGHTED_SCORE,
@@ -653,11 +649,9 @@ Available repair tools:
                 )
                 return (
                     model,
-                    self._parse_evaluation(
+                    self._parse_evaluator_report(
                         payload,
                         round_index=round_index,
-                        tools=tools,
-                        minimum_weighted_score=minimum_score,
                         evaluator_model=model,
                     ),
                     "",
@@ -685,106 +679,211 @@ Available repair tools:
                 len(evaluations),
             )
             return None
-        return self._aggregate_evaluations(
+        return self._adjudicate_evaluations(
             evaluations,
             round_index=round_index,
             minimum_weighted_score=minimum_score,
+            artifact_fingerprint=artifact_fingerprint,
+            adjudication_context={
+                "verified_facts": facts.compact_dict(),
+                "taxonomy": {
+                    "category_id": taxonomy.category.category_id,
+                    "category": taxonomy.category.name,
+                    "attributes": [
+                        {
+                            "id": item.attr_id,
+                            "value_id": item.value_id,
+                            "value": item.platform_value,
+                        }
+                        for item in taxonomy.attributes
+                    ],
+                },
+                "localized_copy": copy_artifacts,
+                "artifact_manifest": manifest,
+                "visual_set_review": visual_set_review,
+            },
+            image_urls=image_urls,
+            video_urls=video_urls,
         )
 
-    def verify_repair_action(
+    def plan_repairs(
         self,
-        action: AgentAction,
+        evaluation: AgentEvaluation,
+        *,
+        tools: BoundedToolRegistry,
+        previous_attempts: list[dict[str, Any]] | None = None,
+    ) -> list[AgentAction]:
+        """Translate adjudicated defects into bounded tool calls."""
+
+        findings = [item for item in evaluation.issues if isinstance(item, dict)]
+        if not findings:
+            return []
+        catalog = tools.catalog()
+        payload: dict[str, Any] = {}
+        if self.client is not None:
+            system = (
+                "You are a repair planner. You did not evaluate the delivery and you do not execute or "
+                "verify repairs. Return JSON only. Choose the smallest safe action for adjudicated defects."
+            )
+            prompt = f"""
+Return exactly one key, repair_actions, containing an ordered array. Every action must contain
+defect_id, tool, target, instruction, acceptance_criteria, reason, dimension, and priority (1-4).
+Use only the supplied defect IDs and exact tool/target pairs. Do not retry an action whose previous
+observation says it cannot change the artifact unless you materially change its instruction.
+
+Adjudicated findings:
+{json.dumps(findings, ensure_ascii=False)}
+
+Available tools:
+{json.dumps(catalog, ensure_ascii=False)}
+
+Previous observations:
+{json.dumps(previous_attempts or [], ensure_ascii=False)}
+""".strip()
+            try:
+                planner_model = str(
+                    getattr(self.client.config, "chat_model", "")
+                    or self.client.config.review_model
+                )
+                planner_fallback = str(
+                    getattr(self.client.config, "chat_fallback_model", "")
+                    or self.client.config.review_fallback_model
+                )
+                payload = self.client.chat_json(
+                    system,
+                    prompt,
+                    model=planner_model,
+                    fallback_model=planner_fallback,
+                )
+            except (ApiError, ValueError, TypeError) as exc:
+                self.logger.warning("返修规划器不可用，使用确定性目标映射: %s", exc)
+
+        by_defect = {str(item.get("defect_id") or ""): item for item in findings}
+        actions: list[AgentAction] = []
+        seen: set[tuple[str, str, str]] = set()
+        rows = payload.get("repair_actions") if isinstance(payload, dict) else None
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                defect_id = str(row.get("defect_id") or "").strip()
+                tool = str(row.get("tool") or "").strip()
+                target = str(row.get("target") or "").strip()
+                instruction = str(row.get("instruction") or "").strip()
+                finding = by_defect.get(defect_id)
+                key = (defect_id, tool, target)
+                if (
+                    finding is None
+                    or not instruction
+                    or not tools.accepts(tool, target)
+                    or key in seen
+                ):
+                    continue
+                seen.add(key)
+                priority = row.get("priority")
+                actions.append(
+                    AgentAction(
+                        defect_id=defect_id,
+                        tool=tool,
+                        target=target,
+                        instruction=instruction[:4000],
+                        acceptance_criteria=str(row.get("acceptance_criteria") or finding.get("expected") or "")[:2000],
+                        reason=str(row.get("reason") or finding.get("evidence") or "")[:1000],
+                        dimension=str(finding.get("dimension") or "")[:8],
+                        priority=priority if isinstance(priority, int) else 4,
+                        supporting_models=list(finding.get("models") or []),
+                        votes=int(finding.get("votes") or 0),
+                        execution_tier="planned",
+                    )
+                )
+        if not actions:
+            actions = self._fallback_repair_plan(findings, tools)
+        actions.sort(key=lambda item: (item.priority, -_RUBRIC_WEIGHTS.get(item.dimension, 0), item.target))
+        return actions
+
+    @staticmethod
+    def _fallback_repair_plan(
+        findings: list[dict[str, Any]], tools: BoundedToolRegistry
+    ) -> list[AgentAction]:
+        target_tools = {
+            "main_image.jpeg": "regenerate_main_image",
+            "product_video.mp4": "regenerate_video",
+        }
+        actions: list[AgentAction] = []
+        for finding in findings:
+            target = str(finding.get("target") or "")
+            if target.startswith("detail_image_") and target.endswith(".jpeg"):
+                tool = "regenerate_detail_image"
+            elif target.startswith("product_description_") and target.endswith(".md"):
+                tool = "revise_localized_copy"
+            else:
+                tool = target_tools.get(target, "")
+            if not tool or not tools.accepts(tool, target):
+                continue
+            severity = str(finding.get("severity") or "minor")
+            actions.append(
+                AgentAction(
+                    defect_id=str(finding.get("defect_id") or ""),
+                    tool=tool,
+                    target=target,
+                    instruction=(
+                        f"Correct this adjudicated defect: {finding.get('evidence', '')}. "
+                        f"Required result: {finding.get('expected', '')}. Preserve unrelated verified facts."
+                    )[:4000],
+                    acceptance_criteria=str(finding.get("expected") or "")[:2000],
+                    reason=str(finding.get("evidence") or "")[:1000],
+                    dimension=str(finding.get("dimension") or "")[:8],
+                    priority={"blocker": 1, "major": 2, "minor": 3}.get(severity, 4),
+                    supporting_models=list(finding.get("models") or []),
+                    votes=int(finding.get("votes") or 0),
+                    execution_tier="planned-fallback",
+                )
+            )
+        return actions
+
+    def verify_repair_outcome(
+        self,
+        actions: list[AgentAction],
         *,
         facts: ProductFacts,
         taxonomy: TaxonomyResult,
         assets: list[AssetResult],
         visual_set_review: dict[str, Any],
         work_dir: Path,
-        evaluator_models: list[str],
+        before_hashes: dict[str, str],
+        after_hashes: dict[str, str],
     ) -> dict[str, Any]:
-        """Ask a non-supporting evaluator to verify one single-vote critical action."""
+        """Verify only targeted defects and critical regressions; never rescore."""
 
+        changed = [
+            action for action in actions
+            if before_hashes.get(action.target) != after_hashes.get(action.target)
+        ]
+        if not changed:
+            return {"accepted": False, "status": "no_change", "fixed_defect_ids": []}
         if self.client is None:
-            return {"supported": False, "status": "no-model-client"}
-        verifier = next(
-            (
-                model
-                for model in evaluator_models
-                if model not in set(action.supporting_models)
-            ),
-            "",
-        )
-        if not verifier:
-            return {
-                "supported": False,
-                "status": "no-independent-verifier",
-            }
-
-        manifest, image_urls, video_urls = self._artifact_evidence(
-            facts, assets, work_dir
-        )
-        target_manifest = next(
-            (item for item in manifest if item.get("name") == action.target), {}
-        )
-        copy_evidence = next(
-            (
-                item
-                for item in self._copy_artifact_evidence(work_dir)
-                if action.target == f"product_description_{item.get('language')}.md"
-            ),
-            {},
-        )
-        target_url = str(target_manifest.get("delivery_visual_url") or "")
-        source_references = list(
-            dict.fromkeys(
-                facts.product_image_urls[:2]
-                + facts.sku_image_urls[:1]
-                + facts.description_image_urls[:1]
-            )
-        )
-        verification_images: list[str] = []
-        verification_videos: list[str] = []
-        if action.target.endswith(".jpeg"):
-            verification_images = list(
-                dict.fromkeys(source_references[:3] + ([target_url] if target_url else []))
-            )
-        elif action.target.endswith(".md") and action.dimension == "A5":
-            verification_images = source_references[:3]
-        elif action.target.endswith(".mp4"):
-            verification_images = source_references[:2]
-            verification_videos = [target_url] if target_url else video_urls[:1]
-
-        definition = _RUBRIC_DEFINITIONS.get(action.dimension, {})
+            return {"accepted": True, "status": "local-verification-only", "fixed_defect_ids": [item.defect_id for item in changed]}
+        manifest, image_urls, video_urls = self._artifact_evidence(facts, assets, work_dir)
         system = (
-            "You are an independent lightweight repair-action verifier. Return JSON only. "
-            "You did not propose this action. Confirm it only when the supplied artifact evidence "
-            "supports the alleged critical defect and the proposed scope is narrow enough to avoid regressions."
+            "You are an independent repair outcome verifier. You did not find the defects, plan the repair, "
+            "or execute it. Return JSON only. Check only whether the named defects are now fixed and whether "
+            "the changed artifacts introduced a blocker or major A1/A2/A5 regression. Never assign scores."
         )
         prompt = f"""
-Verify this single-evaluator repair request. Do not rescore the delivery and do not suggest other work.
+Return exactly: accepted (boolean), fixed_defect_ids (array), regressions (array of objects with
+dimension, severity, target, evidence), and evidence (concise string).
 
-Return exactly:
-- supported: boolean
-- safe_to_attempt: boolean
-- evidence: concise artifact-specific evidence, or why evidence is insufficient
-- corrected_scope: concise bounded correction instruction; empty when unsupported
-- status: verified or rejected
+Repair intents and acceptance criteria:
+{json.dumps([{"defect_id": item.defect_id, "target": item.target, "dimension": item.dimension, "instruction": item.instruction, "acceptance_criteria": item.acceptance_criteria} for item in changed], ensure_ascii=False)}
 
-Rules:
-- supported requires concrete evidence in the supplied target artifact, verified fact ledger, physical inspection,
-  or directly supplied source/delivery media. The first evaluator's assertion alone is not evidence.
-- safe_to_attempt requires changing only the named target and preserving all unaffected facts and structures.
-- Reject speculative, cosmetic, duplicate, or already-resolved requests.
-- Use this rubric dimension exactly: {json.dumps(definition, ensure_ascii=False)}
+Before/after content hashes:
+{json.dumps({item.target: {"before": before_hashes.get(item.target), "after": after_hashes.get(item.target)} for item in changed}, ensure_ascii=False)}
 
-Proposed action:
-{json.dumps({"tool": action.tool, "target": action.target, "instruction": action.instruction, "reason": action.reason, "dimension": action.dimension, "supporting_models": action.supporting_models}, ensure_ascii=False)}
+Current artifact manifest:
+{json.dumps(manifest, ensure_ascii=False)}
 
-Target manifest:
-{json.dumps(target_manifest, ensure_ascii=False)}
-
-Rendered copy evidence when applicable:
-{json.dumps(copy_evidence, ensure_ascii=False)}
+Current rendered copy evidence:
+{json.dumps(self._copy_artifact_evidence(work_dir), ensure_ascii=False)}
 
 Verified facts and reconciled ledger:
 {json.dumps(facts.compact_dict(), ensure_ascii=False)}
@@ -796,30 +895,46 @@ Current six-image set review:
 {json.dumps(visual_set_review, ensure_ascii=False)}
 """.strip()
         try:
+            planner_model = str(
+                getattr(self.client.config, "chat_model", "")
+                or self.client.config.review_model
+            )
+            verifier_model = str(
+                self.client.config.review_fallback_model
+                if self.client.config.review_fallback_model != planner_model
+                else self.client.config.review_model
+            )
             payload = self.client.chat_json(
                 system,
                 prompt,
-                images=verification_images,
-                videos=verification_videos,
-                model=verifier,
-                fallback_model=verifier,
+                images=image_urls,
+                videos=video_urls,
+                model=verifier_model,
+                fallback_model=verifier_model,
             )
         except (ApiError, ValueError, TypeError) as exc:
             return {
-                "supported": False,
+                "accepted": False,
                 "status": "verifier-unavailable",
-                "verifier_model": verifier,
                 "evidence": str(exc)[:1000],
             }
-        supported = payload.get("supported") is True
-        safe_to_attempt = payload.get("safe_to_attempt") is True
+        regressions = payload.get("regressions")
+        clean_regressions = [item for item in regressions if isinstance(item, dict)] if isinstance(regressions, list) else []
+        critical_regression = any(
+            str(item.get("severity") or "") in {"blocker", "major"}
+            and str(item.get("dimension") or "") in {"A1", "A2", "A5"}
+            for item in clean_regressions
+        )
+        fixed = payload.get("fixed_defect_ids")
+        fixed_ids = {str(item) for item in fixed} if isinstance(fixed, list) else set()
+        expected_ids = {item.defect_id for item in changed}
+        accepted = payload.get("accepted") is True and expected_ids.issubset(fixed_ids) and not critical_regression
         return {
-            "supported": bool(supported and safe_to_attempt),
-            "safe_to_attempt": safe_to_attempt,
-            "status": "verified" if supported and safe_to_attempt else "rejected",
-            "verifier_model": verifier,
+            "accepted": accepted,
+            "status": "verified" if accepted else "postcondition-failed",
+            "fixed_defect_ids": sorted(fixed_ids),
+            "regressions": clean_regressions,
             "evidence": str(payload.get("evidence") or "")[:2000],
-            "corrected_scope": str(payload.get("corrected_scope") or "")[:3000],
         }
 
     @staticmethod
@@ -962,231 +1077,208 @@ Current six-image set review:
         return manifest, image_urls, video_urls
 
     @staticmethod
-    def _parse_evaluation(
+    def _canonical_finding(item: dict[str, Any], evaluator_model: str) -> dict[str, Any] | None:
+        dimension = str(item.get("dimension") or "").strip().upper()
+        severity = str(item.get("severity") or "minor").strip().lower()
+        target = Path(str(item.get("target") or "delivery").strip()).name or "delivery"
+        criterion = re.sub(
+            r"[^a-z0-9_-]+",
+            "-",
+            str(item.get("criterion") or "general").strip().casefold(),
+        ).strip("-") or "general"
+        evidence = str(item.get("evidence") or "").strip()
+        if dimension not in _RUBRIC_WEIGHTS or severity not in {"blocker", "major", "minor"} or not evidence:
+            return None
+        defect_id = f"{dimension}:{target}:{criterion}"
+        return {
+            "defect_id": defect_id,
+            "dimension": dimension,
+            "criterion": criterion,
+            "severity": severity,
+            "target": target[:300],
+            "evidence": evidence[:3000],
+            "expected": str(item.get("expected") or "").strip()[:2000],
+            "models": [evaluator_model] if evaluator_model else [],
+            "votes": 1 if evaluator_model else 0,
+        }
+
+    @staticmethod
+    def _scores_from_findings(findings: list[dict[str, Any]]) -> tuple[dict[str, float], float]:
+        penalties = {"blocker": 100.0, "major": 30.0, "minor": 8.0}
+        scores = {dimension: 100.0 for dimension in _RUBRIC_WEIGHTS}
+        for item in findings:
+            dimension = str(item.get("dimension") or "")
+            if dimension in scores:
+                scores[dimension] = max(
+                    0.0,
+                    scores[dimension] - penalties.get(str(item.get("severity") or "minor"), 8.0),
+                )
+        weighted = sum(scores[key] * weight / 100 for key, weight in _RUBRIC_WEIGHTS.items())
+        return scores, round(weighted, 3)
+
+    @classmethod
+    def _parse_evaluator_report(
+        cls,
         payload: dict[str, Any],
         *,
         round_index: int,
-        tools: BoundedToolRegistry,
-        minimum_weighted_score: float = _INTERNAL_MINIMUM_WEIGHTED_SCORE,
         evaluator_model: str = "",
     ) -> AgentEvaluation:
-        raw_scores = payload.get("dimension_scores")
-        scores: dict[str, float] = {}
-        if isinstance(raw_scores, dict):
-            for dimension in _RUBRIC_WEIGHTS:
-                value = raw_scores.get(dimension)
-                if isinstance(value, (int, float)):
-                    scores[dimension] = max(0.0, min(100.0, float(value)))
-        complete_dimension_scores = len(scores) == len(_RUBRIC_WEIGHTS)
-        if not complete_dimension_scores:
-            missing = [key for key in _RUBRIC_WEIGHTS if key not in scores]
-            raise ValueError(
-                "evaluation response is missing numeric rubric dimensions: "
-                + ", ".join(missing)
-            )
-        weighted = sum(
-            scores[key] * weight / 100 for key, weight in _RUBRIC_WEIGHTS.items()
-        )
-        issues = payload.get("issues")
-        clean_issues = [item for item in issues if isinstance(item, dict)] if isinstance(issues, list) else []
-        actions: list[AgentAction] = []
-        seen_targets: set[tuple[str, str]] = set()
-        raw_actions = payload.get("repair_actions")
-        if isinstance(raw_actions, list):
-            for item in raw_actions:
-                if not isinstance(item, dict):
-                    continue
-                tool = str(item.get("tool") or "").strip()
-                target = str(item.get("target") or "").strip()
-                instruction = str(item.get("instruction") or "").strip()
-                if not instruction or not tools.accepts(tool, target):
-                    continue
-                key = (tool, target)
-                if key in seen_targets:
-                    continue
-                seen_targets.add(key)
-                priority = item.get("priority")
-                actions.append(
-                    AgentAction(
-                        tool=tool,
-                        target=target,
-                        instruction=instruction[:4000],
-                        reason=str(item.get("reason") or "")[:1000],
-                        dimension=str(item.get("dimension") or "")[:8],
-                        priority=priority if isinstance(priority, int) else 4,
-                        supporting_models=[evaluator_model] if evaluator_model else [],
-                        votes=1 if evaluator_model else 0,
-                    )
-                )
-        actions.sort(key=lambda item: item.priority)
-        hard_issue = any(
-            str(item.get("severity") or "") == "blocker"
-            or (
-                str(item.get("severity") or "") == "major"
-                and str(item.get("dimension") or "") in {"A1", "A2", "A5"}
-            )
-            for item in clean_issues
-        )
-        ready = bool(
-            payload.get("ready_for_delivery") is True
-            and complete_dimension_scores
-            and float(weighted) >= minimum_weighted_score
-            and not hard_issue
-        )
+        raw_findings = payload.get("findings")
+        if raw_findings is None:
+            raw_findings = payload.get("issues")
+        if not isinstance(raw_findings, list):
+            raise ValueError("evaluator response is missing findings array")
+        findings = [
+            clean
+            for item in raw_findings
+            if isinstance(item, dict)
+            for clean in [cls._canonical_finding(item, evaluator_model)]
+            if clean is not None
+        ][:30]
+        scores, weighted = cls._scores_from_findings(findings)
         return AgentEvaluation(
             round_index=round_index,
-            ready_for_delivery=ready,
-            weighted_score=max(0.0, min(100.0, float(weighted))),
+            ready_for_delivery=False,
+            weighted_score=weighted,
             dimension_scores=scores,
             summary=str(payload.get("summary") or "")[:3000],
-            issues=clean_issues[:20],
-            repair_actions=actions,
+            issues=findings,
+            repair_actions=[],
             evaluator_models=[evaluator_model] if evaluator_model else [],
-            model_dimension_scores=(
-                {evaluator_model: dict(scores)} if evaluator_model else {}
-            ),
-            model_weighted_scores=(
-                {evaluator_model: max(0.0, min(100.0, float(weighted)))}
-                if evaluator_model
-                else {}
-            ),
+            model_dimension_scores={evaluator_model: dict(scores)} if evaluator_model else {},
+            model_weighted_scores={evaluator_model: weighted} if evaluator_model else {},
         )
 
-    @staticmethod
-    def _aggregate_evaluations(
+    def _adjudicate_evaluations(
+        self,
         evaluations: dict[str, AgentEvaluation],
         *,
         round_index: int,
         minimum_weighted_score: float,
+        artifact_fingerprint: str = "",
+        adjudication_context: dict[str, Any] | None = None,
+        image_urls: list[str] | None = None,
+        video_urls: list[str] | None = None,
     ) -> AgentEvaluation:
         models = sorted(evaluations)
-        scores = {
-            dimension: round(
-                sum(item.dimension_scores[dimension] for item in evaluations.values())
-                / len(evaluations),
-                3,
-            )
-            for dimension in _RUBRIC_WEIGHTS
-        }
-        weighted = sum(
-            scores[dimension] * weight / 100
-            for dimension, weight in _RUBRIC_WEIGHTS.items()
-        )
-
-        issue_groups: dict[tuple[str, str, str], dict[str, Any]] = {}
-        for model, evaluation in evaluations.items():
-            for issue in evaluation.issues:
-                dimension = str(issue.get("dimension") or "")[:8]
-                severity = str(issue.get("severity") or "minor")
-                target = str(issue.get("target") or "delivery")[:300]
-                key = (dimension, target, severity)
-                row = issue_groups.setdefault(
-                    key,
+        grouped: dict[str, dict[str, Any]] = {}
+        severity_rank = {"minor": 0, "major": 1, "blocker": 2}
+        for model, report in evaluations.items():
+            for finding in report.issues:
+                defect_id = str(finding.get("defect_id") or "")
+                row = grouped.setdefault(
+                    defect_id,
                     {
-                        "dimension": dimension,
-                        "severity": severity,
-                        "target": target,
+                        **finding,
                         "evidence_parts": [],
                         "expected_parts": [],
                         "models": [],
                     },
                 )
-                evidence = str(issue.get("evidence") or "").strip()
-                expected = str(issue.get("expected") or "").strip()
-                if evidence:
-                    row["evidence_parts"].append(f"{model}: {evidence}")
+                if severity_rank.get(str(finding.get("severity")), 0) > severity_rank.get(str(row.get("severity")), 0):
+                    row["severity"] = finding.get("severity")
+                row["evidence_parts"].append(f"{model}: {finding.get('evidence', '')}")
+                expected = str(finding.get("expected") or "").strip()
                 if expected:
                     row["expected_parts"].append(f"{model}: {expected}")
                 row["models"].append(model)
-        issues = [
+
+        consensus_ids = {
+            defect_id for defect_id, row in grouped.items() if len(set(row["models"])) >= 2
+        }
+        disputed = [
             {
+                "defect_id": defect_id,
                 "dimension": row["dimension"],
+                "criterion": row["criterion"],
                 "severity": row["severity"],
                 "target": row["target"],
                 "evidence": " | ".join(dict.fromkeys(row["evidence_parts"]))[:3000],
                 "expected": " | ".join(dict.fromkeys(row["expected_parts"]))[:2000],
-                "models": list(dict.fromkeys(row["models"])),
-                "votes": len(set(row["models"])),
+                "models": sorted(set(row["models"])),
             }
-            for row in issue_groups.values()
+            for defect_id, row in grouped.items()
+            if defect_id not in consensus_ids
         ]
+        decisions: dict[str, dict[str, Any]] = {}
+        adjudicator_status = "not-needed"
+        if disputed and self.client is not None:
+            system = (
+                "You are an evidence adjudicator, not an evaluator, repair planner, or scorer. Return JSON only. "
+                "For each disputed finding decide whether the quoted artifact evidence supports that exact defect."
+            )
+            prompt = f"""
+Return exactly one key, decisions, containing one object per disputed defect with defect_id,
+supported (boolean), and reason. Do not introduce new defects, tools, actions, or scores.
 
-        action_groups: dict[tuple[str, str], dict[str, Any]] = {}
-        for model, evaluation in evaluations.items():
-            for action in evaluation.repair_actions:
-                key = (action.tool, action.target)
-                row = action_groups.setdefault(
-                    key,
-                    {
-                        "instructions": [],
-                        "reasons": [],
-                        "dimensions": [],
-                        "priorities": [],
-                        "models": [],
-                    },
+Rubric:
+{json.dumps(_RUBRIC_DEFINITIONS, ensure_ascii=False)}
+
+Disputed findings:
+{json.dumps(disputed, ensure_ascii=False)}
+
+Independent artifact evidence:
+{json.dumps(adjudication_context or {}, ensure_ascii=False)}
+""".strip()
+            try:
+                payload = self.client.chat_json(
+                    system,
+                    prompt,
+                    images=image_urls or [],
+                    videos=video_urls or [],
+                    model=self.client.config.review_model,
+                    fallback_model=self.client.config.review_fallback_model,
                 )
-                row["instructions"].append(f"[{model}] {action.instruction}")
-                if action.reason:
-                    row["reasons"].append(f"[{model}] {action.reason}")
-                if action.dimension:
-                    row["dimensions"].append(action.dimension)
-                row["priorities"].append(action.priority)
-                row["models"].append(model)
-        actions: list[AgentAction] = []
-        for (tool, target), row in action_groups.items():
-            dimension = max(
-                row["dimensions"],
-                key=lambda item: _RUBRIC_WEIGHTS.get(item, 0),
-                default="",
+                rows = payload.get("decisions")
+                if isinstance(rows, list):
+                    decisions = {
+                        str(item.get("defect_id") or ""): item
+                        for item in rows
+                        if isinstance(item, dict)
+                    }
+                adjudicator_status = "completed"
+            except (ApiError, ValueError, TypeError) as exc:
+                adjudicator_status = f"unavailable: {str(exc)[:300]}"
+
+        accepted_ids = set(consensus_ids)
+        for item in disputed:
+            defect_id = item["defect_id"]
+            decision = decisions.get(defect_id, {})
+            if decision.get("supported") is True:
+                accepted_ids.add(defect_id)
+            elif not decisions and (
+                item["severity"] == "blocker"
+                or (item["severity"] == "major" and item["dimension"] in {"A1", "A2", "A5"})
+            ):
+                # A missing adjudicator must not silently clear a potentially unsafe delivery.
+                accepted_ids.add(defect_id)
+
+        issues: list[dict[str, Any]] = []
+        for defect_id in sorted(accepted_ids):
+            row = grouped[defect_id]
+            issues.append(
+                {
+                    "defect_id": defect_id,
+                    "dimension": row["dimension"],
+                    "criterion": row["criterion"],
+                    "severity": row["severity"],
+                    "target": row["target"],
+                    "evidence": " | ".join(dict.fromkeys(row["evidence_parts"]))[:3000],
+                    "expected": " | ".join(dict.fromkeys(row["expected_parts"]))[:2000],
+                    "models": sorted(set(row["models"])),
+                    "votes": len(set(row["models"])),
+                    "adjudication": (
+                        "consensus" if defect_id in consensus_ids else str(decisions.get(defect_id, {}).get("reason") or "conservative-unresolved")[:1000]
+                    ),
+                }
             )
-            supporting_models = sorted(set(row["models"]))
-            votes = len(supporting_models)
-            execution_tier = (
-                "consensus"
-                if votes >= 2
-                else "critical_verification"
-                if dimension in {"A1", "A2", "A5"}
-                else "discretionary"
-            )
-            models_text = ", ".join(supporting_models)
-            actions.append(
-                AgentAction(
-                    tool=tool,
-                    target=target,
-                    instruction=(
-                        f"Combined evaluator feedback ({models_text}):\n- "
-                        + "\n- ".join(dict.fromkeys(row["instructions"]))
-                    )[:4000],
-                    reason=" | ".join(dict.fromkeys(row["reasons"]))[:1000],
-                    dimension=dimension,
-                    priority=min(row["priorities"] or [4]),
-                    supporting_models=supporting_models,
-                    votes=votes,
-                    execution_tier=execution_tier,
-                )
-            )
-        tier_order = {
-            "consensus": 0,
-            "critical_verification": 1,
-            "discretionary": 2,
-        }
-        actions.sort(
-            key=lambda item: (
-                tier_order.get(item.execution_tier, 3),
-                item.priority,
-                -_RUBRIC_WEIGHTS.get(item.dimension, 0),
-                item.target,
-            )
-        )
+        scores, weighted = self._scores_from_findings(issues)
         hard_issue = any(
-            str(item.get("severity") or "") == "blocker"
-            or (
-                str(item.get("severity") or "") == "major"
-                and str(item.get("dimension") or "") in {"A1", "A2", "A5"}
-            )
+            item["severity"] == "blocker"
+            or (item["severity"] == "major" and item["dimension"] in {"A1", "A2", "A5"})
             for item in issues
         )
-        ready = bool(weighted >= minimum_weighted_score and not hard_issue)
         summaries = [
             f"{model}: {evaluation.summary}"
             for model, evaluation in evaluations.items()
@@ -1194,19 +1286,22 @@ Current six-image set review:
         ]
         return AgentEvaluation(
             round_index=round_index,
-            ready_for_delivery=ready,
-            weighted_score=round(weighted, 3),
+            ready_for_delivery=bool(weighted >= minimum_weighted_score and not hard_issue),
+            weighted_score=weighted,
             dimension_scores=scores,
             summary="\n".join(summaries)[:6000],
             issues=issues,
-            repair_actions=actions,
+            repair_actions=[],
             evaluator_models=models,
-            model_dimension_scores={
-                model: dict(evaluation.dimension_scores)
-                for model, evaluation in evaluations.items()
-            },
-            model_weighted_scores={
-                model: round(evaluation.weighted_score, 3)
-                for model, evaluation in evaluations.items()
+            model_dimension_scores={model: dict(report.dimension_scores) for model, report in evaluations.items()},
+            model_weighted_scores={model: report.weighted_score for model, report in evaluations.items()},
+            artifact_fingerprint=artifact_fingerprint,
+            disagreement=bool(disputed),
+            adjudication={
+                "status": adjudicator_status,
+                "consensus_defect_ids": sorted(consensus_ids),
+                "disputed_defect_ids": sorted(item["defect_id"] for item in disputed),
+                "accepted_defect_ids": sorted(accepted_ids),
+                "decisions": decisions,
             },
         )

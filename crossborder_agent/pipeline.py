@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import concurrent.futures
+import hashlib
 import json
 import logging
 import os
@@ -90,9 +91,9 @@ _VIDEO_NEGATIVE_PROMPT = (
 )
 
 _AGENT_MIN_NEW_REPAIR_SECONDS = 8 * 60
-_AGENT_MIN_DISCRETIONARY_REPAIR_SECONDS = 12 * 60
 _AGENT_POST_REPAIR_REVIEW_RESERVE_SECONDS = 4 * 60
-_AGENT_MAX_EVALUATIONS = 3
+_AGENT_MAX_REPAIR_CYCLES = 3
+_AGENT_MAX_REPLANS_PER_FINGERPRINT = 1
 _AGENT_SNAPSHOT_FILES = tuple(
     sorted(EXPECTED_FILES - {"strategy_document.md"})
 )
@@ -1014,6 +1015,107 @@ class Pipeline:
         registry.bind_precondition("revise_localized_copy", copy_precondition)
         registry.bind_precondition("regenerate_video", video_precondition)
 
+    @staticmethod
+    def _artifact_hash(path: Path) -> str:
+        if not path.is_file():
+            return "missing"
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _delivery_fingerprint(
+        self,
+        *,
+        state: RunState,
+        localization_payloads: dict[str, dict[str, Any]],
+        localization_sources: dict[str, str],
+        work_dir: Path,
+    ) -> str:
+        """Identify the exact evidence bundle seen by evaluators."""
+
+        digest = hashlib.sha256(b"delivery-evidence-v1\0")
+        for filename in _AGENT_SNAPSHOT_FILES:
+            digest.update(filename.encode("utf-8"))
+            digest.update(self._artifact_hash(work_dir / filename).encode("ascii"))
+        mutable_state = {
+            "assets": [
+                {
+                    "name": item.name,
+                    "source_url": item.source_url,
+                    "model": item.model,
+                    "generated": item.generated,
+                }
+                for item in state.assets
+            ],
+            "localization_payloads": localization_payloads,
+            "localization_sources": localization_sources,
+            "visual_set_review": state.visual_set_review,
+            "taxonomy": {
+                "category_id": state.taxonomy.category.category_id,
+                "schema_id": state.taxonomy.attribute_schema_category_id,
+                "attributes": [
+                    (item.attr_id, item.value_id, item.platform_value)
+                    for item in state.taxonomy.attributes
+                ],
+            },
+        }
+        digest.update(
+            json.dumps(mutable_state, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        )
+        return digest.hexdigest()
+
+    def _target_hashes(self, targets: set[str], work_dir: Path) -> dict[str, str]:
+        return {target: self._artifact_hash(work_dir / target) for target in sorted(targets)}
+
+    def _capture_repair_checkpoint(
+        self,
+        *,
+        state: RunState,
+        localization_payloads: dict[str, dict[str, Any]],
+        localization_sources: dict[str, str],
+        work_dir: Path,
+    ) -> dict[str, Any]:
+        checkpoint_id = uuid.uuid4().hex
+        checkpoint_dir = work_dir / ".agent-checkpoints" / checkpoint_id
+        checkpoint_dir.mkdir(parents=True, exist_ok=False)
+        for filename in _AGENT_SNAPSHOT_FILES:
+            source = work_dir / filename
+            if source.is_file():
+                shutil.copy2(source, checkpoint_dir / filename)
+        return {
+            "directory": checkpoint_dir,
+            "assets": copy.deepcopy(state.assets),
+            "localization_payloads": copy.deepcopy(localization_payloads),
+            "localization_sources": copy.deepcopy(localization_sources),
+            "visual_set_review": copy.deepcopy(state.visual_set_review),
+        }
+
+    def _restore_repair_checkpoint(
+        self,
+        checkpoint: dict[str, Any],
+        *,
+        state: RunState,
+        localization_payloads: dict[str, dict[str, Any]],
+        localization_sources: dict[str, str],
+        work_dir: Path,
+    ) -> None:
+        checkpoint_dir = checkpoint["directory"]
+        for filename in _AGENT_SNAPSHOT_FILES:
+            source = checkpoint_dir / filename
+            if not source.is_file():
+                continue
+            staged = work_dir / f".restore-{uuid.uuid4().hex}-{filename}"
+            shutil.copy2(source, staged)
+            os.replace(staged, work_dir / filename)
+        state.assets = copy.deepcopy(checkpoint["assets"])
+        localization_payloads.clear()
+        localization_payloads.update(copy.deepcopy(checkpoint["localization_payloads"]))
+        localization_sources.clear()
+        localization_sources.update(copy.deepcopy(checkpoint["localization_sources"]))
+        state.visual_set_review = copy.deepcopy(checkpoint["visual_set_review"])
+
     def _capture_agent_snapshot(
         self,
         *,
@@ -1043,11 +1145,14 @@ class Pipeline:
         metadata = {
             "snapshot_id": snapshot_id,
             "after_repair_rounds": int(evaluation.round_index),
+            "artifact_fingerprint": str(evaluation.artifact_fingerprint),
             "weighted_score": float(evaluation.weighted_score),
             "dimension_scores": dict(evaluation.dimension_scores),
             "evaluator_models": list(evaluation.evaluator_models),
             "model_weighted_scores": dict(evaluation.model_weighted_scores),
             "ready_for_delivery": bool(evaluation.ready_for_delivery),
+            "score_method": str(evaluation.score_method),
+            "disagreement": bool(evaluation.disagreement),
             "selected": False,
         }
         state.agent_snapshots.append(metadata)
@@ -1093,17 +1198,6 @@ class Pipeline:
             snapshot_id=snapshot["metadata"]["snapshot_id"],
             weighted_score=snapshot["metadata"]["weighted_score"],
             selected=mark_selected,
-        )
-
-    @staticmethod
-    def _agent_snapshot_rank(snapshot: dict[str, Any]) -> tuple[float, float, int]:
-        metadata = snapshot["metadata"]
-        scores = metadata.get("dimension_scores") or {}
-        critical_score = sum(float(scores.get(key, 0.0)) for key in ("A1", "A2", "A5"))
-        return (
-            float(metadata.get("weighted_score", 0.0)),
-            critical_score,
-            int(metadata.get("after_repair_rounds", 0)),
         )
 
     def _rebuild_synchronized_catalog_video(
@@ -1232,251 +1326,38 @@ class Pipeline:
         return True
 
     @staticmethod
-    def _deterministic_repair_evidence(
-        action: AgentAction, work_dir: Path
-    ) -> list[str]:
-        """Return locally reproducible defects that justify a repair without another vote."""
-
-        path = work_dir / action.target
-        evidence: list[str] = []
-        if not path.is_file():
-            return [f"target file is missing: {action.target}"]
-        try:
-            size_bytes = path.stat().st_size
-        except OSError as exc:
-            return [f"target cannot be inspected: {exc}"]
-        if size_bytes <= 0 and action.dimension in {"A2", "A4", "A6", "A7"}:
-            evidence.append("target file is empty")
-        if action.target.endswith(".md"):
-            if action.dimension == "A2" and size_bytes >= 1024 * 1024:
-                evidence.append("localized description is at least 1 MB")
-            try:
-                text = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as exc:
-                evidence.append(f"localized description is not readable UTF-8: {exc}")
-                return evidence
-            language = action.target.removeprefix("product_description_").removesuffix(
-                ".md"
-            )
-            buyer_surface, _ = _description_language_surfaces(text, language)
-            buyer_surface = re.sub(r"https?://[^\s)>]+", "", buyer_surface)
-            if action.dimension in {"A1", "A4"} and re.search(
-                r"[\u4e00-\u9fff]", buyer_surface
-            ):
-                evidence.append("buyer-facing copy contains untranslated Chinese")
-            if action.dimension in {"A1", "A4"}:
-                for marker in (
-                    "/ret/result/result",
-                    "Canonical source",
-                    "Source evidence",
-                ):
-                    if marker.casefold() in text.casefold():
-                        evidence.append(
-                            f"localized description exposes internal marker: {marker}"
-                        )
-        elif action.target.endswith(".jpeg"):
-            try:
-                info = inspect_image(path)
-                if action.dimension in {"A2", "A6"} and info.format not in {
-                    "JPEG",
-                    "JPG",
-                    "PNG",
-                }:
-                    evidence.append(f"unsupported image format: {info.format}")
-                if action.dimension in {"A2", "A6"} and action.target == "main_image.jpeg":
-                    if info.width < 800 or info.height < 800:
-                        evidence.append(
-                            f"hero dimensions are below 800x800: {info.width}x{info.height}"
-                        )
-                elif action.dimension in {"A2", "A6"} and (
-                    info.width <= 260 or info.height <= 260
-                ):
-                    evidence.append(
-                        f"detail dimensions are not above 260 px: {info.width}x{info.height}"
-                    )
-                if action.dimension in {"A2", "A6"} and info.size_bytes > 5 * 1024 * 1024:
-                    evidence.append("image exceeds 5 MB")
-                quality = inspect_image_quality(path)
-                if action.dimension == "A6" and quality and (
-                    quality.luminance_stddev < 2 or quality.entropy < 0.8
-                ):
-                    evidence.append("image is deterministically blank or information-poor")
-            except (MediaError, OSError) as exc:
-                evidence.append(f"image cannot be decoded: {exc}")
-        elif action.target.endswith(".mp4"):
-            try:
-                inspect_video(path)
-            except (MediaError, OSError) as exc:
-                if action.dimension in {"A2", "A7"}:
-                    evidence.append(f"video cannot be decoded: {exc}")
-            if action.dimension in {"A2", "A7"} and size_bytes >= 200 * 1024 * 1024:
-                evidence.append("video is at least 200 MB")
-        return evidence
-
-    def _qualify_repair_actions(
-        self,
-        evaluation: Any,
-        *,
-        facts: ProductFacts,
-        taxonomy: TaxonomyResult,
-        state: RunState,
-        work_dir: Path,
-        registry: BoundedToolRegistry | None = None,
+    def _preflight_repair_actions(
+        actions: list[AgentAction],
+        registry: BoundedToolRegistry,
     ) -> tuple[list[AgentAction], list[dict[str, Any]]]:
-        """Apply consensus, deterministic-evidence, and verification policy."""
+        """Validate planner tool calls without asking an evaluator to approve them."""
 
         eligible: list[AgentAction] = []
-        deferred: list[dict[str, Any]] = []
-        requires_verification: list[AgentAction] = []
-        remaining = self.deadline - time.monotonic()
-        for action in evaluation.repair_actions:
-            if registry is not None:
-                available, reason = registry.availability(action.tool, action.target)
-                if not available:
-                    deferred.append(
-                        {
-                            "tool": action.tool,
-                            "target": action.target,
-                            "dimension": action.dimension,
-                            "reason": "tool-precondition-unavailable",
-                            "detail": reason,
-                        }
-                    )
-                    continue
-            deterministic = self._deterministic_repair_evidence(action, work_dir)
-            if action.votes >= 2 or action.execution_tier == "consensus":
-                action.execution_tier = "consensus"
-                action.verification = {
-                    "status": "consensus",
-                    "supporting_models": list(action.supporting_models),
-                }
-                eligible.append(action)
-            elif deterministic:
-                action.execution_tier = "deterministic"
-                action.verification = {
-                    "status": "deterministic-evidence",
-                    "evidence": deterministic,
-                }
-                eligible.append(action)
-            elif action.dimension in {"A1", "A2", "A5"}:
-                action.execution_tier = "critical_verification"
-                requires_verification.append(action)
-            elif remaining >= _AGENT_MIN_DISCRETIONARY_REPAIR_SECONDS:
-                action.execution_tier = "discretionary"
-                action.verification = {
-                    "status": "budget-qualified-discretionary",
-                    "remaining_seconds": round(remaining, 1),
-                }
-                eligible.append(action)
-            else:
-                deferred.append(
+        rejected: list[dict[str, Any]] = []
+        for action in actions:
+            available, reason = registry.availability(action.tool, action.target)
+            if not available:
+                rejected.append(
                     {
+                        "defect_id": action.defect_id,
                         "tool": action.tool,
                         "target": action.target,
-                        "dimension": action.dimension,
-                        "reason": "single-model-noncritical-insufficient-budget",
+                        "status": "rejected_precondition",
+                        "detail": reason,
                     }
                 )
-
-        if requires_verification:
-            verify_method = getattr(self.agent, "verify_repair_action", None)
-
-            def verify(action: AgentAction) -> tuple[AgentAction, dict[str, Any]]:
-                if not callable(verify_method):
-                    return action, {
-                        "supported": False,
-                        "status": "verification-method-unavailable",
-                    }
-                try:
-                    result = verify_method(
-                        action,
-                        facts=facts,
-                        taxonomy=taxonomy,
-                        assets=state.assets,
-                        visual_set_review=state.visual_set_review,
-                        work_dir=work_dir,
-                        evaluator_models=evaluation.evaluator_models,
-                    )
-                except Exception as exc:
-                    result = {
-                        "supported": False,
-                        "status": "verification-failed",
-                        "evidence": str(exc)[:1000],
-                    }
-                return action, result if isinstance(result, dict) else {}
-
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=min(3, len(requires_verification)),
-                thread_name_prefix="repair-verifier",
-            ) as executor:
-                futures = [
-                    executor.submit(verify, action)
-                    for action in requires_verification
-                ]
-                for future in concurrent.futures.as_completed(futures):
-                    action, result = future.result()
-                    action.verification = result
-                    if result.get("supported") is True:
-                        action.execution_tier = "verified_critical"
-                        corrected_scope = str(result.get("corrected_scope") or "").strip()
-                        if corrected_scope:
-                            action.instruction = corrected_scope[:4000]
-                        eligible.append(action)
-                    else:
-                        deferred.append(
-                            {
-                                "tool": action.tool,
-                                "target": action.target,
-                                "dimension": action.dimension,
-                                "reason": "single-model-critical-not-verified",
-                                "verification": result,
-                            }
-                        )
-
-        tier_order = {
-            "consensus": 0,
-            "deterministic": 0,
-            "verified_critical": 1,
-            "discretionary": 2,
-        }
-        eligible.sort(
-            key=lambda item: (
-                tier_order.get(item.execution_tier, 3),
-                item.priority,
-                item.target,
-            )
-        )
-        self.trace.emit(
-            "agent.repair_actions_qualified",
-            round_index=evaluation.round_index,
-            eligible=[
-                {
-                    "tool": item.tool,
-                    "target": item.target,
-                    "dimension": item.dimension,
-                    "votes": item.votes,
-                    "supporting_models": item.supporting_models,
-                    "execution_tier": item.execution_tier,
-                    "verification": item.verification,
-                }
-                for item in eligible
-            ],
-            deferred=deferred,
-        )
-        return eligible, deferred
+                continue
+            eligible.append(action)
+        return eligible, rejected
 
     @staticmethod
     def _build_repair_batches(actions: list[AgentAction]) -> list[dict[str, Any]]:
-        """Create dependency-isolated batches; only one successful batch is applied per round."""
+        """Create one reversible transaction per target."""
 
         groups: dict[str, list[AgentAction]] = {}
-        direct_tiers = {"consensus", "deterministic", "verified_critical"}
         for action in actions:
             if action.tool == "revise_localized_copy":
-                confidence = (
-                    "direct" if action.execution_tier in direct_tiers else "discretionary"
-                )
-                key = f"localized_copy:{confidence}"
+                key = f"localized_copy:{action.target}"
             elif action.tool == "regenerate_main_image":
                 key = "hero_identity"
             elif action.tool == "regenerate_detail_image":
@@ -1489,12 +1370,6 @@ class Pipeline:
                 key = f"other:{action.tool}:{action.target}"
             groups.setdefault(key, []).append(action)
 
-        tier_order = {
-            "consensus": 0,
-            "deterministic": 0,
-            "verified_critical": 1,
-            "discretionary": 2,
-        }
         dependency_order = {
             "hero_identity": 0,
             "localized_copy": 1,
@@ -1510,11 +1385,8 @@ class Pipeline:
                     "batch_id": batch_id,
                     "kind": batch_id.split(":", 1)[0],
                     "actions": batch_actions,
-                    "atomic": len(batch_actions) > 1,
-                    "tier_rank": min(
-                        tier_order.get(item.execution_tier, 3)
-                        for item in batch_actions
-                    ),
+                    "atomic": False,
+                    "tier_rank": 0,
                     "priority": min(item.priority for item in batch_actions),
                 }
             )
@@ -1613,46 +1485,52 @@ class Pipeline:
         localization_sources: dict[str, str],
         work_dir: Path,
     ) -> None:
+        """Evidence -> adjudication -> planning -> execution -> verification controller."""
+
         if self.client is None:
             self.warnings.append(
-                "显式离线模式：跳过有界 Agent 全局评估循环"
+                "显式离线模式：跳过角色分离的 Agent 评估返修控制器"
                 if self.offline
-                else "模型配置不可用，跳过有界 Agent 全局评估循环"
+                else "模型配置不可用，跳过角色分离的 Agent 评估返修控制器"
             )
             self.trace.emit(
                 "agent.evaluation_skipped",
                 reason="offline" if self.offline else "no-model-client",
             )
             return
-        # Full mode aims for three independently aggregated evaluations whenever
-        # the deadline permits.  A failed/no-op repair does not prematurely end
-        # evaluation: another judge round can still surface consensus issues and
-        # produce a better targeted action set.
-        round_index = 0
-        snapshots: list[dict[str, Any]] = []
-        stop_reason = "max_evaluations_reached"
-        while round_index < _AGENT_MAX_EVALUATIONS:
+
+        evaluation_cache: dict[str, Any] = {}
+        observations_by_fingerprint: dict[str, list[dict[str, Any]]] = {}
+        evaluated_snapshots: list[dict[str, Any]] = []
+        last_evaluated_snapshot: dict[str, Any] | None = None
+        repair_cycles = 0
+        stop_reason = "controller-finished"
+
+        while True:
             if (
                 self.deadline - time.monotonic()
                 <= _AGENT_POST_REPAIR_REVIEW_RESERVE_SECONDS
             ):
-                self.warnings.append("剩余时间不足，停止新的 Agent 评估轮次并保留当前版本")
+                stop_reason = "insufficient-evaluation-budget"
+                break
+
+            fingerprint = self._delivery_fingerprint(
+                state=state,
+                localization_payloads=localization_payloads,
+                localization_sources=localization_sources,
+                work_dir=work_dir,
+            )
+            if fingerprint in evaluation_cache:
+                stop_reason = "unchanged-artifact-fingerprint"
                 self.trace.emit(
-                    "agent.evaluation_skipped",
-                    reason="insufficient-stage-budget",
-                    round_index=round_index,
-                    remaining_seconds=round(self.deadline - time.monotonic(), 1),
-                )
-                stop_reason = "insufficient_stage_budget"
-                self.logger.info(
-                    "Agent 评估停止: reason=%s completed_rounds=%d remaining_seconds=%.1f",
-                    stop_reason,
-                    len(snapshots),
-                    self.deadline - time.monotonic(),
+                    "agent.controller_stop",
+                    reason=stop_reason,
+                    artifact_fingerprint=fingerprint,
                 )
                 break
+
             evaluation = self.agent.evaluate_delivery(
-                round_index=round_index,
+                round_index=len(state.agent_evaluations),
                 facts=facts,
                 taxonomy=taxonomy,
                 creative_plan=creative_plan,
@@ -1663,22 +1541,24 @@ class Pipeline:
                 visual_set_review=state.visual_set_review,
                 work_dir=work_dir,
                 tools=registry,
+                artifact_fingerprint=fingerprint,
             )
             if evaluation is None:
-                self.warnings.append(
-                    "LLM 全局评估未完成；未评分修复版本不参与最优选择"
-                )
-                self.trace.emit(
-                    "agent.evaluation_failed",
-                    round_index=round_index,
-                    reason="reviewer-unavailable-or-invalid-response",
-                )
-                self.logger.warning(
-                    "Agent 全局评估轮次 %d 无效: reason=insufficient_valid_evaluators",
-                    round_index,
-                )
-                round_index += 1
-                continue
+                stop_reason = "insufficient-valid-evaluators"
+                if last_evaluated_snapshot is not None and repair_cycles:
+                    self._restore_agent_snapshot(
+                        last_evaluated_snapshot,
+                        state=state,
+                        localization_payloads=localization_payloads,
+                        localization_sources=localization_sources,
+                        work_dir=work_dir,
+                        mark_selected=False,
+                    )
+                    stop_reason = "evaluation-failed-restored-last-evaluated-state"
+                break
+
+            evaluation.artifact_fingerprint = fingerprint
+            evaluation_cache[fingerprint] = evaluation
             state.agent_evaluations.append(evaluation)
             current_snapshot = self._capture_agent_snapshot(
                 evaluation=evaluation,
@@ -1687,369 +1567,334 @@ class Pipeline:
                 localization_sources=localization_sources,
                 work_dir=work_dir,
             )
-            snapshots.append(current_snapshot)
+            evaluated_snapshots.append(current_snapshot)
+            last_evaluated_snapshot = current_snapshot
             self.trace.emit(
                 "agent.evaluation",
-                round_index=round_index,
+                round_index=evaluation.round_index,
+                artifact_fingerprint=fingerprint,
                 evaluator_models=evaluation.evaluator_models,
                 model_dimension_scores=evaluation.model_dimension_scores,
                 model_weighted_scores=evaluation.model_weighted_scores,
-                aggregation="per-dimension arithmetic mean",
+                score_method=evaluation.score_method,
+                disagreement=evaluation.disagreement,
+                adjudication=evaluation.adjudication,
                 ready=evaluation.ready_for_delivery,
                 weighted_score=evaluation.weighted_score,
                 dimension_scores=evaluation.dimension_scores,
                 summary=evaluation.summary,
                 issues=evaluation.issues,
-                repair_actions=[
-                    {
-                        "tool": item.tool,
-                        "target": item.target,
-                        "instruction": item.instruction,
-                        "reason": item.reason,
-                        "dimension": item.dimension,
-                        "priority": item.priority,
-                        "supporting_models": item.supporting_models,
-                        "votes": item.votes,
-                        "execution_tier": item.execution_tier,
-                    }
-                    for item in evaluation.repair_actions
-                ],
             )
-            self.logger.info(
-                "Agent 全局评估轮次 %d: models=%s model_scores=%s aggregate_score=%.1f "
-                "dimensions=%s ready=%s actions=%d",
-                round_index,
-                ",".join(evaluation.evaluator_models),
-                json.dumps(evaluation.model_weighted_scores, ensure_ascii=False),
-                evaluation.weighted_score,
-                json.dumps(evaluation.dimension_scores, ensure_ascii=False),
-                evaluation.ready_for_delivery,
-                len(evaluation.repair_actions),
-            )
-            if round_index + 1 >= _AGENT_MAX_EVALUATIONS:
-                self.trace.emit(
-                    "agent.evaluation_loop_stop",
-                    reason="max-evaluations-reached",
-                    completed_rounds=len(snapshots),
-                    selected_by="highest-averaged-score",
-                    override=False,
-                )
+            if evaluation.ready_for_delivery:
+                stop_reason = "ready-for-delivery"
+                break
+            if repair_cycles >= _AGENT_MAX_REPAIR_CYCLES:
+                stop_reason = "max-repair-cycles-reached"
                 break
             if self.deadline - time.monotonic() <= _AGENT_MIN_NEW_REPAIR_SECONDS:
-                self.warnings.append(
-                    "剩余时间不足 8 分钟，不启动新修复；如评估预算允许则继续下一轮评分"
-                )
-                self.trace.emit(
-                    "agent.repair_round_skipped",
-                    round_index=round_index,
-                    reason="insufficient-repair-budget",
-                    remaining_seconds=round(self.deadline - time.monotonic(), 1),
-                )
-                self.logger.info(
-                    "Agent 修复轮次 %d 跳过: reason=insufficient_repair_budget",
-                    round_index,
-                )
-                round_index += 1
-                continue
+                stop_reason = "insufficient-repair-budget"
+                break
 
-            completed = 0
-            skipped = 0
-            failed = 0
-            rolled_back = 0
-            changed_targets: set[str] = set()
-            applied_batch = ""
-            qualified_actions, deferred_actions = self._qualify_repair_actions(
-                evaluation,
-                facts=facts,
-                taxonomy=taxonomy,
-                state=state,
-                work_dir=work_dir,
-                registry=registry,
-            )
-            repair_batches = self._build_repair_batches(qualified_actions)
-            self.logger.info(
-                "Agent 修复资格轮次 %d: proposed=%d qualified=%d deferred=%d batches=%d",
-                round_index,
-                len(evaluation.repair_actions),
-                len(qualified_actions),
-                len(deferred_actions),
-                len(repair_batches),
-            )
-            for batch in repair_batches:
-                batch_actions = batch["actions"]
-                dependency_seconds = 0
-                if any(
-                    action.tool == "regenerate_main_image"
-                    for action in batch_actions
-                ):
-                    dependency_seconds += registry.estimated_seconds(
-                        "regenerate_video"
-                    )
-                if any(
-                    action.tool == "regenerate_detail_image"
-                    for action in batch_actions
-                ):
-                    dependency_seconds += 60
-                required = (
-                    sum(registry.estimated_seconds(action.tool) for action in batch_actions)
-                    + dependency_seconds
-                    + _AGENT_POST_REPAIR_REVIEW_RESERVE_SECONDS
+            observations = observations_by_fingerprint.setdefault(fingerprint, [])
+            changed_in_cycle = False
+            for plan_attempt in range(_AGENT_MAX_REPLANS_PER_FINGERPRINT + 1):
+                actions = self.agent.plan_repairs(
+                    evaluation,
+                    tools=registry,
+                    previous_attempts=observations,
                 )
-                if self.deadline - time.monotonic() <= required:
-                    skipped += len(batch_actions)
-                    self.warnings.append(
-                        f"剩余时间不足以执行修复批次 {batch['batch_id']}、同步依赖并重新评分"
-                    )
-                    self.trace.emit(
-                        "agent.repair_batch_skipped",
-                        round_index=round_index,
-                        batch_id=batch["batch_id"],
-                        reason="insufficient-batch-budget",
-                        required_seconds=required,
-                        remaining_seconds=round(
-                            self.deadline - time.monotonic(), 1
-                        ),
-                    )
-                    continue
-
-                self.trace.emit(
-                    "agent.repair_batch_started",
-                    round_index=round_index,
-                    batch_id=batch["batch_id"],
-                    atomic=batch["atomic"],
-                    actions=[
+                evaluation.repair_actions = actions
+                if not actions:
+                    observations.append(
                         {
+                            "status": "no_plan",
+                            "detail": "repair planner returned no bounded action",
+                        }
+                    )
+                    if plan_attempt < _AGENT_MAX_REPLANS_PER_FINGERPRINT:
+                        continue
+                    stop_reason = "no-repair-plan"
+                    break
+
+                signature_payload = [
+                    (item.defect_id, item.tool, item.target, item.instruction)
+                    for item in actions
+                ]
+                signature = hashlib.sha256(
+                    json.dumps(signature_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+                if any(item.get("plan_signature") == signature for item in observations):
+                    stop_reason = "repeated-repair-plan"
+                    break
+                observations.append(
+                    {
+                        "status": "planned",
+                        "plan_signature": signature,
+                        "actions": signature_payload,
+                    }
+                )
+
+                eligible, rejected = self._preflight_repair_actions(actions, registry)
+                observations.extend(rejected)
+                self.trace.emit(
+                    "agent.repair_plan",
+                    artifact_fingerprint=fingerprint,
+                    plan_attempt=plan_attempt,
+                    proposed=[
+                        {
+                            "defect_id": item.defect_id,
+                            "tool": item.tool,
+                            "target": item.target,
+                            "acceptance_criteria": item.acceptance_criteria,
+                        }
+                        for item in actions
+                    ],
+                    rejected=rejected,
+                )
+                if not eligible:
+                    if plan_attempt < _AGENT_MAX_REPLANS_PER_FINGERPRINT:
+                        continue
+                    stop_reason = "no-executable-repair"
+                    break
+
+                for batch in self._build_repair_batches(eligible):
+                    batch_actions = batch["actions"]
+                    required = (
+                        sum(registry.estimated_seconds(item.tool) for item in batch_actions)
+                        + _AGENT_POST_REPAIR_REVIEW_RESERVE_SECONDS
+                    )
+                    if self.deadline - time.monotonic() <= required:
+                        observations.append(
+                            {
+                                "status": "deferred_budget",
+                                "batch_id": batch["batch_id"],
+                                "required_seconds": required,
+                            }
+                        )
+                        continue
+
+                    checkpoint = self._capture_repair_checkpoint(
+                        state=state,
+                        localization_payloads=localization_payloads,
+                        localization_sources=localization_sources,
+                        work_dir=work_dir,
+                    )
+                    targets = {item.target for item in batch_actions}
+                    before_hashes = self._target_hashes(targets, work_dir)
+                    completed_actions: list[AgentAction] = []
+                    for action in batch_actions:
+                        result = registry.execute(
+                            action.tool, action.target, action.instruction
+                        )
+                        after_hash = self._artifact_hash(work_dir / action.target)
+                        changed = (
+                            result.status == "completed"
+                            and after_hash != before_hashes.get(action.target)
+                        )
+                        status = result.status
+                        detail = result.detail
+                        if result.status == "completed" and not changed:
+                            status = "no_change"
+                            detail = "tool reported completion but target content hash did not change"
+                        state.agent_actions.append(
+                            AgentActionResult(
+                                round_index=evaluation.round_index,
+                                tool=action.tool,
+                                target=action.target,
+                                status=status,
+                                detail=detail,
+                                defect_id=action.defect_id,
+                                before_hash=before_hashes.get(action.target, ""),
+                                after_hash=after_hash,
+                                changed=changed,
+                                metadata=dict(result.metadata),
+                            )
+                        )
+                        observation = {
+                            "defect_id": action.defect_id,
                             "tool": action.tool,
                             "target": action.target,
-                            "execution_tier": action.execution_tier,
-                            "votes": action.votes,
+                            "status": status,
+                            "detail": detail,
+                            "before_hash": before_hashes.get(action.target, ""),
+                            "after_hash": after_hash,
+                            "changed": changed,
                         }
-                        for action in batch_actions
-                    ],
-                )
-                batch_changed: set[str] = set()
-                batch_noncompleted = 0
-                for action in batch_actions:
-                    result = registry.execute(
-                        action.tool, action.target, action.instruction
-                    )
-                    state.agent_actions.append(
-                        AgentActionResult(
-                            round_index=round_index,
-                            tool=action.tool,
-                            target=action.target,
-                            status=result.status,
-                            detail=(
-                                f"batch={batch['batch_id']} tier={action.execution_tier}; "
-                                + result.detail
-                            ),
-                        )
-                    )
-                    self.trace.emit(
-                        "agent.repair_result",
-                        round_index=round_index,
-                        batch_id=batch["batch_id"],
-                        tool=action.tool,
-                        target=action.target,
-                        dimension=action.dimension,
-                        instruction=action.instruction,
-                        supporting_models=action.supporting_models,
-                        votes=action.votes,
-                        execution_tier=action.execution_tier,
-                        verification=action.verification,
-                        status=result.status,
-                        detail=result.detail,
-                        metadata=result.metadata,
-                    )
-                    if result.status == "completed":
-                        batch_changed.add(action.target)
-                        self.logger.info(
-                            "Agent 修复候选完成: batch=%s %s/%s",
-                            batch["batch_id"],
-                            action.tool,
-                            action.target,
-                        )
-                    else:
-                        batch_noncompleted += 1
-                        if result.status == "skipped":
-                            skipped += 1
-                        else:
-                            failed += 1
-                        self.warnings.append(
-                            f"Agent 修复未替换现有素材 {action.target}: {result.detail[:300]}"
-                        )
+                        observations.append(observation)
+                        self.trace.emit("agent.repair_result", **observation)
+                        if changed:
+                            completed_actions.append(action)
 
-                if not batch_changed:
-                    continue
-                if batch["atomic"] and batch_noncompleted:
-                    rolled_back += len(batch_changed)
-                    self._restore_agent_snapshot(
-                        current_snapshot,
+                    if not completed_actions:
+                        self._restore_repair_checkpoint(
+                            checkpoint,
+                            state=state,
+                            localization_payloads=localization_payloads,
+                            localization_sources=localization_sources,
+                            work_dir=work_dir,
+                        )
+                        continue
+
+                    changed_targets = {item.target for item in completed_actions}
+                    synchronized = self._synchronize_repair_dependencies(
+                        round_index=evaluation.round_index,
+                        changed_targets=changed_targets,
+                        registry=registry,
+                        facts=facts,
+                        taxonomy=taxonomy,
+                        creative_plan=creative_plan,
                         state=state,
                         localization_payloads=localization_payloads,
-                        localization_sources=localization_sources,
                         work_dir=work_dir,
-                        mark_selected=False,
                     )
-                    state.agent_actions.append(
-                        AgentActionResult(
-                            round_index=round_index,
-                            tool="repair_batch",
-                            target=batch["batch_id"],
-                            status="rolled_back",
-                            detail="atomic batch was only partially completed",
+                    consistent, consistency_detail = (
+                        self._repair_batch_consistent(
+                            changed_targets,
+                            state=state,
+                            localization_payloads=localization_payloads,
+                            work_dir=work_dir,
                         )
+                        if synchronized
+                        else (False, "dependency synchronization failed")
+                    )
+                    if not consistent:
+                        self._restore_repair_checkpoint(
+                            checkpoint,
+                            state=state,
+                            localization_payloads=localization_payloads,
+                            localization_sources=localization_sources,
+                            work_dir=work_dir,
+                        )
+                        observations.append(
+                            {
+                                "status": "rolled_back",
+                                "batch_id": batch["batch_id"],
+                                "detail": consistency_detail,
+                            }
+                        )
+                        continue
+
+                    after_hashes = self._target_hashes(changed_targets, work_dir)
+                    verify_method = getattr(self.agent, "verify_repair_outcome", None)
+                    verification = (
+                        verify_method(
+                            completed_actions,
+                            facts=facts,
+                            taxonomy=taxonomy,
+                            assets=state.assets,
+                            visual_set_review=state.visual_set_review,
+                            work_dir=work_dir,
+                            before_hashes=before_hashes,
+                            after_hashes=after_hashes,
+                        )
+                        if callable(verify_method)
+                        else {
+                            "accepted": True,
+                            "status": "local-consistency-only",
+                            "fixed_defect_ids": [item.defect_id for item in completed_actions],
+                        }
+                    )
+                    if verification.get("accepted") is not True:
+                        self._restore_repair_checkpoint(
+                            checkpoint,
+                            state=state,
+                            localization_payloads=localization_payloads,
+                            localization_sources=localization_sources,
+                            work_dir=work_dir,
+                        )
+                        observations.append(
+                            {
+                                "status": "postcondition_failed",
+                                "batch_id": batch["batch_id"],
+                                "verification": verification,
+                            }
+                        )
+                        state.agent_actions.append(
+                            AgentActionResult(
+                                round_index=evaluation.round_index,
+                                tool="repair_verifier",
+                                target=batch["batch_id"],
+                                status="rolled_back",
+                                detail=str(verification.get("evidence") or verification.get("status") or "verification rejected"),
+                                metadata=verification,
+                            )
+                        )
+                        continue
+
+                    changed_in_cycle = True
+                    observations.append(
+                        {
+                            "status": "applied",
+                            "batch_id": batch["batch_id"],
+                            "fixed_defect_ids": verification.get("fixed_defect_ids", []),
+                            "verification": verification,
+                        }
                     )
                     self.trace.emit(
-                        "agent.repair_batch_rolled_back",
-                        round_index=round_index,
+                        "agent.repair_committed",
                         batch_id=batch["batch_id"],
-                        reason="partial-atomic-batch",
-                        changed_targets=sorted(batch_changed),
+                        targets=sorted(changed_targets),
+                        verification=verification,
                     )
-                    continue
 
-                synchronized = self._synchronize_repair_dependencies(
-                    round_index=round_index,
-                    changed_targets=batch_changed,
-                    registry=registry,
-                    facts=facts,
-                    taxonomy=taxonomy,
-                    creative_plan=creative_plan,
-                    state=state,
-                    localization_payloads=localization_payloads,
-                    work_dir=work_dir,
-                )
-                consistent, consistency_detail = self._repair_batch_consistent(
-                    batch_changed,
-                    state=state,
-                    localization_payloads=localization_payloads,
-                    work_dir=work_dir,
-                ) if synchronized else (False, "dependency synchronization failed")
-                if not consistent:
-                    rolled_back += len(batch_changed)
-                    self.warnings.append(
-                        f"修复批次 {batch['batch_id']} 一致性检查失败，已恢复修复前快照: {consistency_detail}"
-                    )
-                    self._restore_agent_snapshot(
-                        current_snapshot,
-                        state=state,
-                        localization_payloads=localization_payloads,
-                        localization_sources=localization_sources,
-                        work_dir=work_dir,
-                        mark_selected=False,
-                    )
-                    state.agent_actions.append(
-                        AgentActionResult(
-                            round_index=round_index,
-                            tool="repair_batch",
-                            target=batch["batch_id"],
-                            status="rolled_back",
-                            detail=consistency_detail,
-                        )
-                    )
-                    self.trace.emit(
-                        "agent.repair_batch_rolled_back",
-                        round_index=round_index,
-                        batch_id=batch["batch_id"],
-                        reason="post-batch-consistency-failed",
-                        detail=consistency_detail,
-                        changed_targets=sorted(batch_changed),
-                    )
-                    continue
+                if changed_in_cycle:
+                    break
+                if plan_attempt >= _AGENT_MAX_REPLANS_PER_FINGERPRINT:
+                    stop_reason = "no-change-after-replan"
 
-                applied_batch = batch["batch_id"]
-                changed_targets = batch_changed
-                completed = len(batch_changed)
-                self.trace.emit(
-                    "agent.repair_batch_applied",
-                    round_index=round_index,
-                    batch_id=applied_batch,
-                    changed_targets=sorted(changed_targets),
-                    consistency_detail=consistency_detail,
-                    deferred_batch_ids=[
-                        item["batch_id"]
-                        for item in repair_batches
-                        if item["batch_id"] != applied_batch
-                    ],
-                )
-                # A full multi-model evaluation must observe this coherent batch
-                # before any other dependency group is allowed to mutate files.
+            if not changed_in_cycle:
                 break
-            self.trace.emit(
-                "agent.repair_round_complete",
-                round_index=round_index,
-                requested=len(evaluation.repair_actions),
-                qualified=len(qualified_actions),
-                deferred=len(deferred_actions),
-                applied_batch=applied_batch,
-                completed=completed,
-                skipped=skipped,
-                failed=failed,
-                rolled_back=rolled_back,
-                changed_targets=sorted(changed_targets),
-            )
-            self.logger.info(
-                "Agent 修复轮次 %d: requested=%d qualified=%d deferred=%d batch=%s "
-                "completed=%d skipped=%d failed=%d rolled_back=%d",
-                round_index,
-                len(evaluation.repair_actions),
-                len(qualified_actions),
-                len(deferred_actions),
-                applied_batch or "none",
-                completed,
-                skipped,
-                failed,
-                rolled_back,
-            )
-            if completed == 0:
-                self.trace.emit(
-                    "agent.repair_round_no_change",
-                    round_index=round_index,
-                    reason=(
-                        "no-repair-actions"
-                        if not evaluation.repair_actions
-                        else "no-qualified-consistent-batch-applied"
-                    ),
-                    next_evaluation_round=round_index + 1,
-                )
-                round_index += 1
-                continue
-            round_index += 1
 
-        if snapshots:
-            ranked_snapshots = sorted(
-                snapshots, key=self._agent_snapshot_rank, reverse=True
-            )
-            best_snapshot = ranked_snapshots[0]
-            self._restore_agent_snapshot(
-                best_snapshot,
+            next_fingerprint = self._delivery_fingerprint(
                 state=state,
                 localization_payloads=localization_payloads,
                 localization_sources=localization_sources,
                 work_dir=work_dir,
-                mark_selected=True,
             )
-            self.logger.info(
-                "Agent 最终选择 %s: score=%.1f snapshots=%d selection_rule=highest_averaged_score "
-                "override=false stop_reason=%s",
-                best_snapshot["metadata"]["snapshot_id"],
-                best_snapshot["metadata"]["weighted_score"],
-                len(snapshots),
-                stop_reason,
-            )
-            self.trace.emit(
-                "agent.final_selection",
-                snapshot_id=best_snapshot["metadata"]["snapshot_id"],
-                weighted_score=best_snapshot["metadata"]["weighted_score"],
-                snapshot_scores={
-                    item["metadata"]["snapshot_id"]: item["metadata"]["weighted_score"]
-                    for item in snapshots
-                },
-                selection_rule="highest-averaged-score",
-                override=False,
-                stop_reason=stop_reason,
-            )
+            if next_fingerprint == fingerprint:
+                stop_reason = "no-effective-delivery-change"
+                break
+            if next_fingerprint in evaluation_cache:
+                stop_reason = "returned-to-previous-artifact-state"
+                break
+            repair_cycles += 1
+
+        final_fingerprint = self._delivery_fingerprint(
+            state=state,
+            localization_payloads=localization_payloads,
+            localization_sources=localization_sources,
+            work_dir=work_dir,
+        )
+        selected_snapshot = next(
+            (
+                snapshot
+                for snapshot in reversed(evaluated_snapshots)
+                if snapshot["metadata"].get("artifact_fingerprint") == final_fingerprint
+            ),
+            last_evaluated_snapshot,
+        )
+        if selected_snapshot is not None:
+            for item in state.agent_snapshots:
+                item["selected"] = item is selected_snapshot["metadata"]
+        self.trace.emit(
+            "agent.final_selection",
+            snapshot_id=(
+                selected_snapshot["metadata"]["snapshot_id"]
+                if selected_snapshot is not None
+                else ""
+            ),
+            artifact_fingerprint=final_fingerprint,
+            selection_rule="latest-evaluated-verifier-accepted-state",
+            repair_cycles=repair_cycles,
+            stop_reason=stop_reason,
+        )
+        self.logger.info(
+            "Agent 控制器停止: reason=%s evaluations=%d repair_cycles=%d",
+            stop_reason,
+            len(state.agent_evaluations),
+            repair_cycles,
+        )
+
 
     @staticmethod
     def _find_asset(assets: list[AssetResult], name: str) -> AssetResult:
@@ -2444,7 +2289,7 @@ Candidate 1:
                 trace=self.trace,
             ).run(facts)
         except ApiError as exc:
-            self.logger.warning("类目 ReAct 探索失败，保留离线降级结果: %s", exc)
+            self.logger.warning("类目/属性 ReAct 探索失败，保留离线降级结果: %s", exc)
             self.trace.emit(
                 "taxonomy.react_failed",
                 category=taxonomy.category.category_id,
@@ -4740,17 +4585,15 @@ Candidate 1:
             "",
             "交付管理器先依据事实账本、A1–A7 权重、源图观察和可用工具生成本次执行策略。初稿完成后，"
             "两个或三个独立多模态评估器读取全套文案 payload、类目属性、素材清单、图片/视频及本地物理检查，"
-            "依据完整 A1–A7 定义分别输出逐维度评分、证据化问题和白名单工具调用。代码按维度取算术平均并合并各模型"
-            "的问题与修复目标。两模型一致或命中确定性门禁的动作可直接进入修复；单模型提出的 A1/A2/A5 动作须由"
-            "未支持该动作的评估模型做聚焦验证；其他单模型动作仅在预算充足时作为低优先级候选。Full 模式在预算允许时"
-            "执行三次聚合评估；剩余时间不足 8 分钟时可跳过新修复，但仍会在评估预算允许时继续下一轮评分。",
+            "只输出有具体证据的缺陷，不输出分数、工具或修复决定。代码先规范化 defect_id；共同发现直接进入已裁决集合，"
+            "分歧项由独立 Adjudicator 逐项判断。A1–A7 分数由已裁决缺陷的固定惩罚规则计算，不平均模型的主观标尺。"
+            "Repair planner 只能把已裁决 defect_id 映射到白名单工具，不能新增问题。",
             "所有修复均先写入临时文件，完成候选语义选优、文案事实/schema 校验或视频播放校验后才原子替换；"
             "修复失败会保留上一版，不会因为评估意见自动降级为源图或幻灯片。",
-            "每个完成全局评分的版本均保存完整文件与内存状态快照。图片变化后刷新六图复核与三语 Media Guide；"
-            "主图变化时同步视频，模型视频无法可靠同步则使用当前最终图片集重建一致的目录视频。每轮只允许一个依赖"
-            "隔离的修复批次通过；多语言文案批次为原子事务，单张生成图独立成批，批次完成后先同步依赖和检查一致性，"
-            "再由下一轮完整评估观察结果，避免连续应用基于旧快照的修复意见。最终直接恢复聚合"
-            "加权分最高的完整快照；不再调用单模型仲裁，也不存在对最高平均分快照的覆盖。",
+            "控制器对完整交付生成内容指纹，同一指纹只评估一次。工具报告 completed 后还必须确认目标 hash 变化；"
+            "每个目标独立保存检查点，完成依赖同步、本地一致性和独立 Verifier 的目标缺陷/关键回归检查后才提交。"
+            "无变化或拒绝原因作为 observation 返回 planner，同一指纹最多重规划一次；仍无有效变化就停止，不进入下一轮"
+            "全量评估。ready 时立即停止，最终提交最新一个已经评估且通过 Verifier 的状态，不按多次随机分数挑最高值。",
             "- LLM 自由文本计划仅用于内部生成提示，不作为商品事实写入交付；策略文档只披露经过白名单筛选的控制参数。",
             f"- Agent 控制参数：{json.dumps(agent_plan_controls, ensure_ascii=False)}",
             f"- 已完成全局评估轮次：{len(state.agent_evaluations)}。",
@@ -4787,8 +4630,8 @@ Candidate 1:
             lines.extend(["", "全局评估轨迹：", ""])
             lines.extend(
                 f"- 评估轮次 {item.round_index}：模型 {json.dumps(item.evaluator_models, ensure_ascii=False)}；"
-                f"单模型加权分 {json.dumps(item.model_weighted_scores, ensure_ascii=False)}；"
-                f"平均加权分 {item.weighted_score:.1f}；维度均分 {json.dumps(item.dimension_scores, ensure_ascii=False)}；"
+                f"单模型证据惩罚分 {json.dumps(item.model_weighted_scores, ensure_ascii=False)}；"
+                f"裁决后加权分 {item.weighted_score:.1f}；裁决后维度分 {json.dumps(item.dimension_scores, ensure_ascii=False)}；"
                 f"ready={item.ready_for_delivery}；{brief(item.summary)}"
                 for item in state.agent_evaluations
             )

@@ -32,6 +32,10 @@ class ToolExecution:
     detail: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def changed(self) -> bool:
+        return bool(self.metadata.get("changed"))
+
 
 ToolCallback = Callable[[str, str], ToolExecution]
 ToolPrecondition = Callable[[str], tuple[bool, str]]

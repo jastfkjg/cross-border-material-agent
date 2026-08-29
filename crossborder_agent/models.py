@@ -194,7 +194,7 @@ class AssetResult:
 
 @dataclass(slots=True)
 class AgentAction:
-    """A bounded repair action selected by the delivery evaluator."""
+    """A bounded repair action selected by the repair planner."""
 
     tool: str
     target: str
@@ -206,11 +206,13 @@ class AgentAction:
     votes: int = 0
     execution_tier: str = "unclassified"
     verification: dict[str, Any] = field(default_factory=dict)
+    defect_id: str = ""
+    acceptance_criteria: str = ""
 
 
 @dataclass(slots=True)
 class AgentEvaluation:
-    """Structured whole-delivery feedback produced by the evaluator model."""
+    """Evidence findings adjudicated across independent evaluator reports."""
 
     round_index: int
     ready_for_delivery: bool
@@ -222,6 +224,11 @@ class AgentEvaluation:
     evaluator_models: list[str] = field(default_factory=list)
     model_dimension_scores: dict[str, dict[str, float]] = field(default_factory=dict)
     model_weighted_scores: dict[str, float] = field(default_factory=dict)
+    artifact_fingerprint: str = ""
+    rubric_version: str = "evidence-v1"
+    disagreement: bool = False
+    adjudication: dict[str, Any] = field(default_factory=dict)
+    score_method: str = "deterministic-evidence-penalties"
 
 
 @dataclass(slots=True)
@@ -233,6 +240,11 @@ class AgentActionResult:
     target: str
     status: str
     detail: str = ""
+    defect_id: str = ""
+    before_hash: str = ""
+    after_hash: str = ""
+    changed: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

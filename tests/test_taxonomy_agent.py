@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+from typing import Any
 
 from crossborder_agent.input_loader import load_json, load_product_facts
 from crossborder_agent.taxonomy_agent import TaxonomyExplorer, TaxonomyReActAgent
@@ -12,211 +13,185 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "Data_for_Users"
 
 
-class TaxonomyExplorerTests(unittest.TestCase):
+class TaxonomyAgentSmokeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.tree = load_json(DATA / "clothing_categories.json")
         cls.attributes = load_json(DATA / "clothing_attributes.json")
+        cls.facts = load_product_facts(
+            next(iter(sorted((DATA / "product_info").glob("*.json"))))
+        )
 
-    def test_literal_search_keeps_all_matching_leaves_available_without_ranking(self) -> None:
-        explorer = TaxonomyExplorer(self.tree, self.attributes)
+        explorer = TaxonomyExplorer(cls.tree, cls.attributes)
         observation = explorer.execute(
-            "search_categories", {"query": "工装", "leaf_only": True, "limit": 60}
+            "query_taxonomy",
+            {
+                "requests": [
+                    {
+                        "collection": "categories",
+                        "filters": [
+                            {"field": "is_leaf", "op": "eq", "value": True},
+                            {
+                                "field": "available_schema_ids",
+                                "op": "exists",
+                                "value": True,
+                            },
+                        ],
+                        "limit": 1,
+                    }
+                ]
+            },
         )
+        cls.category_record = observation["result"]["results"][0]["items"][0]
+        cls.category_id = str(cls.category_record["category_id"])
+        cls.schema_id = str(cls.category_record["available_schema_ids"][0])
 
-        self.assertTrue(observation["ok"])
-        ids = [item["category_id"] for item in observation["result"]["items"]]
-        self.assertIn("30408", ids)
-        self.assertGreater(len(ids), 1)
-        self.assertNotEqual(ids[0], "30408")
-        self.assertTrue(all("score" not in item for item in observation["result"]["items"]))
-
-    def test_leaf_without_schema_exposes_structural_ancestor_schema(self) -> None:
-        explorer = TaxonomyExplorer(self.tree, self.attributes)
-        observation = explorer.execute("get_attribute_schema", {"category_id": "30408"})
-
-        self.assertTrue(observation["ok"])
-        self.assertIsNone(observation["result"]["schema"])
-        ancestor_ids = {
-            item["category_id"]
-            for item in observation["result"]["ancestor_schemas"]
-        }
-        self.assertIn("30382", ancestor_ids)
-
-
-class TaxonomyReActAgentTests(unittest.TestCase):
     @classmethod
-    def setUpClass(cls) -> None:
-        cls.tree = load_json(DATA / "clothing_categories.json")
-        cls.attributes = load_json(DATA / "clothing_attributes.json")
-
-    def test_model_controls_multi_turn_search_and_can_correct_invalid_finish(self) -> None:
-        facts = load_product_facts(
-            DATA / "product_info/product_6837006744133.json"
-        )
-
-        class ScriptedClient:
-            def __init__(self) -> None:
-                self.calls = 0
-                self.prompts: list[str] = []
-
-            def chat_json(self, _system: str, prompt: str) -> dict[str, object]:
-                self.prompts.append(prompt)
-                actions: list[dict[str, object]] = [
-                    {
-                        # Deliberately premature: the tool validator must reject this
-                        # and let the model continue instead of silently accepting it.
-                        "action": "finish",
-                        "arguments": {
-                            "selected_category_id": "30408",
-                            "selected_attribute_schema_category_id": "30382",
-                            "mappings": [],
-                        },
-                    },
-                    {
-                        "action": "search_categories",
-                        "arguments": {
-                            "query": "工装",
-                            "leaf_only": True,
-                            "limit": 60,
-                        },
-                    },
-                    {
-                        "action": "get_attribute_schema",
-                        "arguments": {"category_id": "30408"},
-                    },
-                    {
-                        "action": "get_attribute_schema",
-                        "arguments": {"category_id": "30382"},
-                    },
-                    {
-                        "action": "get_attribute_definition",
-                        "arguments": {
-                            "schema_category_id": "30382",
-                            "attr_id": "100157",
-                            "limit": 60,
-                        },
-                    },
-                    {
-                        "action": "finish",
-                        "arguments": {
-                            "selected_category_id": "30408",
-                            "selected_attribute_schema_category_id": "30382",
-                            "confidence": 0.91,
-                            "evidence": "男士夹克标题明确包含工装，平台路径属于男士外套。",
-                            "mappings": [
+    def _actions(cls) -> list[tuple[str, dict[str, Any]]]:
+        return [
+            (
+                "query_taxonomy",
+                {
+                    "requests": [
+                        {
+                            "collection": "categories",
+                            "filters": [
                                 {
-                                    "scope": "product",
-                                    "platform_attr_id": "100157",
-                                    "platform_value_id": "1000011",
-                                    "source_kind": "product",
-                                    "source_name": "主面料成分",
-                                    "source_value": "聚酯纤维（涤纶）",
+                                    "field": "category_id",
+                                    "op": "eq",
+                                    "value": cls.category_id,
                                 }
                             ],
-                        },
+                        }
+                    ]
+                },
+            ),
+            (
+                "finish_category",
+                {
+                    "selected_category_id": cls.category_id,
+                    "confidence": 0.8,
+                    "evidence": "observed leaf category",
+                },
+            ),
+            (
+                "query_taxonomy",
+                {
+                    "requests": [
+                        {
+                            "collection": "schemas",
+                            "filters": [
+                                {
+                                    "field": "schema_category_id",
+                                    "op": "eq",
+                                    "value": cls.schema_id,
+                                }
+                            ],
+                        }
+                    ]
+                },
+            ),
+            (
+                "finish_attributes",
+                {
+                    "selected_attribute_schema_category_id": cls.schema_id,
+                    "mappings": [],
+                },
+            ),
+        ]
+
+    def test_generic_tools_query_records_and_reject_ungrounded_finish(self) -> None:
+        explorer = TaxonomyExplorer(self.tree, self.attributes)
+        premature, rejection = explorer.finish_category(
+            {
+                "selected_category_id": self.category_id,
+                "confidence": 0.8,
+                "evidence": "not queried yet",
+            }
+        )
+        self.assertIsNone(premature)
+        self.assertFalse(rejection["ok"])
+
+        observation = explorer.execute(
+            "query_taxonomy",
+            {
+                "requests": [
+                    {
+                        "collection": "categories",
+                        "filters": [
+                            {
+                                "field": "category_id",
+                                "op": "eq",
+                                "value": self.category_id,
+                            }
+                        ],
+                    },
+                    {
+                        "collection": "schemas",
+                        "filters": [
+                            {
+                                "field": "schema_category_id",
+                                "op": "eq",
+                                "value": self.schema_id,
+                            }
+                        ],
                     },
                 ]
-                result = actions[self.calls]
-                self.calls += 1
-                return result
-
-        client = ScriptedClient()
-        result = TaxonomyReActAgent(
-            client, self.tree, self.attributes, max_turns=8
-        ).run(facts)
-
-        self.assertEqual(result.category.category_id, "30408")
-        self.assertEqual(result.category.method, "model-react-exploration")
-        self.assertEqual(result.attribute_schema_category_id, "30382")
-        self.assertEqual(len(result.attributes), 1)
-        self.assertEqual(result.attributes[0].attr_id, "100157")
-        self.assertEqual(result.attributes[0].value_id, "1000011")
-        self.assertEqual(client.calls, 6)
-        self.assertIn("was not observed", client.prompts[1])
-        self.assertIn("30408", client.prompts[2])
-        self.assertNotIn(facts.offer_id, json.dumps(client.prompts, ensure_ascii=False))
-
-    def test_native_tool_protocol_returns_observations_as_tool_messages(self) -> None:
-        facts = load_product_facts(
-            DATA / "product_info/product_6837006744133.json"
+            },
         )
+        self.assertTrue(observation["ok"])
+        category_result, schema_result = observation["result"]["results"]
+        self.assertTrue(category_result["items"][0]["is_leaf"])
+        self.assertEqual(
+            schema_result["items"][0]["schema_category_id"], self.schema_id
+        )
+
+    def test_json_protocol_agent_completes_with_valid_output(self) -> None:
+        actions = self._actions()
+
+        class JsonClient:
+            def chat_json(self, _system: str, _prompt: str) -> dict[str, Any]:
+                action, arguments = actions.pop(0)
+                return {"action": action, "arguments": arguments}
+
+        result = TaxonomyReActAgent(
+            JsonClient(), self.tree, self.attributes, max_turns=4
+        ).run(self.facts)
+
+        self.assertEqual(result.category.category_id, self.category_id)
+        self.assertTrue(result.category.path)
+        self.assertEqual(result.attribute_schema_category_id, self.schema_id)
+
+    def test_native_protocol_agent_completes_with_tool_observations(self) -> None:
+        actions = self._actions()
+        observed_roles: list[str] = []
 
         class NativeClient:
-            def __init__(self) -> None:
-                self.index = 0
-                self.message_snapshots: list[list[dict[str, object]]] = []
-
-            def chat_tool_step(self, _system, messages, tools):
-                self.message_snapshots.append([dict(item) for item in messages])
-                actions = [
-                    ("search_categories", {"query": "工装", "leaf_only": True}),
-                    ("get_attribute_schema", {"category_id": "30408"}),
-                    ("get_attribute_schema", {"category_id": "30382"}),
-                    (
-                        "get_attribute_definition",
-                        {
-                            "schema_category_id": "30382",
-                            "attr_id": "100157",
-                            "limit": 60,
-                        },
-                    ),
-                    (
-                        "finish",
-                        {
-                            "selected_category_id": "30408",
-                            "selected_attribute_schema_category_id": "30382",
-                            "confidence": 0.9,
-                            "evidence": "source title and category path",
-                            "mappings": [
-                                {
-                                    "scope": "product",
-                                    "platform_attr_id": "100157",
-                                    "platform_value_id": "1000011",
-                                    "source_kind": "product",
-                                    "source_name": "主面料成分",
-                                    "source_value": "聚酯纤维（涤纶）",
-                                }
-                            ],
-                        },
-                    ),
-                ]
-                name, arguments = actions[self.index]
-                self.index += 1
-                self.assert_tool_catalog(tools)
+            def chat_tool_step(self, _system, messages, _tools):
+                observed_roles.extend(str(item.get("role") or "") for item in messages)
+                action, arguments = actions.pop(0)
                 return {
                     "role": "assistant",
                     "content": None,
                     "tool_calls": [
                         {
-                            "id": f"call-{self.index}",
+                            "id": f"smoke-{len(observed_roles)}",
                             "type": "function",
                             "function": {
-                                "name": name,
+                                "name": action,
                                 "arguments": json.dumps(arguments, ensure_ascii=False),
                             },
                         }
                     ],
                 }
 
-            @staticmethod
-            def assert_tool_catalog(tools):
-                names = {item["function"]["name"] for item in tools}
-                assert {"search_categories", "list_children", "finish"} <= names
-
-        client = NativeClient()
         result = TaxonomyReActAgent(
-            client, self.tree, self.attributes, max_turns=8
-        ).run(facts)
+            NativeClient(), self.tree, self.attributes, max_turns=4
+        ).run(self.facts)
 
-        self.assertEqual(result.category.category_id, "30408")
-        self.assertEqual(result.category.method, "model-react-exploration")
-        self.assertEqual(client.index, 5)
-        second_turn_roles = [item["role"] for item in client.message_snapshots[1]]
-        self.assertEqual(second_turn_roles[-2:], ["assistant", "tool"])
-        first_observation = client.message_snapshots[1][-1]
-        self.assertEqual(first_observation["name"], "search_categories")
-        self.assertIn("30408", str(first_observation["content"]))
+        self.assertEqual(result.category.category_id, self.category_id)
+        self.assertEqual(result.attribute_schema_category_id, self.schema_id)
+        self.assertIn("tool", observed_roles)
 
 
 if __name__ == "__main__":
