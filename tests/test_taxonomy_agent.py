@@ -45,6 +45,27 @@ class TaxonomyAgentSmokeTests(unittest.TestCase):
         cls.category_record = observation["result"]["results"][0]["items"][0]
         cls.category_id = str(cls.category_record["category_id"])
         cls.schema_id = str(cls.category_record["available_schema_ids"][0])
+        attribute_observation = explorer.execute(
+            "query_taxonomy",
+            {
+                "requests": [
+                    {
+                        "collection": "attributes",
+                        "filters": [
+                            {
+                                "field": "schema_category_id",
+                                "op": "eq",
+                                "value": cls.schema_id,
+                            }
+                        ],
+                        "limit": 60,
+                    }
+                ]
+            },
+        )
+        cls.attribute_records = attribute_observation["result"]["results"][0][
+            "items"
+        ]
 
     @classmethod
     def _actions(cls) -> list[tuple[str, dict[str, Any]]]:
@@ -87,7 +108,18 @@ class TaxonomyAgentSmokeTests(unittest.TestCase):
                                     "value": cls.schema_id,
                                 }
                             ],
-                        }
+                        },
+                        {
+                            "collection": "attributes",
+                            "filters": [
+                                {
+                                    "field": "schema_category_id",
+                                    "op": "eq",
+                                    "value": cls.schema_id,
+                                }
+                            ],
+                            "limit": 60,
+                        },
                     ]
                 },
             ),
@@ -96,6 +128,17 @@ class TaxonomyAgentSmokeTests(unittest.TestCase):
                 {
                     "selected_attribute_schema_category_id": cls.schema_id,
                     "mappings": [],
+                    "unresolved_mappings": [
+                        {
+                            "scope": str(item["scope"]),
+                            "platform_attr_id": str(item["attr_id"]),
+                            "reason": (
+                                "The smoke client observed this schema attribute but "
+                                "has no synthetic source-to-platform mapping evidence."
+                            ),
+                        }
+                        for item in cls.attribute_records
+                    ],
                 },
             ),
         ]
