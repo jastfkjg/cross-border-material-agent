@@ -1690,13 +1690,6 @@ class ProductionPipelineMixin:
         work_dir: Path,
     ) -> None:
         facts, taxonomy = state.facts, state.taxonomy
-        generated_count = sum(1 for asset in state.assets if asset.generated)
-        fallback_assets = [asset for asset in state.assets if not asset.generated]
-        model_summary = (
-            self.client.model_summary
-            if self.client
-            else {"mode": "explicit offline deterministic fallback"}
-        )
         schema_id = (
             taxonomy.attribute_schema_category_id or taxonomy.category.category_id
         )
@@ -1706,248 +1699,198 @@ class ProductionPipelineMixin:
             if schema_id != taxonomy.category.category_id
             else f"属性映射使用叶子类目 schema {schema_id}。"
         )
-        failed_calls = [
-            item for item in state.api_calls if str(item.get("status") or "") != "ok"
-        ]
-        execution_mode = "在线模型生成与评估" if self.client else "显式离线确定性降级"
-        semantic_gate_note = (
-            f"本次完成 {len(state.agent_evaluations)} 轮全局多模态评估。"
-            if state.agent_evaluations
-            else "本次未执行全局多模态语义评估；仅通过确定性事实、规格与感知差异门禁。"
+
+        role_labels = {
+            "complete_product": "完整商品补充视角",
+            "primary_verified_detail": "核心可见细节",
+            "secondary_verified_detail": "第二可见细节",
+            "verified_variants": "已核验选项展示",
+            "verified_alternate_view": "已核验替代视角",
+            "verified_use_context": "有来源支持的使用场景",
+            "product_only_context": "纯商品应用场景",
+            "texture_closeup": "材质与表面近景",
+            "collar_and_closure": "领部与开合结构",
+            "color_variant_grid": "已核验颜色组合",
+            "hem_and_trim": "下摆与收边细节",
+            "back_silhouette": "背面轮廓",
+            "size_chart": "尺码信息",
+        }
+
+        def role_purpose(role: str) -> str:
+            normalized = str(role or "").strip().casefold()
+            if "size" in normalized:
+                return "把源图中可核验的尺码信息转化为清晰、易读的购买参考"
+            if any(token in normalized for token in ("variant", "color")):
+                return "集中呈现有来源支持的可选项，帮助买家快速比较"
+            if any(token in normalized for token in ("texture", "surface", "material")):
+                return "近距离呈现可见表面特征，补充主图无法传达的细节"
+            if any(
+                token in normalized
+                for token in ("collar", "closure", "construction", "detail", "trim", "hem")
+            ):
+                return "突出来源图可见的关键结构与做工，不扩展未展示部件"
+            if any(token in normalized for token in ("back", "side", "alternate")):
+                return "补足主图未覆盖的商品视角，帮助理解整体轮廓"
+            if any(token in normalized for token in ("use", "context", "lifestyle")):
+                return "在来源证据允许的范围内说明商品的实际呈现方式"
+            return "承担与其他图片不重复的商品信息补充职责"
+
+        reconciled = (
+            facts.reconciled_fact_ledger
+            if isinstance(facts.reconciled_fact_ledger, dict)
+            else {}
         )
-        raw_agent_plan = state.agent_plan if isinstance(state.agent_plan, dict) else {}
-        agent_plan_controls = {
-            "risk_priorities": [
-                value
-                for value in raw_agent_plan.get("risk_priorities", [])
-                if value in {f"A{index}" for index in range(1, 8)}
-            ],
-        }
-        agent_plan_controls = {
-            key: value
-            for key, value in agent_plan_controls.items()
-            if value is not None
-        }
+        decision_rows = [
+            item
+            for item in reconciled.get("attribute_decisions", [])
+            if isinstance(item, dict)
+        ]
+        decision_counts = {"publish": 0, "reject": 0, "machine_only": 0}
+        for item in decision_rows:
+            if not isinstance(item, dict):
+                continue
+            decision = str(item.get("decision") or "publish")
+            if decision in decision_counts:
+                decision_counts[decision] += 1
+        conflict_count = sum(
+            isinstance(item, dict) for item in reconciled.get("conflicts", [])
+        )
 
-        def brief(value: str) -> str:
-            cleaned = re.sub(r"https?://\S+", "[url]", value.replace("\n", " "))
-            return cleaned[:260]
+        market_labels = {
+            "en": "美国英语（en-US）",
+            "ko": "韩国市场（ko-KR）",
+            "pt": "巴西葡萄牙语（pt-BR）",
+        }
+        default_market_angles = {
+            "en": "采用自然、直接的商品表达；公制数据保留来源值，并在有数据时提供英制换算。",
+            "ko": "采用自然简洁的韩国购物语气并保留公制，不推导未经证实的韩国尺码对应。",
+            "pt": "采用巴西电商常用词汇与公制表达，避免欧洲葡语措辞和未经证实的地区尺码映射。",
+        }
+        market_lines = [
+            f"- **{market_labels[language]}：** {default_market_angles[language]}"
+            for language in ("en", "ko", "pt")
+        ]
 
-        known_claim_ids = {item.claim_id for item in state.claim_ledger}
-        copy_claim_reference_lines: list[str] = []
-        for language, payload in localization_payloads.items():
-            refs = payload.get("claim_refs") if isinstance(payload, dict) else None
-            referenced = sorted(
-                {
-                    value
-                    for value in re.findall(r"\bC\d{3}\b", json.dumps(refs or {}))
-                    if value in known_claim_ids
-                }
+        detail_lines: list[str] = []
+        for index in range(1, 6):
+            role = (
+                state.creative_plan.detail_roles[index - 1]
+                if index <= len(state.creative_plan.detail_roles)
+                else f"detail_{index}"
             )
-            if referenced:
-                copy_claim_reference_lines.append(
-                    f"- {language}: {', '.join(referenced)}"
-                )
+            role_label = role_labels.get(str(role), str(role).replace("_", " "))
+            detail_lines.append(
+                f"- **detail_image_{index}.jpeg｜{role_label}：** {role_purpose(str(role))}。"
+            )
+
+        if decision_rows:
+            fact_decision_lines = [
+                f"本次共读取 {len(facts.attributes)} 条商品属性、{len(facts.skus)} 个 SKU、"
+                f"{len(facts.all_image_urls())} 个不重复源图片 URL；识别到 {conflict_count} 组需要裁决的事实冲突。",
+                f"属性处理结果为：{decision_counts['publish']} 项可发布、{decision_counts['reject']} 项拒绝发布、"
+                f"{decision_counts['machine_only']} 项仅保留在机器层。",
+            ]
+        else:
+            fact_decision_lines = [
+                f"本次共读取 {len(facts.attributes)} 条商品属性、{len(facts.skus)} 个 SKU、"
+                f"{len(facts.all_image_urls())} 个不重复源图片 URL。",
+                "本次运行未产生独立的视觉冲突裁决明细；公开事实仍只取自源数据、可直接核验的源图信息和确定性换算，"
+                "无法确认的字段不进入扩展性营销表达。",
+            ]
+
+        video_asset = next(
+            (item for item in state.assets if item.name == "product_video.mp4"), None
+        )
+        if video_asset is not None and video_asset.generated:
+            video_delivery = (
+                "使用已核验首帧生成短时动态展示，以克制镜头运动串联商品轮廓和核心细节。"
+            )
+        else:
+            video_delivery = (
+                "使用最终通过质检的图片组成短时目录式展示，确保视频可播放且与最终图片版本一致。"
+            )
 
         lines = [
             "# 商品本地化素材生成策略说明",
             "",
-            "## 1. 本次商品与目标",
+            "## 1. 商品定位与交付目标",
             "",
             f"- 商品 ID：{facts.offer_id}",
             f"- 数据来源：{facts.platform}",
             f"- 源商品 URL：{facts.source_url}",
-            "- 交付目标：英文、韩文、巴西葡萄牙文文案，1 张主图、5 张详情图、1 个商品视频。",
+            f"- AliExpress 叶子类目：{taxonomy.category.name}（{taxonomy.category.category_id}）",
+            "- 交付目标：形成可直接进入上架流程的三语文案、1 张主图、5 张职责互补的详情图和 1 个商品视频。",
             "",
-            "## 2. 事实一致性策略",
+            "本次策略以“先确认商品事实，再组织市场表达，最后完成跨素材一致性验收”为主线。"
+            "视觉上保持同一商品身份和统一的商业质感；信息上把买家阅读层与平台解析层分开，"
+            "兼顾本地化体验和上架字段完整性。",
             "",
-            "Agent 首先把商品 JSON 归一化为内部事实账本。标题、属性、SKU、图片 URL、商品 ID 和来源均在内部保留证据位置；"
-            "只有源 JSON、源图片直接观察或确定性单位换算得到的信息可以进入文案和素材提示词。"
-            "所有模型文案均经过结构、数值、事实和平台内容规则的确定性复核。",
-            "源图理解完成后，两个独立模型按统一的通用证据协议裁决结构化外观属性与可信像素之间的冲突；"
-            "代码按属性索引聚合发布、拒绝或仅机器字段决定，不包含具体商品特征的硬编码。裁决后的事实账本是文案、"
-            "素材生成和最终评估共同使用的权威外观证据。",
-            "三份文案只发布目标语言的买家文案和本地化显示值，不暴露中文原值或原始 JSON Pointer；"
-            "本地化 Source 列标明商品事实、平台映射或卖家声明。平台类目 ID、属性 ID/Value ID、"
-            "SKU ID/Spec ID 仍保留在精简表格中，兼顾上架解析与阅读体验。",
+            "## 2. 事实一致性与源数据冲突处理",
             "",
-            f"本次共读取 {len(facts.attributes)} 条商品属性、{len(facts.skus)} 个 SKU、"
-            f"{len(facts.all_image_urls())} 个不重复源图片 URL。",
-            f"从源详情图核验并结构化 {len(facts.size_chart_rows)} 行服装尺码数据。",
-            f"内部 Claim Ledger 共 {len(state.claim_ledger)} 条；每条记录来源类型、原始字段和证据指针，"
-            "买家文案只开放 allowed_surfaces 包含 buyer_copy 的声明。",
-            f"Canonical Product State 版本：{state.canonical_product_state.get('version', '未生成')}。",
-            f"Evidence Sufficiency 版本：{state.evidence_sufficiency.get('version', '未生成')}；"
-            f"可用于生成的明确源图索引为 {state.evidence_sufficiency.get('generation_reference_indexes', [])}。",
-            f"Expected Delivery Spec 版本：{state.expected_delivery_spec.get('version', '未生成')}；"
-            f"冻结保留 {len(state.expected_delivery_spec.get('required_mapping_sources', []))} 条平台映射来源覆盖。",
-            f"当前依赖状态：{json.dumps(state.dependency_state, ensure_ascii=False)}。",
+            "Agent 将商品 JSON、SKU、平台类目快照和源图片观察统一整理为一个可追溯事实状态。"
+            "标题和结构化属性用于提供卖家声明，源图片用于核验外观；两者冲突时，不把冲突字段直接写入买家文案，"
+            "而是将可见事实、仅机器保留字段和拒绝发布字段分开处理。",
             "",
-            "### Claim Ledger（可发布声明与证据）",
+            *fact_decision_lines,
+            f"从源详情图核验并结构化 {len(facts.size_chart_rows)} 行尺码数据；只有标签、单位和 SKU 能够对应时才进入成品。",
+            "所有三语文案、图片提示和媒体说明共享同一份裁决后事实。任何数值转换只执行确定性换算，"
+            "不补全材质含量、性能、认证、地区尺码或其他源数据未支持的信息。",
             "",
-            "| Claim ID | 声明概念 | 原始值 | 来源类型 | 来源字段 | 证据指针 |",
-            "|---|---|---|---|---|---|",
-            *[
-                "| "
-                + " | ".join(
-                    (
-                        item.claim_id,
-                        brief(item.concept).replace("|", "\\|"),
-                        (
-                            "[卖家标题原文已在内部账本保留]"
-                            if item.source_type == "seller_title"
-                            else brief(item.value).replace("|", "\\|")
-                        ),
-                        item.source_type,
-                        brief(item.source_name).replace("|", "\\|"),
-                        brief(item.evidence_pointer).replace("|", "\\|"),
-                    )
-                )
-                + " |"
-                for item in state.claim_ledger
-                if "buyer_copy" in item.allowed_surfaces
-            ],
-            *(
-                ["", "模型返回的买家文案声明引用：", *copy_claim_reference_lines]
-                if copy_claim_reference_lines
-                else []
-            ),
-            "",
-            "## 3. AliExpress 类目与属性策略",
+            "## 3. 平台类目与可上架结构",
             "",
             f"- 叶子类目 ID：{taxonomy.category.category_id}",
             f"- 叶子类目名称：{taxonomy.category.name}",
             f"- 类目路径：{taxonomy.category.path}",
-            f"- 决策方式：{taxonomy.category.method}",
-            f"- 置信度：{taxonomy.category.confidence:.2f}",
             f"- 命中的平台商品/销售属性数：{len(taxonomy.attributes)}",
             "",
-            "在线模式由 Taxonomy ReAct agent 使用通用 query/read 工具自行探索类目、schema、属性和值集合；"
-            "代码不预排语义候选，只校验最终叶子节点以及模型提交的每个 ID、枚举关系和来源字段。"
-            "本地词法排序仅在显式离线或模型协议失败时作为可审计降级。",
+            "类目选择以商品类型、使用人群、形态和已核验属性为依据，并只接受平台快照中存在的叶子节点。"
+            "最终提交的属性 ID、枚举 Value ID、销售属性和 SKU 组合均回查平台数据关系；证据不足的必填项保留为未决，"
+            "不通过猜测补齐。",
             schema_note,
             "",
-            "## 4. 本地化策略",
+            "## 4. 三个目标市场的本地化策略",
             "",
-            "- 英文按 en-US 电商语气编写，涉及体重时同时给出 lb。",
-            "- 英文中的厘米规格同时给出确定性英寸换算；韩文与巴西葡萄牙文保留当地常用公制。",
-            "- 韩文按 ko-KR 自然购物语气编写，避免机械直译和未经证实的韩国尺码映射。",
-            "- 葡萄牙文按 pt-BR 编写，避免欧洲葡语表达和未经证实的 P/M/G 映射。",
-            "- 三份文案共享同一个不可变商品 ID、URL、叶子类目、属性和完整 SKU 表。",
+            *market_lines,
+            "",
             "- 买家文案按 Feature → 可见结构优势 → 保守购买价值组织；任一步缺少事实或像素证据时停止延伸。",
             "- 买家文案与机器附录独立构建：模型只生成标题、概述、卖点和尺码提示；代码从已核验的类目、属性、"
-            "SKU 和媒体契约确定性渲染附录，因此文案修订不能改变任何可解析 ID 或表格行。",
-            "- 卖家提供的体重范围只按完全匹配的尺码标签写入对应 SKU，并同时展示 kg/lb，不推导地区尺码。",
-            "- 可辨识的源尺码表先由视觉模型转录，再按SKU尺码代码、来源图角色和数值范围进行确定性校验；"
-            "英文显示 cm/in 与 kg/lb，韩文和巴西葡萄牙文保留 cm/kg。",
-            f"- 文案生成来源：{json.dumps(localization_sources, ensure_ascii=False)}",
+            "SKU 和媒体契约确定性渲染附录，保证三种语言中的商品 ID、URL、平台映射和 SKU 信息一致。",
             "",
-            "## 5. 图片与视频生成策略",
+            "## 5. 六图视觉叙事与视频职责",
             "",
-            f"- 本次执行模式：{execution_mode}。",
-            f"- Campaign Style Lock：{state.creative_plan.visual_theme}",
-            f"- 创意计划来源：{plan_model}",
-            f"- 模型配置：{json.dumps(model_summary, ensure_ascii=False)}",
-            f"- 顶层模型选择主图候选数 {state.creative_plan.main_candidate_count}，参考图角色优先级为 "
-            f"{json.dumps(state.creative_plan.main_reference_roles, ensure_ascii=False)}；候选仍须通过身份、结构、颜色和文件硬门禁。",
-            "- 主图回退源图须优先满足无人物、无关道具、单一完整商品和干净中性背景；没有合格源图时明确记录质量降级。",
-            f"- 五张详情图的商业职责由顶层模型按当前证据选择：{json.dumps(state.creative_plan.detail_roles, ensure_ascii=False)}。"
-            "若源详情图存在可核验尺码表，确定性重绘是事实/可读性边界，不依赖品类关键词推断。",
-            f"- 各详情图候选数由顶层模型选择：{json.dumps(state.creative_plan.detail_candidate_counts, ensure_ascii=False)}。"
-            "候选先执行逐槽身份与结构硬门禁，再把主图和全部详情候选"
-            "交给集合级编辑器联合选片；只有六图组合至少提升 3 分且所有替换图无硬伤时才原子安装。",
-            "- 视频以最终主图或其源 URL 为首帧，镜头语义由顶层模型规划，代码仅维护身份稳定、禁用不受支持内容并默认移除未审核音轨。",
-            f"- 本次模型直接生成并通过校验的素材数：{generated_count}。",
+            "为兼顾三个市场并降低文化误读，整体视觉采用克制、清晰、以商品为中心的电商表达："
+            "主图负责快速识别，详情图按实际证据补充整体视角、结构、表面、选项或使用信息，视频负责串联最终成品。"
+            "六张图片通过同一商品身份、克制背景和协调光线建立系列感，同时避免只更换构图却重复表达。",
             "",
-            "## 6. 有界 Agent 规划、评估与定向修复",
+            "- **main_image.jpeg｜转化入口：** 使用单一完整商品和干净近白背景建立第一识别锚点；"
+            "不添加文字、价格、徽章、水印或无来源道具。",
+            *detail_lines,
+            f"- **product_video.mp4｜动态总览：** {video_delivery}",
             "",
-            "同一个顶层工具调用 Agent 对话贯穿规划和成品控制。它可按需查看商品事实、类目、源图证据、产物状态与工具能力，"
-            "并自主选择分镜、参考角色、候选数量、生产启动次序、评审时机、返修目标和完成时机。独立多模态评估器只向顶层 Agent"
-            "返回有证据的缺陷；宿主不再通过固定 repair planner 规定修复路线。",
-            "所有修复均先写入临时文件，完成候选语义选优、文案事实/schema 校验或视频播放校验后才原子替换；"
-            "修复失败会保留上一版，不会因为评估意见自动降级为源图或幻灯片。",
-            "控制器对完整交付生成内容指纹，同一指纹的独立评审只执行一次。工具报告 completed 后仍须确认目标 hash 变化；"
-            "每个目标独立保存检查点，并在依赖同步和本地一致性通过后提交。变化后的状态必须再次 review；finish 工具会拒绝"
-            "过期评审、文件契约失败，以及未解决的 A1/A2/A5 重大问题。除此之外，是否继续优化由顶层模型结合剩余预算判断。",
-            "- LLM 自由文本计划仅用于内部生成提示，不作为商品事实写入交付；策略文档只披露经过白名单筛选的控制参数。",
-            f"- Agent 控制参数：{json.dumps(agent_plan_controls, ensure_ascii=False)}",
-            f"- 已完成全局评估轮次：{len(state.agent_evaluations)}。",
-            f"- 已执行定向修复工具调用：{len(state.agent_actions)}。",
-            f"- {semantic_gate_note}",
+            "候选图片先独立检查商品身份、结构、颜色、文字和重大瑕疵，再以六图集合检查重复职责和信息覆盖。"
+            "只有通过硬性门禁且不削弱现有成品的候选才会替换当前素材。",
             "",
-            "## 7. 合规与质检",
+            "## 6. 事实一致、合规与素材质检",
             "",
-            "生成提示词和最终文案均通过平台内容规则门禁。图片下载后统一解码为 RGB JPEG，并校验尺寸、"
-            "文件大小、空白图和近重复图；全局评估时模型生成图与可信源图共同输入独立视觉评估，检查商品身份、"
-            "具体结构、分镜覆盖、意外文字、水印和重大瑕疵。视频除容器和 200MB 上限外，还须完成全视频流解码，"
-            "生成视频同时进入源图对照的时序语义评估。"
-            "所有输出在写入最终目录前进行一次完整交付质检，写入后再次复核。",
-            "源图检查区分商品本身的固有设计与背景营销元素；不适合发布的视觉内容不会进入生成参考或优先回退素材。"
-            "视频语义质检缺失、超时或字段不完整时按失败处理。",
-            "主图与全部详情图共同执行感知哈希去重；详情图等比保留商品主体时使用低对比度模糊延展背景，"
-            "避免大块纯色填边。回退视频只使用感知上不同的最终图片，每个镜头被显式裁成有限时长后再拼接。",
+            "- **内容合规：** 买家文案排除价格、折扣、联系方式、站外营销、评级、无来源认证和身体改造类表达；"
+            "生成图片与视频禁止新增文字、平台标记、二维码、水印和品牌标识。",
+            "- **事实一致：** 文案声明、平台映射、SKU 表、图片职责和媒体说明均投影自同一裁决后事实；"
+            "视觉与结构化字段冲突时，公开层使用已核验结果并保留内部证据链。",
+            "- **图片质检：** 检查格式、尺寸、文件大小、空白图、近重复、主体完整度、结构保持和六图职责覆盖。",
+            "- **视频质检：** 完整解码视频流，检查时长、容器、分辨率、可播放性、身份稳定和不可容忍瑕疵。",
+            "- **修复策略：** 只针对有具体证据的缺陷做单项返修；新候选失败时保留已验收版本，"
+            "任何改动均同步其文案、媒体说明和视频依赖后重新评审。",
             "",
-            "## 8. 降级与稳定性",
+            "## 7. 可直接上架的交付保障",
             "",
-            "API 请求对限流和暂时性错误执行指数退避；图片优先走同步多模态生成，视频异步任务保存 task_id 并轮询。"
-            "只有初次图片模型不可用、没有可接受候选或下载失败时，才用经规格归一化的安全商品源图保证完整交付；"
-            "只有初次视频生成不可用时，才使用最终图片集生成多镜头 H.264 商品展示视频。全局评估不会触发回退，"
-            "而是调用定向重做/修改工具；重做失败时保留原成品。",
-            f"- 本次 API 调用记录数：{len(state.api_calls)}；每次调用均记录模型、耗时、状态及调用后的剩余时间。",
-            f"- 失败 API 调用数：{len(failed_calls)}。",
+            "最终交付严格使用平台要求的 11 个文件名。三份文案均包含标题、来源平台、商品 ID 与 URL、"
+            "叶子类目、平台属性、SKU/Spec ID、五张详情图说明和视频说明；机器附录保持字段可解析，"
+            "买家阅读层保持目标语言自然表达。",
+            "",
+            "所有素材先在临时目录完成事实、格式、规格和语义质检，再原子写入输出目录并执行一次完整复核。"
+            "这套流程的目标不是最大化生成数量，而是在一次运行内稳定交付一组事实一致、职责完整、"
+            "可播放且可直接进入 AliExpress 上架流程的本地化素材。",
         ]
-        lines.extend(["", "本次实际媒体结果：", ""])
-        lines.extend(
-            f"- {asset.name}：{asset.model}；{asset.description or '未提供说明'}。"
-            for asset in state.assets
-        )
-        if state.agent_evaluations:
-            lines.extend(["", "全局评估轨迹：", ""])
-            lines.extend(
-                f"- 评估轮次 {item.round_index}：模型 {json.dumps(item.evaluator_models, ensure_ascii=False)}；"
-                f"单模型证据惩罚分 {json.dumps(item.model_weighted_scores, ensure_ascii=False)}；"
-                f"裁决后加权分 {item.weighted_score:.1f}；裁决后维度分 {json.dumps(item.dimension_scores, ensure_ascii=False)}；"
-                f"ready={item.ready_for_delivery}；{brief(item.summary)}"
-                for item in state.agent_evaluations
-            )
-        if state.agent_snapshots:
-            lines.extend(["", "版本快照与最终选择：", ""])
-            lines.extend(
-                f"- {item.get('snapshot_id')}：完成 {item.get('after_repair_rounds')} 轮修复；"
-                f"加权分 {float(item.get('weighted_score', 0.0)):.1f}；"
-                f"{'最终提交' if item.get('selected') else '保留备选'}。"
-                for item in state.agent_snapshots
-            )
-        if state.agent_actions:
-            lines.extend(["", "定向修复轨迹：", ""])
-            lines.extend(
-                f"- 第 {item.round_index + 1} 轮 {item.tool}/{item.target}："
-                f"{item.status}；{brief(item.detail)}"
-                for item in state.agent_actions
-            )
-        if fallback_assets:
-            lines.extend(["", "本次发生的素材回退：", ""])
-            lines.extend(
-                f"- {asset.name}：{asset.model}；原因：{brief(asset.fallback_reason or '模型产物不可用')}。"
-                for asset in fallback_assets
-            )
-        if failed_calls:
-            lines.extend(["", "API 失败摘要：", ""])
-            lines.extend(
-                f"- {item.get('operation', 'unknown')}/{item.get('model', 'unknown')}："
-                f"{brief(str(item.get('error') or item.get('status') or 'error'))}"
-                for item in failed_calls[:12]
-            )
-        if state.warnings:
-            lines.extend(
-                [
-                    "",
-                    "运行质检记录：",
-                    "",
-                    f"- 共记录 {len(state.warnings)} 项内部质检事件。",
-                ]
-            )
-            lines.extend(f"- {brief(item)}" for item in state.warnings[:16])
         lines.append("")
         (work_dir / "strategy_document.md").write_text(
             "\n".join(lines), encoding="utf-8"
