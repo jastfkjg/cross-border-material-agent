@@ -500,7 +500,9 @@ class BoundedDeliveryAgent:
             "Resolve generic product-appearance conflicts; never rely on product-specific exception lists. "
             "Consistent direct observations from multiple trusted source images take precedence over a conflicting "
             "seller appearance label. Structured identifiers, measurements and non-visual business facts remain "
-            "structured facts unless directly disproved by valid evidence."
+            "structured facts unless directly disproved by valid evidence. A fact that cannot be seen in pixels is "
+            "not thereby contradicted: material composition, marketplace attributes and other non-visual facts may "
+            "remain grounded for taxonomy or machine surfaces even when they are unsuitable for visual generation."
         )
         prompt = f"""
 Reconcile the structured seller facts with the compact observations from all inspected source images.
@@ -528,6 +530,9 @@ Rules:
 - When direct source pixels conflict with structured appearance text, select the pixels for canonical_value.
 - Absence is evidence only when the relevant structure is clearly visible in multiple independent source views.
 - Do not infer materials, performance, measurements, brand, care, sizing equivalence, or unseen construction.
+- Keep surface decisions distinct: visual non-observability can limit buyer copy or media generation without
+  invalidating a source-grounded marketplace mapping. Reject a structured value only for direct contradictory
+  evidence, not because the images cannot establish it.
 
 Seller title:
 {json.dumps(facts.source_title, ensure_ascii=False)}
@@ -857,6 +862,15 @@ question to investigate, never as evidence by itself):
             facts, assets, work_dir
         )
         copy_artifacts = self._copy_artifact_evidence(work_dir)
+        allowed_targets = {
+            target
+            for item in tools.catalog()
+            for target in item.get("allowed_targets", [])
+        }
+        allowed_targets.update(
+            str(item.get("name") or "") for item in manifest if item.get("name")
+        )
+        allowed_targets.update({"delivery", "six-image-set", "taxonomy"})
         system = (
             "You are an independent multimodal defect finder, not a scorer, producer, repair planner, "
             "or final decision maker. Return JSON only. Report only defects supported by concrete supplied "
@@ -870,10 +884,11 @@ question to investigate, never as evidence by itself):
             )
         )
         prompt = f"""
-Evaluate this whole delivery. Source-reference images are listed first in the visual input map;
-directly reviewable delivery image URLs follow. The video input, when present, is the actual generated
-video URL. A provenance_source_url is never the final artifact and must not be used to claim that the
-final artifact contains the source image's text, people, background, layout, or other pixels.
+Evaluate this whole delivery. Every image in the visual input map is a directly reviewable final delivery
+image. Source references are intentionally excluded from this pass because source-to-output comparison is
+already represented by the independent six-image set review. The video input, when present, is the actual
+generated video URL. A provenance_source_url is never the final artifact and must not be used to claim that
+the final artifact contains the source image's text, people, background, layout, or other pixels.
 Local deterministic artifacts cannot be uploaded to the model. Judge them only from final_artifact
 physical/hash/rendered-text evidence in the manifest. If that evidence cannot establish a semantic
 defect, do not invent one and do not request a repair for it.
@@ -895,6 +910,10 @@ audit tables remain defects.
 Treat the six-image set review below as independent evidence about semantic duplication and missing
 commercial roles. A set-level defect is more important than a cosmetic per-image preference.
 It may predate repairs in later rounds, so corroborate it against the current manifest and media.
+Treat quantified claims in a creative role or caption (for example, "all verified variants") as an
+artifact contract: compare the visible result with frozen source_variant_expectations and report an
+omission or unsupported addition. Do not require every source variant unless the current plan or copy
+actually claims that coverage.
 
 Complete rubric definitions and weights (use these exact dimension meanings):
 {json.dumps(_RUBRIC_DEFINITIONS, ensure_ascii=False)}
@@ -936,8 +955,8 @@ Artifact manifest and local physical inspection:
 Visual input map:
 {json.dumps([{"input_index": index, "url": url} for index, url in enumerate(image_urls)], ensure_ascii=False)}
 
-Allowed artifact target names (use these exact names when applicable):
-{json.dumps(sorted({target for item in tools.catalog() for target in item.get('allowed_targets', [])}), ensure_ascii=False)}
+Allowed artifact target names (use only these exact names):
+{json.dumps(sorted(allowed_targets), ensure_ascii=False)}
 """.strip()
         minimum_score = max(
             _INTERNAL_MINIMUM_WEIGHTED_SCORE,
@@ -964,6 +983,7 @@ Allowed artifact target names (use these exact names when applicable):
                         payload,
                         round_index=round_index,
                         evaluator_model=model,
+                        allowed_targets=allowed_targets,
                     ),
                     "",
                 )
@@ -1290,13 +1310,6 @@ Current six-image set review:
         self, facts: ProductFacts, assets: list[AssetResult], work_dir: Path
     ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
         manifest: list[dict[str, Any]] = []
-        source_references = list(
-            dict.fromkeys(
-                facts.product_image_urls[:3]
-                + facts.sku_image_urls[:1]
-                + facts.description_image_urls[:1]
-            )
-        )
         delivery_urls = [
             asset.source_url
             for asset in assets
@@ -1304,7 +1317,11 @@ Current six-image set review:
             and asset.generated
             and asset.source_url
         ]
-        image_urls = list(dict.fromkeys(source_references + delivery_urls))
+        # Final-delivery evaluators must never receive source references in the
+        # same visual list.  Even with prompt labels, multimodal models can bind
+        # a source image defect to a final artifact target.  Source fidelity is
+        # assessed separately by the visual-set review.
+        image_urls = list(dict.fromkeys(delivery_urls))
         video_urls = [
             asset.source_url
             for asset in assets
@@ -1388,7 +1405,11 @@ Current six-image set review:
         return manifest, image_urls, video_urls
 
     @staticmethod
-    def _canonical_finding(item: dict[str, Any], evaluator_model: str) -> dict[str, Any] | None:
+    def _canonical_finding(
+        item: dict[str, Any],
+        evaluator_model: str,
+        allowed_targets: set[str] | None = None,
+    ) -> dict[str, Any] | None:
         dimension = str(item.get("dimension") or "").strip().upper()
         severity = str(item.get("severity") or "minor").strip().lower()
         target = Path(str(item.get("target") or "delivery").strip()).name or "delivery"
@@ -1399,6 +1420,8 @@ Current six-image set review:
         ).strip("-") or "general"
         evidence = str(item.get("evidence") or "").strip()
         if dimension not in _RUBRIC_WEIGHTS or severity not in {"blocker", "major", "minor"} or not evidence:
+            return None
+        if allowed_targets is not None and target not in allowed_targets:
             return None
         defect_id = f"{dimension}:{target}:{criterion}"
         return {
@@ -1434,6 +1457,7 @@ Current six-image set review:
         *,
         round_index: int,
         evaluator_model: str = "",
+        allowed_targets: set[str] | None = None,
     ) -> AgentEvaluation:
         raw_findings = payload.get("findings")
         if raw_findings is None:
@@ -1444,7 +1468,9 @@ Current six-image set review:
             clean
             for item in raw_findings
             if isinstance(item, dict)
-            for clean in [cls._canonical_finding(item, evaluator_model)]
+            for clean in [
+                cls._canonical_finding(item, evaluator_model, allowed_targets)
+            ]
             if clean is not None
         ][:30]
         scores, weighted = cls._scores_from_findings(findings)

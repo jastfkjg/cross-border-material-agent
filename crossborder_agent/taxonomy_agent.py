@@ -144,6 +144,18 @@ class TaxonomyExplorer:
             "source_name": {"type": "string"},
             "source_value": {"type": "string"},
         }
+        unresolved_properties = {
+            "scope": {"type": "string", "enum": ["product", "sales"]},
+            "platform_attr_id": {"type": "string"},
+            "reason": {
+                "type": "string",
+                "minLength": 8,
+                "description": (
+                    "Evidence-based reason this required or source-relevant attribute "
+                    "cannot be mapped without guessing."
+                ),
+            },
+        }
         filter_properties = {
             "field": {
                 "type": "string",
@@ -251,10 +263,20 @@ class TaxonomyExplorer:
                             "additionalProperties": False,
                         },
                     },
+                    "unresolved_mappings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": unresolved_properties,
+                            "required": list(unresolved_properties),
+                            "additionalProperties": False,
+                        },
+                    },
                 },
                 [
                     "selected_attribute_schema_category_id",
                     "mappings",
+                    "unresolved_mappings",
                 ],
             ),
         ]
@@ -836,12 +858,134 @@ class TaxonomyExplorer:
                 for item in schema.get("attributes") or []
                 if item.get("required")
             ]
+
+        schema = attribute_schema_definition(self.attribute_data, schema_id)
+        definitions = {
+            (str(item.get("scope") or ""), str(item.get("attr_id") or "")): item
+            for item in schema.get("attributes") or []
+            if item.get("attr_id")
+        }
+        unresolved_rows = args.get("unresolved_mappings")
+        if unresolved_rows is None:
+            unresolved_rows = []
+        elif not isinstance(unresolved_rows, list):
+            return None, self._error(
+                "finish_attributes", "unresolved_mappings must be an array"
+            )
+        unresolved: dict[tuple[str, str], str] = {}
+        unresolved_errors: list[str] = []
+        for index, row in enumerate(unresolved_rows):
+            if not isinstance(row, dict):
+                unresolved_errors.append(
+                    f"unresolved mapping {index} is not an object"
+                )
+                continue
+            key = (
+                str(row.get("scope") or ""),
+                str(row.get("platform_attr_id") or ""),
+            )
+            reason = str(row.get("reason") or "").strip()
+            if key not in definitions:
+                unresolved_errors.append(
+                    f"unresolved mapping {index} references an unknown schema attribute"
+                )
+            elif (schema_id, key[1]) not in self.inspected_attribute_ids:
+                unresolved_errors.append(
+                    f"unresolved mapping {index} references attribute {key[1]} before inspecting it"
+                )
+            elif len(reason) < 8:
+                unresolved_errors.append(
+                    f"unresolved mapping {index} needs an evidence-based reason"
+                )
+            else:
+                unresolved[key] = reason[:1000]
+        if unresolved_errors:
+            return None, self._error(
+                "finish_attributes", "; ".join(unresolved_errors)
+            )
+
+        present = {
+            ("sales" if item.sales_attribute else "product", item.attr_id)
+            for item in mapped.attributes
+        }
+        product_rows = [(item.name, item.value) for item in facts.attributes]
+        sku_rows = list(
+            dict.fromkeys(
+                (item.name, item.value)
+                for sku in facts.skus
+                for item in sku.attributes
+            )
+        )
+
+        def evidence_candidates(definition: dict[str, Any]) -> list[dict[str, str]]:
+            scope = str(definition.get("scope") or "")
+            attribute_name = _search_text(definition.get("name"))
+            values = {
+                _search_text(item.get("name"))
+                for item in definition.get("values") or []
+                if _search_text(item.get("name"))
+            }
+            source_rows = sku_rows if scope == "sales" else product_rows
+            candidates: list[dict[str, str]] = []
+            for source_name, source_value in source_rows:
+                if (
+                    _search_text(source_name) == attribute_name
+                    or _search_text(source_value) in values
+                ):
+                    candidates.append(
+                        {
+                            "source_kind": "sku" if scope == "sales" else "product",
+                            "source_name": source_name,
+                            "source_value": source_value,
+                        }
+                    )
+            return candidates[:20]
+
+        completion_gaps: list[dict[str, Any]] = []
+        for key, definition in definitions.items():
+            if key in present or key in unresolved:
+                continue
+            candidates = evidence_candidates(definition)
+            required = bool(definition.get("required"))
+            # Sales dimensions are relevant when their schema name or one of
+            # their enum values has a spelling-level match in the supplied SKU
+            # evidence.  This is a grounding/completeness signal, not a host
+            # semantic mapping decision.
+            source_relevant_sales = key[0] == "sales" and bool(candidates)
+            if required or source_relevant_sales:
+                completion_gaps.append(
+                    {
+                        "scope": key[0],
+                        "platform_attr_id": key[1],
+                        "platform_attribute_name": str(
+                            definition.get("name") or ""
+                        ),
+                        "required": required,
+                        "matching_source_evidence": candidates,
+                    }
+                )
+        if completion_gaps:
+            return None, self._error(
+                "finish_attributes",
+                "attribute selection is incomplete; map each grounded item or explicitly include it in "
+                "unresolved_mappings with an evidence-based reason: "
+                + json.dumps(completion_gaps, ensure_ascii=False),
+            )
         return mapped, self._ok(
             "finish_attributes",
             {
                 "selected_category_id": category.category_id,
                 "selected_attribute_schema_category_id": schema_id,
                 "accepted_mapping_count": len(mapped.attributes),
+                "unresolved_mapping_count": len(unresolved),
+                "unresolved_mappings": [
+                    {
+                        "scope": scope,
+                        "platform_attr_id": attr_id,
+                        "reason": reason,
+                    }
+                    for (scope, attr_id), reason in unresolved.items()
+                ],
             },
         )
 
@@ -974,7 +1118,11 @@ class TaxonomyReActAgent:
                 "and enum value ID must have appeared in query/read output. Each mapping contains scope, "
                 "platform_attr_id, platform_value_id, source_kind, and source_name/source_value copied exactly from "
                 "PRODUCT EVIDENCE. Reconciled canonical_sources may use source_kind=canonical; never relabel a raw "
-                "contradictory seller field as canonical. Omit uncertain mappings; an empty mapping list is valid."
+                "contradictory seller field as canonical. Prioritize every required product attribute and every sales "
+                "dimension directly represented by SKU evidence. finish_attributes requires unresolved_mappings: for "
+                "each required or source-relevant attribute you cannot safely map, name the inspected platform attr ID "
+                "and explain the evidence gap. This is a disposition ledger, not permission to skip inspection. "
+                "Do not treat a source-grounded non-visual fact as invalid merely because pixels cannot verify it."
             )
         return (
             shared

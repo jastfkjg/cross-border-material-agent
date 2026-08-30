@@ -46,7 +46,12 @@ _MEDIA_HEADINGS = {
 
 
 def _description_language_surfaces(text: str, language: str) -> tuple[str, str]:
-    """Separate locale-facing copy from the exact machine listing appendix."""
+    """Separate locale-facing prose from the exact machine listing appendix.
+
+    Media descriptions are shopper-facing, but their exact artifact filenames
+    are protocol metadata.  Keep the complete media block in the machine
+    appendix while exposing only the captions to language-quality checks.
+    """
 
     headings = list(re.finditer(r"(?m)^## ", text))
     appendix_start = headings[2].start() if len(headings) >= 3 else len(text)
@@ -64,13 +69,15 @@ def _description_language_surfaces(text: str, language: str) -> tuple[str, str]:
                 else len(text)
             )
             media_surface = text[match.start() : media_end]
-            buyer_surface += "\n" + media_surface
-            if match.start() >= appendix_start:
-                relative_start = match.start() - appendix_start
-                relative_end = media_end - appendix_start
-                machine_surface = (
-                    machine_surface[:relative_start] + machine_surface[relative_end:]
-                )
+            # Generated descriptions use ``- **filename:** caption``.  The
+            # caption must be localized, while showing filenames to a copy
+            # evaluator caused machine metadata to be judged as buyer prose.
+            media_captions = re.sub(
+                r"(?m)^\s*-\s+\*\*[^*\n]+:\*\*\s*",
+                "- ",
+                media_surface,
+            )
+            buyer_surface += "\n" + media_captions
     return buyer_surface, machine_surface
 
 
