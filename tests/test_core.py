@@ -26,14 +26,18 @@ from crossborder_agent.localization import (
     generate_copy_payload,
     render_description,
 )
-from crossborder_agent.models import AssetResult
+from crossborder_agent.media import create_emergency_image
+from crossborder_agent.models import AssetResult, RunState
 from crossborder_agent.planning import create_creative_plan, fallback_creative_plan
 from crossborder_agent.pipeline import (
     Pipeline,
-    PipelineError,
     _merge_source_vision_batches,
 )
-from crossborder_agent.qa import _description_language_surfaces
+from crossborder_agent.qa import (
+    EXPECTED_FILES,
+    _description_language_surfaces,
+    validate_delivery,
+)
 from crossborder_agent.taxonomy import category_leaf_candidates, resolve_taxonomy
 
 
@@ -442,18 +446,65 @@ class VisualSelectionTests(unittest.TestCase):
             )
         )
 
-    def test_non_offline_pipeline_requires_complete_model_configuration(self) -> None:
+    def test_missing_model_configuration_degrades_instead_of_aborting(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with mock.patch.dict(os.environ, {}, clear=True):
-                with self.assertRaisesRegex(
-                    PipelineError,
-                    "DASHSCOPE_API_KEY.*DASHSCOPE_BASE_URL.*OPENAI_BASE_URL",
-                ):
-                    Pipeline(
-                        input_dir=DATA,
-                        output_dir=Path(temp_dir),
-                        logger=logging.getLogger("configuration-test"),
-                    )
+                pipeline = Pipeline(
+                    input_dir=DATA,
+                    output_dir=Path(temp_dir),
+                    logger=logging.getLogger("configuration-test"),
+                )
+        self.assertTrue(pipeline.offline)
+        self.assertIsNone(pipeline.client)
+
+    def test_availability_recovery_fills_a_complete_parseable_delivery(self) -> None:
+        facts = load_product_facts(
+            DATA / "product_info/product_5758364264251.json"
+        )
+        tree = load_json(DATA / "clothing_categories.json")
+        attributes = load_json(DATA / "clothing_attributes.json")
+        taxonomy = resolve_taxonomy(facts, tree, attributes)
+        plan = fallback_creative_plan(facts, taxonomy)
+        with tempfile.TemporaryDirectory(prefix="agent-recovery-") as temporary:
+            root = Path(temporary)
+            work_dir = root / "work"
+            downloads_dir = work_dir / "_downloads"
+            work_dir.mkdir()
+            downloads_dir.mkdir()
+            create_emergency_image(
+                work_dir / "main_image.jpeg", canvas=(1600, 1600)
+            )
+            pipeline = Pipeline(
+                input_dir=DATA,
+                output_dir=root / "output",
+                logger=logging.getLogger("availability-recovery-test"),
+                offline=True,
+            )
+            state = RunState(
+                started_at="test",
+                input_dir=str(DATA),
+                output_dir=str(root / "output"),
+                facts=facts,
+                taxonomy=taxonomy,
+                creative_plan=plan,
+            )
+            pipeline._ensure_minimum_delivery(
+                facts=facts,
+                taxonomy=taxonomy,
+                creative_plan=plan,
+                state=state,
+                localization_payloads={},
+                localization_sources={},
+                work_dir=work_dir,
+                downloads_dir=downloads_dir,
+                plan_model="test-recovery",
+                reason="synthetic model failure",
+            )
+            report = validate_delivery(work_dir, facts, taxonomy)
+            produced = {path.name for path in work_dir.iterdir() if path.is_file()}
+
+        self.assertTrue(report.valid, report.errors)
+        self.assertEqual(produced, EXPECTED_FILES)
 
     def test_detail_fallback_plan_balances_distinct_views_and_detail_crops(self) -> None:
         facts = load_product_facts(
@@ -1480,7 +1531,7 @@ Natural localized overview.
         )
         self.assertIn("distinct variants", multi_plan.detail_prompts[3])
 
-    def test_source_vision_batches_keep_late_size_chart_indexes(self) -> None:
+    def test_source_vision_batches_keep_late_table_indexes(self) -> None:
         urls = [f"https://example.test/{index}.jpg" for index in range(14)]
         batches = [
             (
@@ -1496,16 +1547,18 @@ Natural localized overview.
                 urls[12:],
                 {
                     "images": [
-                        {"index": 0, "role": "size_chart", "has_text": True},
+                        {"index": 0, "role": "data_table", "has_text": True},
                         {"index": 1, "role": "detail"},
                     ],
-                    "size_chart_rows": [
+                    "tables": [
                         {
-                            "size_label": "M",
-                            "bust_cm": "90",
-                            "length_cm": "60",
-                            "weight_guidance": "",
                             "source_image_index": 0,
+                            "cells": [
+                                {"row": 0, "column": 0, "text": "Alpha"},
+                                {"row": 0, "column": 1, "text": "Beta"},
+                                {"row": 1, "column": 0, "text": "One"},
+                                {"row": 1, "column": 1, "text": "Two"},
+                            ],
                         }
                     ],
                 },
@@ -1513,7 +1566,7 @@ Natural localized overview.
         ]
         merged = _merge_source_vision_batches(batches, urls)
         self.assertEqual(len(merged["source_images"]), 14)
-        self.assertEqual(merged["size_chart_rows"][0]["source_image_index"], 12)
+        self.assertEqual(merged["tables"][0]["source_image_index"], 12)
 
     def test_fact_driven_copy_renders_a_basic_valid_delivery(self) -> None:
         facts = load_product_facts(

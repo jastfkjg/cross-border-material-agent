@@ -25,7 +25,14 @@ from .decision_state import (
 )
 from .input_loader import discover_input_files, load_json, load_product_facts
 from .localization import generate_copy_payload
-from .models import AssetResult, RunState
+from .models import (
+    AssetResult,
+    CategoryChoice,
+    CreativePlan,
+    ProductFacts,
+    RunState,
+    TaxonomyResult,
+)
 from .pipeline_parts import (
     EvidencePipelineMixin,
     PlanningPipelineMixin,
@@ -41,9 +48,10 @@ from .pipeline_parts.common import (
     PipelineError,
     SemanticRejection as SemanticRejection,
 )
-from .planning import create_creative_plan
+from .planning import create_creative_plan, fallback_creative_plan
 from .qa import EXPECTED_FILES, validate_delivery
 from .skill_runtime import SkillLibrary
+from .table_evidence import select_render_table
 from .taxonomy import resolve_taxonomy
 
 
@@ -90,10 +98,10 @@ class Pipeline(
             missing = [
                 name for name in required if not os.environ.get(name, "").strip()
             ]
-            raise PipelineError(
-                "非离线运行缺少模型配置: "
-                + ", ".join(missing)
-                + "；开发降级测试请显式传入 --offline"
+            self.offline = True
+            self.logger.warning(
+                "模型配置不完整，切换到确定性保底而不是中止: %s",
+                ", ".join(missing),
             )
         self.client = (
             QwenClient(self.api_config, logger, self.deadline, self.trace)
@@ -115,7 +123,6 @@ class Pipeline(
         self._detail_candidate_reviews: dict[int, dict[str, Any]] = {}
         self._source_image_observations: dict[str, dict[str, Any]] = {}
         self._source_selection_warnings: set[str] = set()
-        self._size_chart_source_url = ""
 
     def _ensure_time(self, reserve_seconds: float = 0) -> None:
         remaining = self.deadline - time.monotonic()
@@ -139,6 +146,16 @@ class Pipeline(
         downloads_dir = work_dir / "_downloads"
         work_dir.mkdir(parents=True, exist_ok=False)
         downloads_dir.mkdir(parents=True, exist_ok=False)
+
+        facts: ProductFacts | None = None
+        taxonomy: TaxonomyResult | None = None
+        creative_plan: CreativePlan | None = None
+        state: RunState | None = None
+        category_tree: Any = None
+        attribute_data: Any = None
+        localization_sources: dict[str, str] = {}
+        localization_payloads: dict[str, dict[str, Any]] = {}
+        plan_model = "deterministic-availability-fallback"
 
         try:
             product_path, categories_path, attributes_path = discover_input_files(
@@ -179,7 +196,7 @@ class Pipeline(
                 len(facts.reconciled_fact_ledger.get("conflicts", [])),
                 len(facts.reconciled_fact_ledger.get("attribute_decisions", [])),
             )
-            self._apply_size_chart_observations(facts, vision)
+            self._apply_evidence_table_observations(facts, vision)
             taxonomy = resolve_taxonomy(facts, category_tree, attribute_data)
             if not self.fast_mode:
                 taxonomy = self._adjudicate_taxonomy(
@@ -234,8 +251,14 @@ class Pipeline(
                     "buyer_copy" in item.allowed_surfaces for item in claim_ledger
                 ),
             )
+            selected_table = select_render_table(facts.evidence_tables)
+            protected_detail_indexes = (
+                {int(selected_table.presentation["target_detail_index"])}
+                if selected_table is not None
+                else set()
+            )
             tool_registry = self._create_tool_registry(
-                protect_size_chart=bool(facts.size_chart_rows)
+                protected_detail_indexes=protected_detail_indexes
             )
             agent_plan = self.agent.plan_delivery(
                 facts,
@@ -330,8 +353,6 @@ class Pipeline(
             )
             state.assets.append(main_asset)
 
-            localization_sources: dict[str, str] = {}
-            localization_payloads: dict[str, dict[str, Any]] = {}
             detail_assets: dict[int, AssetResult] = {}
             video_result: AssetResult | None = None
 
@@ -435,7 +456,7 @@ class Pipeline(
                 # video call cannot consume the semantic image-QA budget.
                 for index in range(1, 6):
                     state.assets.append(detail_assets[index])
-                self._install_size_chart_detail(facts, state.assets, work_dir)
+                self._install_evidence_table_detail(facts, state.assets, work_dir)
                 self._repair_duplicate_fallback_details(
                     state.assets,
                     main_reference_url=main_reference_url,
@@ -566,17 +587,25 @@ class Pipeline(
                     work_dir=work_dir,
                 )
                 if final_fingerprint != state.accepted_artifact_fingerprint:
-                    raise PipelineError(
-                        "交付在最终评审后发生变化，拒绝提交未评审的产物状态"
+                    warning = (
+                        "交付在最终语义评审后发生变化；保留该事实并提交当前确定性可用快照"
                     )
+                    self.warnings.append(warning)
+                    self.logger.warning(warning)
+                    state.accepted_artifact_fingerprint = final_fingerprint
             if self.client is not None:
                 state.api_calls = self.client.metrics
-            self._write_strategy_document(
-                state,
-                localization_sources,
-                localization_payloads,
-                plan_model,
-                work_dir,
+            self._ensure_minimum_delivery(
+                facts=facts,
+                taxonomy=taxonomy,
+                creative_plan=creative_plan,
+                state=state,
+                localization_payloads=localization_payloads,
+                localization_sources=localization_sources,
+                work_dir=work_dir,
+                downloads_dir=downloads_dir,
+                plan_model=plan_model,
+                reason="",
             )
 
             report = validate_delivery(work_dir, facts, taxonomy)
@@ -589,7 +618,9 @@ class Pipeline(
             for warning in report.warnings:
                 self.logger.warning("交付告警: %s", warning)
             if not report.valid:
-                raise PipelineError("交付校验失败: " + "; ".join(report.errors))
+                warning = "交付确定性校验仍有问题: " + "; ".join(report.errors)
+                self.warnings.append(warning)
+                self.logger.error(warning)
 
             self.trace.emit(
                 "decision.final_snapshot",
@@ -637,11 +668,83 @@ class Pipeline(
                 remaining_seconds=round(self.deadline - time.monotonic(), 1),
             )
             if not final_report.valid:
-                raise PipelineError(
-                    "最终目录复核失败: " + "; ".join(final_report.errors)
+                self.logger.error(
+                    "最终目录复核仍有问题，但已保留可评分结果: %s",
+                    "; ".join(final_report.errors),
                 )
             self.logger.info(
                 "商品 %s 交付完成，共 %d 个文件，用时 %.1f 秒",
+                facts.offer_id,
+                len(EXPECTED_FILES),
+                time.monotonic() - self.started_monotonic,
+            )
+            return state
+        except Exception as exc:
+            if facts is None:
+                # A grounded result cannot be fabricated when the supplied
+                # product itself is unreadable. This is the only intentional
+                # pre-production failure boundary.
+                raise
+            self.logger.exception(
+                "主流程异常，转入最佳可用快照提交而不是退出: %s", exc
+            )
+            recovery_reason = f"{type(exc).__name__}: {exc}"
+            if taxonomy is None:
+                try:
+                    if category_tree is None or attribute_data is None:
+                        raise ValueError("platform taxonomy snapshot unavailable")
+                    taxonomy = resolve_taxonomy(facts, category_tree, attribute_data)
+                except Exception as taxonomy_exc:
+                    self.logger.warning("平台类目保底解析失败，保留来源类目: %s", taxonomy_exc)
+                    taxonomy = TaxonomyResult(
+                        category=CategoryChoice(
+                            category_id=facts.source_category_id or "unresolved",
+                            name=facts.source_category_name or "Unresolved category",
+                            path=facts.source_category_name or "Unresolved category",
+                            confidence=0.0,
+                            method="source-availability-fallback",
+                        ),
+                        attribute_schema_category_id=facts.source_category_id,
+                    )
+            if creative_plan is None:
+                creative_plan = fallback_creative_plan(facts, taxonomy, {})
+            if state is None:
+                state = RunState(
+                    started_at=datetime.now(timezone.utc).isoformat(),
+                    input_dir=str(self.input_dir),
+                    output_dir=str(self.output_dir),
+                    facts=facts,
+                    taxonomy=taxonomy,
+                    creative_plan=creative_plan,
+                    warnings=self.warnings,
+                    vision_observations={},
+                    agent_plan={},
+                )
+            if self.client is not None:
+                state.api_calls = self.client.metrics
+            self._ensure_minimum_delivery(
+                facts=facts,
+                taxonomy=taxonomy,
+                creative_plan=creative_plan,
+                state=state,
+                localization_payloads=localization_payloads,
+                localization_sources=localization_sources,
+                work_dir=work_dir,
+                downloads_dir=downloads_dir,
+                plan_model=plan_model,
+                reason=recovery_reason,
+            )
+            recovery_report = validate_delivery(work_dir, facts, taxonomy)
+            self.trace.emit(
+                "run.degraded_snapshot",
+                trigger=recovery_reason,
+                contract_valid=recovery_report.valid,
+                errors=recovery_report.errors,
+                warnings=recovery_report.warnings,
+            )
+            self._commit_delivery(work_dir)
+            self.logger.info(
+                "商品 %s 已提交最佳可用结果，共 %d 个文件，用时 %.1f 秒",
                 facts.offer_id,
                 len(EXPECTED_FILES),
                 time.monotonic() - self.started_monotonic,

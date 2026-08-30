@@ -14,6 +14,7 @@ from .media import (
     inspect_video,
 )
 from .models import ProductFacts, TaxonomyResult
+from .table_evidence import presentation_view, select_render_table
 
 
 EXPECTED_FILES = {
@@ -172,16 +173,19 @@ def _validate_description(
                     f"{path.name} 缺少 SKU 分解项: {sku.sku_id}/{item.attribute_id}"
                 )
                 break
-    for item in facts.size_chart_rows:
-        for value in (
-            item.bust_cm,
-            item.length_cm,
-        ):
-            if value and value not in text:
-                report.errors.append(
-                    f"{path.name} 缺少卖家尺码数据: {item.size_label}/{value}"
-                )
-                break
+    table = select_render_table(facts.evidence_tables)
+    if table is not None:
+        try:
+            table_view = presentation_view(table, language)
+        except ValueError as exc:
+            report.errors.append(f"{path.name} 来源表格展示协议无效: {exc}")
+        else:
+            for row in table_view["rows"]:
+                missing = next((value for value in row if value and value not in text), "")
+                if missing:
+                    report.errors.append(
+                        f"{path.name} 缺少来源表格单元格: {table.table_id}/{missing}"
+                    )
 
 
 def validate_delivery(

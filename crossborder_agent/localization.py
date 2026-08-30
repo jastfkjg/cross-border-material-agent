@@ -17,6 +17,7 @@ from .models import (
     ProductFacts,
     TaxonomyResult,
 )
+from .table_evidence import presentation_view, select_render_table
 
 
 LANGUAGES: dict[str, dict[str, str]] = {
@@ -32,7 +33,6 @@ LANGUAGES: dict[str, dict[str, str]] = {
         "skus": "Available variants",
         "sku_components": "SKU components",
         "sizes": "Size and fit",
-        "size_chart": "Garment measurements from the seller's size chart",
         "media": "Media guide",
         "note": "Important factual note",
         "color_note": "Colors may appear slightly different depending on lighting and display settings.",
@@ -49,7 +49,6 @@ LANGUAGES: dict[str, dict[str, str]] = {
         "skus": "구매 가능 옵션",
         "sku_components": "SKU 구성",
         "sizes": "사이즈 및 핏",
-        "size_chart": "판매자 사이즈표의 실측 정보",
         "media": "미디어 안내",
         "note": "상품 정보 안내",
         "color_note": "조명과 화면 설정에 따라 실제 색상이 다르게 보일 수 있습니다.",
@@ -66,7 +65,6 @@ LANGUAGES: dict[str, dict[str, str]] = {
         "skus": "Variações disponíveis",
         "sku_components": "Composição dos SKUs",
         "sizes": "Tamanho e caimento",
-        "size_chart": "Medidas da peça informadas na tabela do vendedor",
         "media": "Guia de mídia",
         "note": "Observação factual importante",
         "color_note": "As cores podem variar ligeiramente conforme a iluminação e a configuração da tela.",
@@ -1089,10 +1087,11 @@ def _allowed_numbers(facts: ProductFacts, taxonomy: TaxonomyResult) -> set[str]:
         *(sku.sku_id for sku in facts.skus),
         *(item.kilograms for item in facts.size_conversions),
         *(item.pounds for item in facts.size_conversions),
-        *(item.bust_cm for item in facts.size_chart_rows),
-        *(item.length_cm for item in facts.size_chart_rows),
-        *(item.weight_kg for item in facts.size_chart_rows),
-        *(item.weight_lb for item in facts.size_chart_rows),
+        *(
+            cell.text
+            for table in facts.evidence_tables
+            for cell in table.cells
+        ),
     ]
     allowed = set(re.findall(r"\d+(?:[.,]\d+)?", " ".join(material)))
     allowed.add("8")  # fixed video duration from the delivery contract
@@ -1194,8 +1193,7 @@ def _compose_copy_layers(
 
 def _verified_fit_note(language: str, facts: ProductFacts, fallback_note: str) -> str:
     has_size_evidence = bool(
-        facts.size_chart_rows
-        or facts.size_conversions
+        facts.size_conversions
         or any(
             re.search(r"(?:尺码|适合身高|\bsize\b)", item.name, re.I)
             for item in facts.attributes
@@ -1212,13 +1210,7 @@ def _verified_fit_note(language: str, facts: ProductFacts, fallback_note: str) -
             "ko": "구매 전 판매자가 제공한 상품 사양과 옵션 표기를 확인해 주세요.",
             "pt": "Consulte as especificações e opções informadas pelo vendedor antes da compra.",
         }[language]
-    if not facts.size_chart_rows:
-        return fallback_note
-    return {
-        "en": "Use the seller's garment measurements below; regional size equivalence is not inferred.",
-        "ko": "아래 판매자 실측표를 확인해 주세요. 한국 사이즈로 임의 환산하지 않았습니다.",
-        "pt": "Consulte as medidas da peça abaixo; não foi presumida equivalência automática com P, M ou G.",
-    }[language]
+    return fallback_note
 
 
 def _salvage_copy_payload(
@@ -1420,24 +1412,6 @@ def _payload_validation_error(
     }
     if any(phrase in natural_text.casefold() for phrase in unsupported_fit_claims[language]):
         return "unsupported-fit-guidance-guard"
-    unavailable_measurement_references = {
-        "en": (
-            "garment measurements below",
-            "measurements listed below",
-            "specific garment measurements",
-        ),
-        "ko": ("아래 실측", "하단 실측", "구체적인 의류 실측"),
-        "pt": (
-            "medidas da peça abaixo",
-            "medidas listadas abaixo",
-            "medidas específicas da peça",
-        ),
-    }
-    if not facts.size_chart_rows and any(
-        phrase in natural_text.casefold()
-        for phrase in unavailable_measurement_references[language]
-    ):
-        return "missing-size-chart-reference-guard"
     normalized_overview = re.sub(
         r"[^\w\uac00-\ud7a3]+", "", str(payload["overview"]).casefold()
     )
@@ -2249,8 +2223,9 @@ distinctive construction and silhouette; the second should add supported options
 style context, and conservative sizing information. Do not pad either paragraph when those facts are
 absent. Do not refer shoppers to an audit, evidence ledger, canonical data, source verification process
 or SKU matrix.
-Call source size labels "seller-listed sizes", never standard, universal or true-to-size. Refer to
-garment measurements below only when verified size_chart rows actually exist.
+Call source size labels "seller-listed sizes", never standard, universal or true-to-size. Source-image
+tables are rendered separately from exact cells according to the model's grounded presentation decision;
+do not infer new prose claims, missing fields, units, conversions or category semantics from table layout.
 For en-US, use US spelling and concise marketplace phrasing. For ko-KR, use natural Korean retail
 sentence endings and Korean option terminology. For pt-BR, use Brazilian vocabulary and forms such
 as produto, tamanho, camiseta and consulte; avoid European Portuguese vocabulary.
@@ -2794,31 +2769,30 @@ def render_description(
         ]
         lines.append("| " + " | ".join(_escape_table(value) for value in row) + " |")
 
-    if facts.size_chart_rows:
-        lines.extend(
-            [
-                "",
-                f"## {locale['size_chart']}",
-                "",
-                f"| {labels['size']} | {labels['bust']} | {labels['garment_length']} | {labels['seller_weight']} |",
-                "|---|---|---|---|",
-            ]
-        )
-        for item in facts.size_chart_rows:
-            bust = f"{item.bust_cm} cm" if item.bust_cm else ""
-            length = f"{item.length_cm} cm" if item.length_cm else ""
-            weight = item.weight_kg
-            if language == "en":
-                if item.bust_cm:
-                    bust += f" ({_decimal_measurement(Decimal(item.bust_cm) / Decimal('2.54'))} in)"
-                if item.length_cm:
-                    length += f" ({_decimal_measurement(Decimal(item.length_cm) / Decimal('2.54'))} in)"
-                if item.weight_lb:
-                    weight = f"{item.weight_kg} ({item.weight_lb})"
-            lines.append(
-                f"| {_escape_table(_localized_display(language, item.size_label, term_map))} | {_escape_table(bust)} | "
-                f"{_escape_table(length)} | {_escape_table(weight)} |"
+    selected_table = select_render_table(facts.evidence_tables)
+    if selected_table is not None:
+        try:
+            table_view = presentation_view(selected_table, language)
+        except ValueError:
+            table_view = None
+        if table_view is not None:
+            lines.extend(
+                [
+                    "",
+                    f"## {table_view['title']}",
+                    "",
+                    "| "
+                    + " | ".join(_escape_table(value) for value in table_view["headers"])
+                    + " |",
+                    "|" + "---|" * len(table_view["headers"]),
+                ]
             )
+            for row in table_view["rows"]:
+                lines.append(
+                    "| " + " | ".join(_escape_table(value) for value in row) + " |"
+                )
+            for note in table_view["notes"]:
+                lines.append(f"- {_escape_table(note)}")
 
     include_imperial = language == "en"
     lines.extend(["", f"## {locale['sizes']}", ""])
@@ -2853,7 +2827,7 @@ def render_description(
         lines.append(f"- **{filename}:** {str(description).strip()}")
 
     lines.extend(["", f"## {locale['note']}", ""])
-    if facts.size_conversions or facts.size_chart_rows:
+    if facts.size_conversions:
         lines.extend([verified_note, ""])
     lines.extend([locale["color_note"], ""])
     return "\n".join(lines)

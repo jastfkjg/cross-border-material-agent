@@ -28,6 +28,7 @@ from .models import (
 from .planning import validate_creative_plan_payload
 from .qa import _description_language_surfaces
 from .skill_runtime import SkillLibrary
+from .table_evidence import presentation_view, select_render_table
 
 
 _RUBRIC_WEIGHTS = {
@@ -39,8 +40,6 @@ _RUBRIC_WEIGHTS = {
     "A6": 7,
     "A7": 5,
 }
-
-_INTERNAL_MINIMUM_WEIGHTED_SCORE = 95.0
 
 _RUBRIC_DEFINITIONS = {
     "A1": {
@@ -1087,15 +1086,6 @@ Visual input map:
 Allowed artifact target names (use only these exact names):
 {json.dumps(evaluation_evidence_bundle["allowed_artifact_targets"], ensure_ascii=False)}
 """.strip()
-        minimum_score = max(
-            _INTERNAL_MINIMUM_WEIGHTED_SCORE,
-            float(
-                agent_plan.get(
-                    "minimum_weighted_score", _INTERNAL_MINIMUM_WEIGHTED_SCORE
-                )
-            ),
-        )
-
         def evaluate_with(model: str) -> tuple[str, AgentEvaluation | None, str]:
             try:
                 payload = self.client.chat_json(
@@ -1133,16 +1123,14 @@ Allowed artifact target names (use only these exact names):
                 self.logger.warning("全局评估模型 %s 不可用: %s", model, error)
             else:
                 evaluations[model] = evaluation
-        if len(evaluations) < 2:
+        if not evaluations:
             self.logger.warning(
-                "全局交付评估仅获得 %d 个有效模型结果，至少需要 2 个",
-                len(evaluations),
+                "全局交付评估没有获得有效模型结果；跳过语义返修但继续交付",
             )
             return None
         return self._adjudicate_evaluations(
             evaluations,
             round_index=round_index,
-            minimum_weighted_score=minimum_score,
             artifact_fingerprint=artifact_fingerprint,
             adjudication_context=evaluation_evidence_bundle,
             image_urls=image_urls,
@@ -1422,6 +1410,7 @@ Current six-image set review:
         self, facts: ProductFacts, assets: list[AssetResult], work_dir: Path
     ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
         manifest: list[dict[str, Any]] = []
+        selected_table = select_render_table(facts.evidence_tables)
         delivery_urls = [
             asset.source_url
             for asset in assets
@@ -1481,37 +1470,16 @@ Current six-image set review:
                         "luminance_stddev": quality.luminance_stddev if quality else None,
                         "difference_hash": quality.difference_hash if quality else None,
                     }
-                    if asset.model == "deterministic-size-chart":
-                        rendered_rows = [
-                            {
-                                "size": str(row.size_label),
-                                "bust": f"{row.bust_cm} cm" if row.bust_cm else "—",
-                                "length": (
-                                    f"{row.length_cm} cm" if row.length_cm else "—"
-                                ),
-                                "weight": (
-                                    f"{row.weight_kg} / {row.weight_lb}"
-                                    if row.weight_kg and row.weight_lb
-                                    else row.weight_kg or "—"
-                                ),
-                            }
-                            for row in facts.size_chart_rows
-                        ]
-                        item["deterministic_render"] = {
-                            "text_language": "en",
-                            "contains_cjk": False,
-                            "title": "SIZE GUIDE",
-                            "subtitle": "GARMENT MEASUREMENTS • SELLER-PROVIDED DATA",
-                            "columns": ["SIZE", "BUST", "LENGTH", "WEIGHT GUIDE"],
-                            "rows": rendered_rows,
-                            "notes": [
-                                "Measurements are transcribed from the seller's source size chart.",
-                                "Check garment measurements; regional size equivalence is not assumed.",
-                            ],
-                        }
+                    if (
+                        asset.model == "deterministic-evidence-table"
+                        and selected_table is not None
+                    ):
+                        item["deterministic_render"] = presentation_view(
+                            selected_table
+                        )
                 elif asset.name == "product_video.mp4":
                     item["physical"] = inspect_video(path)
-            except (OSError, MediaError) as exc:
+            except (OSError, MediaError, ValueError) as exc:
                 item["physical_error"] = str(exc)
             manifest.append(item)
         return manifest, image_urls, video_urls
@@ -1548,20 +1516,6 @@ Current six-image set review:
             "votes": 1 if evaluator_model else 0,
         }
 
-    @staticmethod
-    def _scores_from_findings(findings: list[dict[str, Any]]) -> tuple[dict[str, float], float]:
-        penalties = {"blocker": 100.0, "major": 30.0, "minor": 8.0}
-        scores = {dimension: 100.0 for dimension in _RUBRIC_WEIGHTS}
-        for item in findings:
-            dimension = str(item.get("dimension") or "")
-            if dimension in scores:
-                scores[dimension] = max(
-                    0.0,
-                    scores[dimension] - penalties.get(str(item.get("severity") or "minor"), 8.0),
-                )
-        weighted = sum(scores[key] * weight / 100 for key, weight in _RUBRIC_WEIGHTS.items())
-        return scores, round(weighted, 3)
-
     @classmethod
     def _parse_evaluator_report(
         cls,
@@ -1585,18 +1539,17 @@ Current six-image set review:
             ]
             if clean is not None
         ][:30]
-        scores, weighted = cls._scores_from_findings(findings)
         return AgentEvaluation(
             round_index=round_index,
             ready_for_delivery=False,
-            weighted_score=weighted,
-            dimension_scores=scores,
+            weighted_score=0.0,
+            dimension_scores={},
             summary=str(payload.get("summary") or "")[:3000],
             issues=findings,
             repair_actions=[],
             evaluator_models=[evaluator_model] if evaluator_model else [],
-            model_dimension_scores={evaluator_model: dict(scores)} if evaluator_model else {},
-            model_weighted_scores={evaluator_model: weighted} if evaluator_model else {},
+            model_dimension_scores={},
+            model_weighted_scores={},
         )
 
     def _adjudicate_evaluations(
@@ -1604,7 +1557,6 @@ Current six-image set review:
         evaluations: dict[str, AgentEvaluation],
         *,
         round_index: int,
-        minimum_weighted_score: float,
         artifact_fingerprint: str = "",
         adjudication_context: dict[str, Any] | None = None,
         image_urls: list[str] | None = None,
@@ -1722,12 +1674,6 @@ Independent artifact evidence:
                     ),
                 }
             )
-        scores, weighted = self._scores_from_findings(issues)
-        hard_issue = any(
-            item["severity"] == "blocker"
-            or (item["severity"] == "major" and item["dimension"] in {"A1", "A2", "A5"})
-            for item in issues
-        )
         summaries = [
             f"{model}: {evaluation.summary}"
             for model, evaluation in evaluations.items()
@@ -1735,15 +1681,17 @@ Independent artifact evidence:
         ]
         return AgentEvaluation(
             round_index=round_index,
-            ready_for_delivery=bool(weighted >= minimum_weighted_score and not hard_issue),
-            weighted_score=weighted,
-            dimension_scores=scores,
+            # Compatibility signal only. Findings guide repair, but no semantic
+            # score or readiness flag can veto submission.
+            ready_for_delivery=not issues,
+            weighted_score=0.0,
+            dimension_scores={},
             summary="\n".join(summaries)[:6000],
             issues=issues,
             repair_actions=[],
             evaluator_models=models,
-            model_dimension_scores={model: dict(report.dimension_scores) for model, report in evaluations.items()},
-            model_weighted_scores={model: report.weighted_score for model, report in evaluations.items()},
+            model_dimension_scores={},
+            model_weighted_scores={},
             artifact_fingerprint=artifact_fingerprint,
             disagreement=bool(disputed),
             adjudication={

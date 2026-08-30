@@ -12,13 +12,15 @@ from ..models import (
     RunState,
     TaxonomyResult,
 )
+from ..table_evidence import select_render_table
 
 
 class PlanningPipelineMixin:
     @staticmethod
     def _create_tool_registry(
-        *, protect_size_chart: bool = False
+        *, protected_detail_indexes: set[int] | None = None
     ) -> BoundedToolRegistry:
+        protected = protected_detail_indexes or set()
         registry = BoundedToolRegistry()
         registry.add_spec(
             ToolSpec(
@@ -37,7 +39,8 @@ class PlanningPipelineMixin:
                 description="Regenerate one detail storyboard slot with evaluator-specific corrections; preserve the current slot on failure.",
                 targets=tuple(
                     f"detail_image_{index}.jpeg"
-                    for index in range(1, 5 if protect_size_chart else 6)
+                    for index in range(1, 6)
+                    if index not in protected
                 ),
                 estimated_seconds=120,
                 side_effects="replaces only the named detail image after candidate acceptance",
@@ -248,8 +251,13 @@ class PlanningPipelineMixin:
                 index = int(target.removeprefix("detail_image_").split(".", 1)[0])
             except ValueError:
                 return False, "invalid detail target"
-            if index == 5 and facts.size_chart_rows:
-                return False, "verified deterministic size chart is protected"
+            selected_table = select_render_table(facts.evidence_tables)
+            if (
+                selected_table is not None
+                and index
+                == int(selected_table.presentation.get("target_detail_index") or 0)
+            ):
+                return False, "model-selected deterministic evidence table is protected"
             main_asset = self._find_asset(state.assets, "main_image.jpeg")
             references = self._detail_reference_selection(
                 index,

@@ -328,7 +328,7 @@ def load_product_facts(product_path: Path) -> ProductFacts:
         sku_image_urls=_deduplicate(sku_images),
         description_image_urls=description_images,
         size_conversions=[],
-        size_chart_rows=[],
+        evidence_tables=[],
         source_title_evidence_pointer=f"/ret/result/result/{title_key}",
         input_file=str(product_path),
         fingerprint=fingerprint,

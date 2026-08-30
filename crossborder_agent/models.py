@@ -41,13 +41,33 @@ class SizeConversion:
 
 
 @dataclass(slots=True)
-class SizeChartRow:
-    size_label: str
-    bust_cm: str = ""
-    length_cm: str = ""
-    weight_kg: str = ""
-    weight_lb: str = ""
+class EvidenceCell:
+    """One source-grounded cell in a model-observed two-dimensional region."""
+
+    row: int
+    column: int
+    text: str
+    confidence: float = 1.0
     evidence_pointer: str = ""
+    row_span: int = 1
+    column_span: int = 1
+
+
+@dataclass(slots=True)
+class EvidenceTable:
+    """A domain-neutral table plus the model's optional presentation decision.
+
+    Host code understands coordinates, provenance and resource limits only.  It
+    deliberately has no vocabulary for apparel measurements or other product
+    fields; column meaning and presentation stay in model-authored data.
+    """
+
+    table_id: str
+    source_image_index: int
+    cells: list[EvidenceCell] = field(default_factory=list)
+    source_url: str = ""
+    evidence_pointer: str = ""
+    presentation: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -66,7 +86,7 @@ class ProductFacts:
     size_conversions: list[SizeConversion]
     input_file: str
     fingerprint: str
-    size_chart_rows: list[SizeChartRow] = field(default_factory=list)
+    evidence_tables: list[EvidenceTable] = field(default_factory=list)
     source_title_evidence_pointer: str = ""
     # Evidence decisions made after source-image inspection.  The structure is
     # intentionally product-agnostic: source attributes are addressed by their
@@ -107,16 +127,27 @@ class ProductFacts:
                 }
                 for sku in self.skus
             ],
-            "size_chart": [
+            "evidence_tables": [
                 {
-                    "size": item.size_label,
-                    "bust_cm": item.bust_cm,
-                    "length_cm": item.length_cm,
-                    "weight_kg": item.weight_kg,
-                    "weight_lb": item.weight_lb,
-                    "evidence": item.evidence_pointer,
+                    "table_id": table.table_id,
+                    "source_image_index": table.source_image_index,
+                    "source_url": table.source_url,
+                    "evidence": table.evidence_pointer,
+                    "cells": [
+                        {
+                            "row": cell.row,
+                            "column": cell.column,
+                            "text": cell.text,
+                            "confidence": cell.confidence,
+                            "evidence": cell.evidence_pointer,
+                            "row_span": cell.row_span,
+                            "column_span": cell.column_span,
+                        }
+                        for cell in table.cells
+                    ],
+                    "presentation": table.presentation,
                 }
-                for item in self.size_chart_rows
+                for table in self.evidence_tables
             ],
             "reconciled_fact_ledger": self.reconciled_fact_ledger,
             "image_urls": self.all_image_urls()[:12],
@@ -220,7 +251,12 @@ class AgentAction:
 
 @dataclass(slots=True)
 class AgentEvaluation:
-    """Evidence findings adjudicated across independent evaluator reports."""
+    """Evidence findings adjudicated across independent evaluator reports.
+
+    Legacy score fields remain serializable for archive compatibility, but they
+    are no longer used to accept or reject a delivery. Semantic review supplies
+    repair evidence; deterministic artifact contracts own submission.
+    """
 
     round_index: int
     ready_for_delivery: bool
@@ -236,7 +272,7 @@ class AgentEvaluation:
     rubric_version: str = "evidence-v1"
     disagreement: bool = False
     adjudication: dict[str, Any] = field(default_factory=dict)
-    score_method: str = "deterministic-evidence-penalties"
+    score_method: str = "advisory-findings-no-score-gate"
 
 
 @dataclass(slots=True)

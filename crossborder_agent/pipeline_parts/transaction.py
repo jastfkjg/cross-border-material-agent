@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -16,9 +17,13 @@ from ..agent_tools import BoundedToolRegistry, ToolExecution
 from ..media import (
     MediaError,
     create_catalog_video,
+    create_emergency_image,
+    create_slideshow_video,
     inspect_image,
     inspect_video,
+    normalize_image,
 )
+from ..localization import generate_copy_payload
 from ..models import (
     AgentActionResult,
     AssetResult,
@@ -390,6 +395,249 @@ class TransactionPipelineMixin:
             True,
             "post-batch files, payloads, and explicit set-review gates are consistent",
         )
+
+    def _ensure_minimum_delivery(
+        self,
+        *,
+        facts: ProductFacts,
+        taxonomy: TaxonomyResult,
+        creative_plan: CreativePlan,
+        state: RunState,
+        localization_payloads: dict[str, dict[str, Any]],
+        localization_sources: dict[str, str],
+        work_dir: Path,
+        downloads_dir: Path,
+        plan_model: str,
+        reason: str,
+    ) -> None:
+        """Fill every required slot from the best surviving grounded material.
+
+        This is an availability boundary, not a second semantic workflow. It
+        preserves existing artifacts, uses seller-source pixels when reachable,
+        derives missing media locally, and falls back to a claim-free neutral
+        image only when no product pixels survive.
+        """
+
+        clean_reason = " ".join(str(reason).split())[:1200]
+        if clean_reason:
+            warning = f"交付进入可用性保底: {clean_reason}"
+            if warning not in self.warnings:
+                self.warnings.append(warning)
+            self.logger.warning(warning)
+
+        def image_is_readable(path: Path) -> bool:
+            try:
+                inspect_image(path)
+                return True
+            except (MediaError, OSError):
+                return False
+
+        def replace_normalized(
+            source: Path,
+            destination: Path,
+            *,
+            canvas: tuple[int, int],
+            white_background: bool,
+            focus_crop: str = "",
+        ) -> None:
+            staged = destination.with_name(
+                f".{destination.stem}-{uuid.uuid4().hex}.recovery.jpeg"
+            )
+            try:
+                normalize_image(
+                    source,
+                    staged,
+                    canvas=canvas,
+                    max_bytes=5 * 1024 * 1024,
+                    white_background=white_background,
+                    focus_crop=focus_crop,
+                )
+                os.replace(staged, destination)
+            finally:
+                staged.unlink(missing_ok=True)
+
+        by_name = {item.name: item for item in state.assets}
+        main_path = work_dir / "main_image.jpeg"
+        if not image_is_readable(main_path):
+            local_source = next(
+                (
+                    work_dir / f"detail_image_{index}.jpeg"
+                    for index in range(1, 6)
+                    if image_is_readable(work_dir / f"detail_image_{index}.jpeg")
+                ),
+                None,
+            )
+            if local_source is not None:
+                replace_normalized(
+                    local_source,
+                    main_path,
+                    canvas=(1600, 1600),
+                    white_background=True,
+                )
+            else:
+                downloaded = False
+                if self.deadline - time.monotonic() > 20:
+                    try:
+                        self._fallback_image(
+                            facts.all_image_urls(),
+                            main_path,
+                            downloads_dir,
+                            canvas=(1600, 1600),
+                            white_background=True,
+                        )
+                        downloaded = True
+                    except Exception as exc:
+                        self.logger.warning("最终源图保底不可用，创建中性占位图: %s", exc)
+                if not downloaded:
+                    create_emergency_image(main_path, canvas=(1600, 1600))
+            by_name["main_image.jpeg"] = AssetResult(
+                name="main_image.jpeg",
+                path=str(main_path),
+                model="availability-fallback",
+                generated=False,
+                fallback_reason=clean_reason or "missing main image recovered",
+                description="Best surviving source-faithful availability fallback",
+            )
+        elif "main_image.jpeg" not in by_name:
+            by_name["main_image.jpeg"] = AssetResult(
+                name="main_image.jpeg",
+                path=str(main_path),
+                model="surviving-local-artifact",
+                generated=False,
+                fallback_reason=clean_reason,
+                description="Best surviving local hero artifact",
+            )
+        else:
+            by_name["main_image.jpeg"].path = str(main_path)
+
+        focus_crops = ("", "upper", "lower", "left", "right")
+        for index, focus_crop in enumerate(focus_crops, start=1):
+            name = f"detail_image_{index}.jpeg"
+            destination = work_dir / name
+            if not image_is_readable(destination):
+                replace_normalized(
+                    main_path,
+                    destination,
+                    canvas=(1200, 1500),
+                    white_background=False,
+                    focus_crop=focus_crop,
+                )
+                by_name[name] = AssetResult(
+                    name=name,
+                    path=str(destination),
+                    model="availability-fallback",
+                    generated=False,
+                    fallback_reason=clean_reason or "missing detail image recovered",
+                    description=(
+                        f"Local {focus_crop or 'complete'} view derived from the surviving image"
+                    ),
+                )
+            elif name not in by_name:
+                by_name[name] = AssetResult(
+                    name=name,
+                    path=str(destination),
+                    model="surviving-local-artifact",
+                    generated=False,
+                    fallback_reason=clean_reason,
+                    description="Best surviving local detail artifact",
+                )
+            else:
+                by_name[name].path = str(destination)
+
+        video_name = "product_video.mp4"
+        video_path = work_dir / video_name
+        try:
+            inspect_video(video_path)
+        except (MediaError, OSError):
+            video_path.unlink(missing_ok=True)
+            image_paths = [main_path] + [
+                work_dir / f"detail_image_{index}.jpeg" for index in range(1, 6)
+            ]
+            try:
+                create_catalog_video(image_paths, video_path, duration=8)
+            except (MediaError, OSError):
+                create_slideshow_video(main_path, video_path, duration=8)
+            by_name[video_name] = AssetResult(
+                name=video_name,
+                path=str(video_path),
+                model="ffmpeg-availability-fallback",
+                generated=False,
+                fallback_reason=clean_reason or "missing video recovered",
+                description="Playable silent catalog fallback",
+            )
+        else:
+            if video_name not in by_name:
+                by_name[video_name] = AssetResult(
+                    name=video_name,
+                    path=str(video_path),
+                    model="surviving-local-artifact",
+                    generated=False,
+                    fallback_reason=clean_reason,
+                    description="Best surviving local video artifact",
+                )
+            else:
+                by_name[video_name].path = str(video_path)
+
+        state.assets = [
+            by_name[name]
+            for name in (
+                "main_image.jpeg",
+                "detail_image_1.jpeg",
+                "detail_image_2.jpeg",
+                "detail_image_3.jpeg",
+                "detail_image_4.jpeg",
+                "detail_image_5.jpeg",
+                "product_video.mp4",
+            )
+            if name in by_name
+        ]
+
+        for language in ("en", "ko", "pt"):
+            if not isinstance(localization_payloads.get(language), dict):
+                payload, source = generate_copy_payload(
+                    language,
+                    facts,
+                    taxonomy,
+                    creative_plan,
+                    None,
+                    claim_ledger=state.claim_ledger,
+                )
+                localization_payloads[language] = payload
+                localization_sources[language] = source
+        self._write_localized_descriptions(
+            facts,
+            taxonomy,
+            creative_plan,
+            localization_payloads,
+            state.assets,
+            work_dir,
+            state.visual_set_review,
+        )
+        try:
+            self._write_strategy_document(
+                state,
+                localization_sources,
+                localization_payloads,
+                plan_model,
+                work_dir,
+            )
+        except Exception as exc:
+            self.logger.warning("完整策略文档构建失败，写入最小可解析版本: %s", exc)
+            (work_dir / "strategy_document.md").write_text(
+                "\n".join(
+                    (
+                        "# Agent 本地化交付策略",
+                        "",
+                        f"- 商品 ID：{facts.offer_id}",
+                        f"- 平台叶子类目 ID：{taxonomy.category.category_id}",
+                        "- 事实：所有公开内容以输入商品数据和已保存素材为准。",
+                        "- 本地化：分别交付英语、韩语和巴西葡萄牙语版本。",
+                        "- 质检：保留格式、尺寸、命名和可播放性检查结果；异常时提交最佳可用快照。",
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
 
     def _commit_delivery(self, work_dir: Path) -> None:
         for filename in sorted(EXPECTED_FILES):

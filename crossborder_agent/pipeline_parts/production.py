@@ -18,7 +18,7 @@ from ..localization import generate_copy_payload, render_description
 from ..media import (
     MediaError,
     create_catalog_video,
-    create_size_chart_image,
+    create_evidence_table_image,
     create_slideshow_video,
     hash_distance,
     inspect_image_quality,
@@ -33,6 +33,7 @@ from ..models import (
     RunState,
     TaxonomyResult,
 )
+from ..table_evidence import presentation_view, select_render_table
 from .common import (
     IMAGE_NEGATIVE_PROMPT as _IMAGE_NEGATIVE_PROMPT,
     MAIN_NEGATIVE_PROMPT as _MAIN_NEGATIVE_PROMPT,
@@ -78,7 +79,7 @@ class ProductionPipelineMixin:
                 },
                 "video": "Eight-second silent catalog video assembled from the final distinct product images.",
                 "single_video": "Eight-second product presentation with restrained camera motion.",
-                "size_chart": "Size chart showing the seller-provided garment measurements and weight guidance.",
+                "evidence_table": "Source table rendered from exact, model-selected cells.",
             },
             "ko": {
                 "main": "판매자 원본을 정사각형 등록 규격에 맞춰 정리한 대표 이미지입니다.",
@@ -98,7 +99,7 @@ class ProductionPipelineMixin:
                 },
                 "video": "서로 다른 최종 상품 이미지로 구성한 8초 무음 카탈로그 영상입니다.",
                 "single_video": "절제된 카메라 움직임을 적용한 8초 단일 이미지 상품 영상입니다.",
-                "size_chart": "판매자가 제공한 의류 실측과 권장 체중을 보여 주는 사이즈표입니다.",
+                "evidence_table": "판매자 원본에서 확인된 표를 모델이 선택한 셀 그대로 정리한 이미지입니다.",
             },
             "pt": {
                 "main": "Imagem principal da fonte do vendedor adaptada ao formato quadrado do anúncio.",
@@ -118,7 +119,7 @@ class ProductionPipelineMixin:
                 },
                 "video": "Vídeo de catálogo silencioso de 8 segundos montado com as imagens finais distintas do produto.",
                 "single_video": "Apresentação de 8 segundos com uma única imagem e movimento de câmera discreto.",
-                "size_chart": "Tabela com as medidas da peça e o peso indicados pelo vendedor.",
+                "evidence_table": "Tabela da fonte reproduzida com as células exatas selecionadas pelo modelo.",
             },
         }
         generated_templates = {
@@ -183,7 +184,7 @@ class ProductionPipelineMixin:
                 reviewed_description = (
                     ""
                     if name == "product_video.mp4"
-                    or asset.model == "deterministic-size-chart"
+                    or asset.model == "deterministic-evidence-table"
                     else _reviewed_media_description(
                         visual_set_review,
                         name,
@@ -216,8 +217,8 @@ class ProductionPipelineMixin:
                             generated_templates[language]["roles"]["complete_product"],
                         )
                     continue
-                if asset.model == "deterministic-size-chart":
-                    kind = "size_chart"
+                if asset.model == "deterministic-evidence-table":
+                    kind = "evidence_table"
                 elif name == "product_video.mp4":
                     kind = (
                         "video" if asset.model.startswith("ffmpeg-") else "single_video"
@@ -388,10 +389,16 @@ class ProductionPipelineMixin:
             index = int(target.removeprefix("detail_image_").split(".", 1)[0])
         except ValueError:
             return ToolExecution("rejected", "invalid detail target")
-        if index == 5 and facts.size_chart_rows:
+        selected_table = select_render_table(facts.evidence_tables)
+        protected_index = (
+            int(selected_table.presentation.get("target_detail_index") or 0)
+            if selected_table is not None
+            else 0
+        )
+        if index == protected_index:
             return ToolExecution(
                 "skipped",
-                "verified seller size chart is intentionally protected from generative replacement",
+                "the model-selected source table is protected from generative replacement",
             )
         main_asset = self._find_asset(assets, "main_image.jpeg")
         references = self._detail_reference_selection(
@@ -866,15 +873,25 @@ class ProductionPipelineMixin:
         downloads_dir: Path,
     ) -> AssetResult:
         destination = work_dir / f"detail_image_{index}.jpeg"
-        if index == 5 and facts.size_chart_rows:
-            create_size_chart_image(facts.size_chart_rows, destination)
+        selected_table = select_render_table(facts.evidence_tables)
+        target_index = (
+            int(selected_table.presentation.get("target_detail_index") or 0)
+            if selected_table is not None
+            else 0
+        )
+        if selected_table is not None and index == target_index:
+            create_evidence_table_image(selected_table, destination)
+            view = presentation_view(selected_table)
             return AssetResult(
                 name=destination.name,
                 path=str(destination),
-                model="deterministic-size-chart",
+                source_url=selected_table.source_url,
+                model="deterministic-evidence-table",
                 generated=False,
-                fallback_reason="source size chart transcribed and deterministically rendered",
-                description="Verified seller garment measurements and weight guidance",
+                fallback_reason=(
+                    "model-selected source table rendered from exact grounded cells"
+                ),
+                description=str(view["title"]),
             )
         fallback_urls, focus_crop = self._detail_fallback_plan(
             facts, index=index, main_reference_url=main_reference_url
@@ -1468,7 +1485,7 @@ class ProductionPipelineMixin:
             use="reference",
             preferred_roles=tuple(preferred_roles) or role_preferences.get(index, ()),
         )
-        excluded_roles = {"size_chart", "packaging", "unknown"}
+        excluded_roles = {"data_table", "size_chart", "packaging", "unknown"}
         role_safe = [
             url
             for url in ranked
@@ -1533,31 +1550,39 @@ class ProductionPipelineMixin:
             description="Playable H.264 product presentation fallback",
         )
 
-    def _install_size_chart_detail(
+    def _install_evidence_table_detail(
         self, facts: ProductFacts, assets: list[AssetResult], work_dir: Path
     ) -> None:
-        if not facts.size_chart_rows:
+        table = select_render_table(facts.evidence_tables)
+        if table is None:
             return
+        target_index = int(table.presentation.get("target_detail_index") or 0)
         asset = next(
-            (item for item in assets if item.name == "detail_image_5.jpeg"), None
+            (
+                item
+                for item in assets
+                if item.name == f"detail_image_{target_index}.jpeg"
+            ),
+            None,
         )
         if asset is None:
             return
-        destination = work_dir / "detail_image_5.jpeg"
+        destination = work_dir / f"detail_image_{target_index}.jpeg"
         try:
-            create_size_chart_image(facts.size_chart_rows, destination)
-        except MediaError as exc:
-            self.logger.warning("本地化尺码表生成失败，保留原详情图: %s", exc)
-            self.warnings.append(f"尺码表详情图生成失败: {exc}")
+            create_evidence_table_image(table, destination)
+            view = presentation_view(table)
+        except (MediaError, ValueError) as exc:
+            self.logger.warning("来源表格渲染失败，保留原详情图: %s", exc)
+            self.warnings.append(f"来源表格详情图生成失败: {exc}")
             return
         asset.path = str(destination)
-        asset.source_url = self._size_chart_source_url or asset.source_url
-        asset.model = "deterministic-size-chart"
+        asset.source_url = table.source_url or asset.source_url
+        asset.model = "deterministic-evidence-table"
         asset.generated = False
         asset.fallback_reason = (
-            "source size chart transcribed and deterministically rendered"
+            "model-selected source table rendered from exact grounded cells"
         )
-        asset.description = "Verified seller garment measurements and weight guidance"
+        asset.description = str(view["title"])
 
     def _enhance_fallback_video(
         self, assets: list[AssetResult], work_dir: Path
@@ -1636,7 +1661,7 @@ class ProductionPipelineMixin:
                 continue
             if (
                 asset.generated
-                or asset.model == "deterministic-size-chart"
+                or asset.model == "deterministic-evidence-table"
                 or not asset.name.startswith("detail_image_")
             ):
                 continue
@@ -1713,13 +1738,13 @@ class ProductionPipelineMixin:
             "color_variant_grid": "已核验颜色组合",
             "hem_and_trim": "下摆与收边细节",
             "back_silhouette": "背面轮廓",
-            "size_chart": "尺码信息",
+            "data_table": "来源数据表",
         }
 
         def role_purpose(role: str) -> str:
             normalized = str(role or "").strip().casefold()
-            if "size" in normalized:
-                return "把源图中可核验的尺码信息转化为清晰、易读的购买参考"
+            if "table" in normalized:
+                return "把模型选择的来源表格按原始单元格内容转化为清晰、易读的购买参考"
             if any(token in normalized for token in ("variant", "color")):
                 return "集中呈现有来源支持的可选项，帮助买家快速比较"
             if any(token in normalized for token in ("texture", "surface", "material")):
@@ -1832,7 +1857,9 @@ class ProductionPipelineMixin:
             "而是将可见事实、仅机器保留字段和拒绝发布字段分开处理。",
             "",
             *fact_decision_lines,
-            f"从源详情图核验并结构化 {len(facts.size_chart_rows)} 行尺码数据；只有标签、单位和 SKU 能够对应时才进入成品。",
+            f"从源详情图核验并结构化 {len(facts.evidence_tables)} 个表格、"
+            f"{sum(len(table.cells) for table in facts.evidence_tables)} 个原始单元格；"
+            "表格用途、展示列、展示行和详情图位置由模型根据来源证据决定，代码只验证引用并执行。",
             "所有三语文案、图片提示和媒体说明共享同一份裁决后事实。任何数值转换只执行确定性换算，"
             "不补全材质含量、性能、认证、地区尺码或其他源数据未支持的信息。",
             "",

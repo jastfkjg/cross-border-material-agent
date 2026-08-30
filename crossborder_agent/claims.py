@@ -206,21 +206,22 @@ def build_claim_ledger(
             item.evidence_pointer,
             ["buyer_copy", "machine_appendix"],
         )
-    for item in facts.size_chart_rows:
-        values = [
-            item.bust_cm,
-            item.length_cm,
-            item.weight_kg,
-            item.weight_lb,
-        ]
-        add(
-            "size_chart_row",
-            f"{item.size_label}: {'/'.join(value for value in values if value)}",
-            "source_image_ocr",
-            item.size_label,
-            item.evidence_pointer,
-            ["buyer_copy", "machine_appendix", "media_guide"],
-        )
+    for table in facts.evidence_tables:
+        is_rendered = table.presentation.get("decision") == "render"
+        for cell in table.cells:
+            add(
+                "source_table_cell",
+                cell.text,
+                "source_image_table",
+                table.table_id,
+                cell.evidence_pointer,
+                (
+                    ["buyer_copy", "machine_appendix", "media_guide"]
+                    if is_rendered
+                    else ["machine_appendix"]
+                ),
+                cell.confidence,
+            )
     for item in taxonomy.attributes:
         add(
             item.name,

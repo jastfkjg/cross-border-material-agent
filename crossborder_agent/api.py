@@ -802,16 +802,29 @@ Return a JSON object with keys:
 - image_quality_notes: string[]
 - prohibited_or_risky_visuals: string[]
 - preservation_constraints: string[]
-- size_chart_rows: an array containing only rows directly readable from supplied size-chart images. Each object must contain:
-  - size_label: exact size code such as S, M, XL or 2XL
-  - bust_cm: numeric string in centimeters, or empty string when not shown
-  - length_cm: numeric string in centimeters, or empty string when not shown
-  - weight_guidance: exact visible seller guidance including its unit, or empty string
-  - source_image_index: zero-based index of the supplied image containing the row
+- tables: an array containing every clearly legible, commercially useful two-dimensional table in the supplied images.
+  Do not assume a product category or a fixed set of columns. Each table must contain:
+  - table_id: batch-local identifier
+  - source_image_index: zero-based index of the supplied image containing the table
+  - cells: an array of exact visible cells. Every cell contains row (integer), column (integer), text (exact
+    source text), confidence (0 to 1), and optional row_span/column_span. Do not translate, normalize, infer,
+    merge, or invent cell text.
+  - presentation: your evidence-grounded decision about whether and how this table should become one of the five
+    detail images. It contains:
+    - decision: one of render, preserve_source, omit, request_verification
+    - priority: integer 0 to 100 relative to other observed tables
+    - target_detail_index: integer 1 to 5 when decision is render, otherwise 0
+    - display_locale: one of en, ko, pt
+    - titles: object containing concise en, ko and pt titles
+    - columns: array of selected source columns, each with source_column and labels containing en, ko and pt
+      (select at most 10 columns for one detail image)
+    - included_rows: exact source row indexes to display (select at most 24 rows for one detail image)
+    - notes: object containing en, ko and pt arrays of concise source-supported notes
+    - reason: concise decision rationale
 - images: an array of exactly {len(image_urls)} objects, one for every supplied image in input order.
   Every object must contain:
   - index: zero-based integer
-  - role: one of hero, front, back, side, detail, variant, size_chart, lifestyle, packaging, unknown
+  - role: one of hero, front, back, side, detail, variant, data_table, size_chart, lifestyle, packaging, unknown
   - dominant_color: concise observed color or empty string
   - product_coverage: one of high, medium, low, unknown
   - sharpness: one of high, medium, low, unknown
@@ -849,8 +862,12 @@ review graphics, certification seals and sensitive/prohibited content make safe_
 A person, ordinary prop, background text or suspected third-party styling mark makes the source unsuitable
 for direct listing, but it may remain a generation reference when the product is clear and the final generated
 asset removes those elements.
-For size_chart_rows, transcribe only complete, clearly legible rows. Do not estimate obscured digits, convert
-units, rename size codes, or infer measurements from the product. Return an empty array when no table is legible.
+For tables, preserve the complete observed grid without category-specific assumptions. A shirt, trousers, shoes,
+electronics specification sheet, comparison grid, or any unseen table shape uses the same cell protocol. Do not
+estimate obscured characters, derive values, rename source labels inside cells, or invent expected columns. The
+presentation may translate headers and decide what is useful, but every selected row and column must reference the
+observed grid. Use request_verification when cell evidence is insufficient. Return an empty array when no table is
+legible or commercially useful.
 For a marketplace hero, a person, unrelated prop, multiple products, incomplete product or lifestyle
 background makes the source unsuitable even when it remains usable as a detail reference.
 
@@ -898,7 +915,7 @@ Return JSON with these top-level keys:
 - unexpected_collage: boolean (true for montage, grid, split-screen or repeated panels; detail slot 4 may intentionally show a clean variant lineup)
 - product_coverage: one of high, medium, low
 - actual_role: one of hero, complete_product, construction_detail, surface_detail,
-  alternate_view, variant_comparison, wearer_context, product_only_context, size_chart, other
+  alternate_view, variant_comparison, wearer_context, product_only_context, source_data_table, other
 - description_confidence: one of high, medium, low
 - observed_features: array of concise English phrases describing only details directly visible in this asset
 - media_descriptions: object with exactly en, ko and pt keys. Each value must be a concise, native
@@ -917,7 +934,7 @@ Return JSON with these top-level keys:
 Judge the six assets as one commercial collection after judging each image. Penalize repeated camera
 angles, repeated crops, repeated backgrounds or two slots that communicate the same shopper value even
 when each image is individually usable. Do not call faithful consistency a duplicate when framing and
-commercial purpose are clearly distinct. A deterministic size chart may be visually different by design.
+commercial purpose are clearly distinct. A deterministic source-data table may be visually different by design.
 
 Verified facts:
 {facts_json}

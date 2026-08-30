@@ -231,7 +231,7 @@ def _planning_vision_context(vision: dict[str, Any]) -> dict[str, Any]:
             ),
             "roles": roles,
             "wearer_reference_present": _source_supports_wearer(vision),
-            "legible_size_rows": len(vision.get("size_chart_rows") or []),
+            "observed_tables": len(vision.get("tables") or []),
         }
     return compact
 

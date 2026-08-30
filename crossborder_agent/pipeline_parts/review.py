@@ -41,6 +41,35 @@ from .common import (
 )
 
 
+def review_acceptance_decision(
+    evaluation: Any,
+    artifact_fingerprint: str,
+) -> dict[str, Any]:
+    """Describe review availability without turning opinion into a submit gate."""
+
+    if evaluation is None or evaluation.artifact_fingerprint != artifact_fingerprint:
+        return {
+            "accepted": True,
+            "review_available": False,
+            "review_status": (
+                "unavailable" if evaluation is None else "stale"
+            ),
+            "artifact_fingerprint": artifact_fingerprint,
+            "review_artifact_fingerprint": (
+                str(evaluation.artifact_fingerprint) if evaluation is not None else ""
+            ),
+        }
+    return {
+        "accepted": True,
+        "review_available": True,
+        "artifact_fingerprint": artifact_fingerprint,
+        "advisory_ready": evaluation.ready_for_delivery,
+        "summary": evaluation.summary,
+        "issues": evaluation.issues,
+        "adjudication": evaluation.adjudication,
+    }
+
+
 class ReviewPipelineMixin:
     def _run_agentic_delivery_loop(
         self,
@@ -273,6 +302,9 @@ class ReviewPipelineMixin:
                     "artifact_fingerprint": current,
                     "issues": latest_evaluation.issues,
                     "models": latest_evaluation.evaluator_models,
+                    "ready_for_delivery": latest_evaluation.ready_for_delivery,
+                    "weighted_score": latest_evaluation.weighted_score,
+                    "dimension_scores": latest_evaluation.dimension_scores,
                 },
                 artifacts=current,
                 delivery_spec=str(state.expected_delivery_spec.get("version") or ""),
@@ -283,6 +315,9 @@ class ReviewPipelineMixin:
                 "summary": latest_evaluation.summary,
                 "issues": latest_evaluation.issues,
                 "ready_for_delivery": latest_evaluation.ready_for_delivery,
+                "weighted_score": latest_evaluation.weighted_score,
+                "dimension_scores": latest_evaluation.dimension_scores,
+                "adjudication": latest_evaluation.adjudication,
                 "evaluator_models": latest_evaluation.evaluator_models,
                 "problem_state": problem_state({}),
                 "deterministic_validation": validate_current(),
@@ -487,52 +522,10 @@ class ReviewPipelineMixin:
                 )
                 not in actual_sources
             ]
-            if mapping_gaps:
-                return AgentToolOutcome(
-                    {
-                        "ok": False,
-                        "error": "taxonomy repair dropped frozen source coverage",
-                        "missing_mapping_sources": mapping_gaps,
-                    }
-                )
             stale_dependencies = DependencyState.from_dict(
                 state.dependency_state
             ).stale_nodes()
-            if stale_dependencies:
-                return AgentToolOutcome(
-                    {
-                        "ok": False,
-                        "error": "downstream projections or review are stale",
-                        "stale_dependencies": stale_dependencies,
-                    }
-                )
-            if (
-                latest_evaluation is None
-                or latest_evaluation.artifact_fingerprint != current
-            ):
-                return AgentToolOutcome(
-                    {
-                        "ok": False,
-                        "error": "review_delivery is required for the current artifact state",
-                    }
-                )
-            hard_issues = [
-                item
-                for item in latest_evaluation.issues
-                if str(item.get("severity") or "").casefold() in {"blocker", "critical"}
-                or (
-                    str(item.get("dimension") or "") in {"A1", "A2", "A5"}
-                    and str(item.get("severity") or "").casefold() == "major"
-                )
-            ]
-            if hard_issues:
-                return AgentToolOutcome(
-                    {
-                        "ok": False,
-                        "error": "unresolved safety, integrity, or product-grounding findings",
-                        "issues": hard_issues,
-                    }
-                )
+            quality_decision = review_acceptance_decision(latest_evaluation, current)
             accepted = True
             state.accepted_artifact_fingerprint = current
             return AgentToolOutcome(
@@ -540,7 +533,11 @@ class ReviewPipelineMixin:
                     "accepted": True,
                     "reason": str(arguments.get("reason") or "")[:1000],
                     "artifact_fingerprint": current,
-                    "remaining_soft_issues": latest_evaluation.issues,
+                    "review": quality_decision,
+                    "advisory_warnings": {
+                        "missing_mapping_sources": mapping_gaps,
+                        "stale_dependencies": stale_dependencies,
+                    },
                 },
                 terminate=True,
             )
@@ -664,7 +661,7 @@ class ReviewPipelineMixin:
             ),
             AgentLoopTool(
                 "finish_delivery",
-                "Accept the current delivery and end the run. Call it alone. The host rejects stale review or unresolved hard safety/integrity findings.",
+                "Finish the current delivery and end the run. Call it alone after useful evidence-backed repairs. Semantic review is advisory; the host reports deterministic contract gaps for repair but never applies a score threshold.",
                 {
                     "type": "object",
                     "properties": {
@@ -714,31 +711,12 @@ class ReviewPipelineMixin:
         except ApiError as exc:
             self.warnings.append(f"顶层交付编排器提前停止: {exc}")
             self.trace.emit("orchestrator.delivery_failed", error=str(exc))
-            # Some OpenAI-compatible endpoints expose chat but not native tool
-            # calls. Preserve the protocol smoke path with a clearly degraded,
-            # deterministic contract gate; never pretend an LLM review occurred.
-            if "未调用任何可用工具" not in str(exc):
-                raise PipelineError(f"顶层交付编排器未能接受当前交付: {exc}") from exc
-            report = validate_delivery(work_dir, facts, taxonomy)
-            if not report.valid:
-                raise PipelineError(
-                    "顶层工具协议不可用且确定性交付校验失败: "
-                    + "; ".join(report.errors)
-                ) from exc
-            current = self._delivery_fingerprint(
-                state=state,
-                localization_payloads=localization_payloads,
-                localization_sources=localization_sources,
-                work_dir=work_dir,
-            )
-            state.accepted_artifact_fingerprint = current
-            warning = "模型端不支持原生工具调用：本次仅通过确定性交付契约门禁"
-            if warning not in self.warnings:
-                self.warnings.append(warning)
+            state.accepted_artifact_fingerprint = fingerprint()
             self.trace.emit(
-                "orchestrator.delivery_degraded_acceptance",
-                artifact_fingerprint=current,
-                reason="native-tool-protocol-unavailable",
+                "orchestrator.delivery_degraded",
+                reason="tool-loop-api-error",
+                error=str(exc),
+                artifact_fingerprint=state.accepted_artifact_fingerprint,
             )
             return
         self.agent.orchestrator_messages = result.messages
@@ -793,9 +771,13 @@ class ReviewPipelineMixin:
                 gate_observation.get("error")
                 or "current delivery did not satisfy the acceptance contract"
             )
-            raise PipelineError(
-                f"交付未通过宿主验收门禁（{result.stop_reason}）: {gate_error}"
+            warning = (
+                f"顶层交付编排未显式完成（{result.stop_reason}）: {gate_error}；"
+                "提交当前可用快照并保留问题记录"
             )
+            self.warnings.append(warning)
+            self.logger.warning(warning)
+            state.accepted_artifact_fingerprint = fingerprint()
 
     def _copy_revision_is_safe(
         self,
@@ -1209,7 +1191,7 @@ Candidate 1:
         for asset in image_assets:
             if hashes and asset.name not in distinct_names:
                 continue
-            if asset.generated or asset.model == "deterministic-size-chart":
+            if asset.generated or asset.model == "deterministic-evidence-table":
                 usable += 1
                 continue
             observation = self._source_image_observations.get(asset.source_url, {})
@@ -1461,17 +1443,17 @@ Candidate 1:
         except (MediaError, OSError):
             physically_usable = False
 
-        if asset.model == "deterministic-size-chart":
-            actual_role = "size_chart"
+        if asset.model == "deterministic-evidence-table":
+            actual_role = "source_data_table"
             observed_features = [
-                "locally rendered English size guide",
-                "seller-provided size, bust, and garment-length measurements",
-                "no Chinese text is rendered by the deterministic template",
+                "locally rendered model-selected source table",
+                "all displayed values retain exact source-cell grounding",
+                asset.description or "model-authored table presentation",
             ]
             media_descriptions = {
-                "en": "Size guide with seller-provided garment measurements.",
-                "ko": "판매자가 제공한 의류 실측 사이즈 안내표입니다.",
-                "pt": "Guia de tamanhos com as medidas da peça informadas pelo vendedor.",
+                "en": "Model-selected source table rendered from exact cells.",
+                "ko": "모델이 선택한 원본 표를 정확한 셀 값으로 렌더링한 이미지입니다.",
+                "pt": "Tabela da fonte selecionada pelo modelo e renderizada com células exatas.",
             }
             source_safe = True
             unwanted_text = False

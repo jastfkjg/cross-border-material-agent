@@ -20,10 +20,10 @@ from ..decision_state import (
 from ..models import (
     ProductFacts,
     RunState,
-    SizeChartRow,
     TaxonomyResult,
 )
 from ..qa import EXPECTED_FILES
+from ..table_evidence import extract_evidence_tables
 from .common import (
     unique as _unique,
 )
@@ -112,8 +112,8 @@ class EvidencePipelineMixin:
             return {}
         self._ensure_time(10 * 60)
         # The visual endpoint has a per-call image limit.  Preserve every distinct
-        # source URL and batch it instead of uniformly sampling a handful; size
-        # charts and construction details commonly sit near the end of descriptions.
+        # source URL and batch it instead of uniformly sampling a handful; useful
+        # data tables and construction details commonly sit near the end.
         urls = _unique(
             facts.product_image_urls
             + facts.sku_image_urls
@@ -205,104 +205,20 @@ class EvidencePipelineMixin:
                 self.warnings.append(f"源图视觉风险需人工复核: {risk_summary[:500]}")
         return result
 
-    def _apply_size_chart_observations(
+    def _apply_evidence_table_observations(
         self, facts: ProductFacts, vision: dict[str, Any]
     ) -> None:
-        """Promote only clearly structured, SKU-aligned visual measurements to facts."""
+        """Promote structurally valid grids and model-authored presentation decisions."""
 
-        raw_rows = vision.get("size_chart_rows") if isinstance(vision, dict) else None
-        source_images = (
-            vision.get("source_images") if isinstance(vision, dict) else None
+        tables = extract_evidence_tables(vision)
+        if not tables:
+            return
+        facts.evidence_tables = tables
+        self.logger.info(
+            "从源图片提取并核验 %d 个通用证据表格（%d 个单元格）",
+            len(tables),
+            sum(len(table.cells) for table in tables),
         )
-        if not isinstance(raw_rows, list) or not isinstance(source_images, list):
-            return
-
-        def size_code(value: Any) -> str:
-            raw = re.split(r"[\(（\[【]", str(value or "").strip(), maxsplit=1)[0]
-            compact = re.sub(r"[^A-Za-z0-9]+", "", raw).upper()
-            repeated_x = re.fullmatch(r"(X+)L", compact)
-            if repeated_x and len(repeated_x.group(1)) >= 2:
-                return f"{len(repeated_x.group(1))}XL"
-            return compact
-
-        known_codes: list[str] = []
-        for sku in facts.skus:
-            for item in sku.attributes:
-                code = size_code(item.value)
-                if code and len(code) <= 24 and code not in known_codes:
-                    known_codes.append(code)
-        image_by_index = {
-            item.get("index"): item
-            for item in source_images
-            if isinstance(item, dict) and isinstance(item.get("index"), int)
-        }
-
-        def measurement(value: Any) -> str:
-            match = re.fullmatch(
-                r"\s*(\d{1,4}(?:\.\d+)?)\s*(?:cm)?\s*", str(value or ""), re.I
-            )
-            if not match:
-                return ""
-            numeric = float(match.group(1))
-            return match.group(1) if 0 < numeric <= 1000 else ""
-
-        conversions: dict[str, tuple[str, str]] = {}
-        for item in facts.size_conversions:
-            code = size_code(item.source_label)
-            if code:
-                conversions[code] = (item.kilograms, item.pounds)
-
-        candidate_rows = [
-            raw
-            for raw in raw_rows
-            if isinstance(raw, dict) and size_code(raw.get("size_label"))
-        ]
-        matched_codes = {
-            size_code(raw.get("size_label"))
-            for raw in candidate_rows
-            if size_code(raw.get("size_label")) in known_codes
-        }
-        require_sku_alignment = len(matched_codes) >= 2
-
-        rows: list[SizeChartRow] = []
-        seen: set[str] = set()
-        for raw in raw_rows:
-            if not isinstance(raw, dict):
-                continue
-            code = size_code(raw.get("size_label"))
-            bust = measurement(raw.get("bust_cm"))
-            length = measurement(raw.get("length_cm"))
-            source_index = raw.get("source_image_index")
-            source_item = image_by_index.get(source_index)
-            if (
-                not code
-                or (require_sku_alignment and code not in known_codes)
-                or code in seen
-                or not source_item
-                or str(source_item.get("role") or "") != "size_chart"
-                or not (bust or length)
-            ):
-                continue
-            kilograms, pounds = conversions.get(code, ("", ""))
-            rows.append(
-                SizeChartRow(
-                    size_label=code,
-                    bust_cm=bust,
-                    length_cm=length,
-                    weight_kg=kilograms,
-                    weight_lb=pounds,
-                    evidence_pointer=f"source-image:{source_index}",
-                )
-            )
-            if not self._size_chart_source_url:
-                self._size_chart_source_url = str(source_item.get("url") or "")
-            seen.add(code)
-        if require_sku_alignment:
-            rows.sort(key=lambda item: known_codes.index(item.size_label))
-        if len(rows) < 2:
-            return
-        facts.size_chart_rows = rows
-        self.logger.info("从源详情图提取并核验 %d 行尺码表", len(rows))
 
     def _ordered_source_urls(
         self,
@@ -522,7 +438,7 @@ class EvidencePipelineMixin:
             url
             for url in ranked_primary
             if self._source_image_observations.get(url, {}).get("role")
-            not in {"size_chart", "packaging"}
+            not in {"data_table", "size_chart", "packaging"}
             and not self._source_image_observations.get(url, {}).get(
                 "has_overlay_text", False
             )
@@ -551,7 +467,7 @@ class EvidencePipelineMixin:
             url
             for url in ranked_description
             if self._source_image_observations.get(url, {}).get("role")
-            not in {"size_chart", "packaging"}
+            not in {"data_table", "size_chart", "packaging"}
             and not self._source_image_observations.get(url, {}).get(
                 "has_overlay_text", False
             )
@@ -653,8 +569,8 @@ def _merge_source_vision_batches(
     global_index = {url: index for index, url in enumerate(all_urls)}
     source_images: list[dict[str, Any]] = []
     hero_candidates: list[int] = []
-    size_rows: list[dict[str, Any]] = []
-    seen_rows: set[tuple[str, ...]] = set()
+    tables: list[dict[str, Any]] = []
+    seen_tables: set[str] = set()
     merged_lists: dict[str, list[str]] = {
         key: []
         for key in (
@@ -697,31 +613,39 @@ def _merge_source_vision_batches(
         if isinstance(local_best, int) and local_best in local_to_global:
             hero_candidates.append(local_to_global[local_best])
 
-        raw_rows = payload.get("size_chart_rows")
-        if not isinstance(raw_rows, list):
+        raw_tables = payload.get("tables")
+        if not isinstance(raw_tables, list):
             continue
-        for raw in raw_rows:
-            if not isinstance(raw, dict):
+        for raw_table in raw_tables:
+            if not isinstance(raw_table, dict):
                 continue
-            local_source = raw.get("source_image_index")
+            local_source = raw_table.get("source_image_index")
             if not isinstance(local_source, int) or local_source not in local_to_global:
                 continue
-            row = dict(raw)
-            row["source_image_index"] = local_to_global[local_source]
-            signature = tuple(
-                str(row.get(key) or "").strip().casefold()
-                for key in (
-                    "size_label",
-                    "bust_cm",
-                    "length_cm",
-                    "weight_guidance",
-                    "source_image_index",
-                )
+            table = dict(raw_table)
+            table["source_image_index"] = local_to_global[local_source]
+            raw_cells = table.get("cells")
+            cells = raw_cells if isinstance(raw_cells, list) else []
+            signature = json.dumps(
+                {
+                    "source_image_index": table["source_image_index"],
+                    "cells": [
+                        {
+                            "row": cell.get("row"),
+                            "column": cell.get("column"),
+                            "text": " ".join(str(cell.get("text") or "").split()),
+                        }
+                        for cell in cells
+                        if isinstance(cell, dict)
+                    ],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
             )
-            if signature in seen_rows:
+            if signature in seen_tables:
                 continue
-            seen_rows.add(signature)
-            size_rows.append(row)
+            seen_tables.add(signature)
+            tables.append(table)
 
     source_images.sort(key=lambda item: int(item["index"]))
     by_index = {int(item["index"]): item for item in source_images}
@@ -757,7 +681,7 @@ def _merge_source_vision_batches(
         "product_type": product_type,
         **merged_lists,
         "best_hero_image_index": best_index,
-        "size_chart_rows": size_rows,
+        "tables": tables,
         "source_images": source_images,
         "requested_image_count": len(all_urls),
         "inspected_image_count": sum(
