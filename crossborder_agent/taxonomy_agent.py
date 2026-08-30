@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
 
+from .agent_workspace import BoundedAgentWorkspace
 from .api import ApiError
 from .models import CategoryChoice, ProductFacts, TaxonomyResult
 from .taxonomy import (
@@ -70,17 +73,43 @@ class TaxonomyExplorer:
     COLLECTIONS = ("categories", "schemas", "attributes", "values")
 
     CATEGORY_TOOL_NAMES = (
-        "query_taxonomy",
-        "read_taxonomy",
+        "list",
+        "read",
+        "search",
+        "bash",
+        "write_staging",
         "finish_category",
     )
     ATTRIBUTE_TOOL_NAMES = (
-        "query_taxonomy",
-        "read_taxonomy",
+        "list",
+        "read",
+        "search",
+        "bash",
+        "write_staging",
         "finish_attributes",
     )
 
     TOOL_CATALOG = (
+        {
+            "name": "list",
+            "description": "List normalized evidence and taxonomy files in the bounded workspace.",
+        },
+        {
+            "name": "read",
+            "description": "Read a bounded line range from a normalized UTF-8 workspace file.",
+        },
+        {
+            "name": "search",
+            "description": "Regex-search normalized evidence/taxonomy files and return matching records.",
+        },
+        {
+            "name": "bash",
+            "description": "Run one restricted rg/jq/find/file/ffprobe command inside the workspace.",
+        },
+        {
+            "name": "write_staging",
+            "description": "Write notes or proposed intermediate data inside staging only.",
+        },
         {
             "name": "query_taxonomy",
             "description": (
@@ -140,9 +169,13 @@ class TaxonomyExplorer:
             "scope": {"type": "string", "enum": ["product", "sales"]},
             "platform_attr_id": {"type": "string"},
             "platform_value_id": {"type": "string"},
-            "source_kind": {"type": "string", "enum": ["product", "sku", "canonical"]},
-            "source_name": {"type": "string"},
-            "source_value": {"type": "string"},
+            "source_ref": {
+                "type": "string",
+                "description": (
+                    "Exact stable ref from evidence/product.json, such as "
+                    "product-attribute/3, sku-option/7, or canonical-claim/2."
+                ),
+            },
         }
         unresolved_properties = {
             "scope": {"type": "string", "enum": ["product", "sales"]},
@@ -206,6 +239,7 @@ class TaxonomyExplorer:
             "limit": {"type": "integer", "minimum": 1, "maximum": 60},
         }
         definitions = [
+            *BoundedAgentWorkspace.openai_tools(),
             tool(
                 "query_taxonomy",
                 by_name["query_taxonomy"],
@@ -307,11 +341,21 @@ class TaxonomyExplorer:
         self._refs: dict[str, dict[str, Any]] = {}
         self._build_records()
 
+        self._temporary_workspace = tempfile.TemporaryDirectory(
+            prefix="taxonomy-agent-workspace-"
+        )
+        self.workspace = BoundedAgentWorkspace(
+            Path(self._temporary_workspace.name),
+            on_observation=self._record_workspace_observation,
+        )
+        self._source_refs: dict[str, dict[str, str]] = {}
+        self._install_workspace()
+
         # Grounding ledger: final IDs must first have appeared in an observation.
         self.exposed_category_ids: set[str] = set()
         self.inspected_schema_ids: set[str] = set()
-        self.inspected_attribute_ids: set[tuple[str, str]] = set()
-        self.exposed_value_ids: dict[tuple[str, str], set[str]] = {}
+        self.inspected_attribute_ids: set[tuple[str, str, str]] = set()
+        self.exposed_value_ids: dict[tuple[str, str, str], set[str]] = {}
 
     def _build_tree(self) -> None:
         def visit(raw: Any, parent_id: str = "") -> None:
@@ -425,6 +469,144 @@ class TaxonomyExplorer:
                             "name": str(value.get("name") or ""),
                         },
                     )
+
+    def install_product_evidence(self, facts: ProductFacts) -> dict[str, Any]:
+        """Install exact source rows and return the compact model-visible index."""
+
+        self._source_refs.clear()
+        source_rows: list[dict[str, Any]] = []
+        for index, item in enumerate(facts.attributes):
+            ref = f"product-attribute/{index}"
+            row = {
+                "ref": ref,
+                "source_kind": "product",
+                "name": item.name,
+                "value": item.value,
+                "evidence_pointer": item.evidence_pointer or f"attributes[{index}]",
+            }
+            self._source_refs[ref] = {
+                "source_kind": "product",
+                "source_name": item.name,
+                "source_value": item.value,
+            }
+            source_rows.append(row)
+
+        unique_sku_rows: dict[tuple[str, str], dict[str, Any]] = {}
+        for sku in facts.skus:
+            for item in sku.attributes:
+                key = (item.name, item.value)
+                row = unique_sku_rows.setdefault(
+                    key,
+                    {
+                        "source_kind": "sku",
+                        "name": item.name,
+                        "value": item.value,
+                        "evidence_pointer": item.evidence_pointer,
+                        "sku_ids": [],
+                    },
+                )
+                if sku.sku_id and sku.sku_id not in row["sku_ids"]:
+                    row["sku_ids"].append(sku.sku_id)
+                if not row["evidence_pointer"]:
+                    row["evidence_pointer"] = sku.evidence_pointer
+        for index, row in enumerate(unique_sku_rows.values()):
+            ref = f"sku-option/{index}"
+            row = {
+                "ref": ref,
+                **row,
+                "evidence_pointer": row["evidence_pointer"] or f"skus[*].attributes[{index}]",
+            }
+            self._source_refs[ref] = {
+                "source_kind": "sku",
+                "source_name": str(row["name"]),
+                "source_value": str(row["value"]),
+            }
+            source_rows.append(row)
+
+        canonical_claims = facts.reconciled_fact_ledger.get(
+            "canonical_visual_claims", []
+        )
+        for index, item in enumerate(
+            canonical_claims if isinstance(canonical_claims, list) else []
+        ):
+            if not isinstance(item, dict):
+                continue
+            value = str(item.get("value") or "").strip()
+            if not value:
+                continue
+            name = str(item.get("concept") or "visible_design_feature")
+            ref = f"canonical-claim/{index}"
+            row = {
+                "ref": ref,
+                "source_kind": "canonical",
+                "name": name,
+                "value": value,
+                "evidence_pointer": str(
+                    item.get("evidence_pointer")
+                    or f"reconciled_fact_ledger.canonical_visual_claims[{index}]"
+                ),
+            }
+            self._source_refs[ref] = {
+                "source_kind": "canonical",
+                "source_name": name,
+                "source_value": value,
+            }
+            source_rows.append(row)
+
+        evidence = {
+            "source_title": facts.source_title,
+            "source_category_name": facts.source_category_name,
+            "source_evidence": source_rows,
+            "reconciled_fact_ledger": facts.reconciled_fact_ledger,
+        }
+        self.workspace.host_write_json("evidence/product.json", evidence)
+        return evidence
+
+    def _install_workspace(self) -> None:
+        for collection in self.COLLECTIONS:
+            self.workspace.host_write_json(
+                f"taxonomy/{collection}.jsonl",
+                self._records[collection],
+                jsonl=True,
+            )
+        self.workspace.host_write_json(
+            "workspace/index.json",
+            {
+                "evidence": ["evidence/product.json"],
+                "taxonomy": [
+                    f"taxonomy/{collection}.jsonl"
+                    for collection in self.COLLECTIONS
+                ],
+                "notes": (
+                    "JSONL records carry stable refs. Use search or restricted rg for discovery, "
+                    "then read bounded line ranges. Writes are allowed only below staging/."
+                ),
+            },
+        )
+
+    def _record_workspace_observation(self, text: str) -> None:
+        refs = set(
+            re.findall(
+                r"(?:categories|schemas|attributes|values)/[^\s\"'\\]+",
+                text,
+            )
+        )
+        by_collection: dict[str, list[dict[str, Any]]] = {}
+        for ref in refs:
+            record = self._refs.get(ref.rstrip(",}]"))
+            if record is None:
+                continue
+            collection = str(record["ref"]).split("/", 1)[0]
+            by_collection.setdefault(collection, []).append(record)
+        for collection, records in by_collection.items():
+            self._record_exposure(collection, records)
+
+    def source_record(self, ref: str) -> dict[str, str] | None:
+        row = self._source_refs.get(str(ref or ""))
+        return dict(row) if row is not None else None
+
+    def close(self) -> None:
+        self._temporary_workspace.cleanup()
 
     @staticmethod
     def _page(items: list[Any], arguments: dict[str, Any]) -> dict[str, Any]:
@@ -719,19 +901,22 @@ class TaxonomyExplorer:
             return
         for item in items:
             schema_id = str(item.get("schema_category_id") or "")
+            scope = str(item.get("scope") or "")
             attr_id = str(item.get("attr_id") or "")
-            if not schema_id or not attr_id:
+            if not schema_id or not scope or not attr_id:
                 continue
             self.inspected_schema_ids.add(schema_id)
-            self.inspected_attribute_ids.add((schema_id, attr_id))
+            self.inspected_attribute_ids.add((schema_id, scope, attr_id))
             if collection == "values" and item.get("value_id"):
-                self.exposed_value_ids.setdefault((schema_id, attr_id), set()).add(
-                    str(item["value_id"])
-                )
+                self.exposed_value_ids.setdefault(
+                    (schema_id, scope, attr_id), set()
+                ).add(str(item["value_id"]))
 
     def execute(self, tool: str, arguments: Any) -> dict[str, Any]:
         args = arguments if isinstance(arguments, dict) else {}
         try:
+            if tool in {"list", "read", "search", "bash", "write_staging"}:
+                return self.workspace.execute(tool, args)
             if tool == "query_taxonomy":
                 return self._query_taxonomy(args)
             if tool == "read_taxonomy":
@@ -745,8 +930,25 @@ class TaxonomyExplorer:
         return {"ok": True, "tool": tool, "result": result}
 
     @staticmethod
-    def _error(tool: str, error: str) -> dict[str, Any]:
-        return {"ok": False, "tool": tool, "error": error}
+    def _error(
+        tool: str,
+        error: str,
+        *,
+        code: str = "validation_error",
+        details: Any = None,
+        correction: str = "",
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "ok": False,
+            "tool": tool,
+            "error": error,
+            "code": code,
+        }
+        if details is not None:
+            result["details"] = details
+        if correction:
+            result["correction"] = correction
+        return result
 
     def finish_category(
         self, arguments: Any
@@ -793,91 +995,263 @@ class TaxonomyExplorer:
     ) -> tuple[TaxonomyResult | None, dict[str, Any]]:
         args = arguments if isinstance(arguments, dict) else {}
         schema_id = str(args.get("selected_attribute_schema_category_id") or "")
-        errors: list[str] = []
-        if schema_id not in self.inspected_schema_ids:
-            errors.append(
-                "selected_attribute_schema_category_id must be inspected first"
-            )
-
-        mappings = args.get("mappings")
-        if not isinstance(mappings, list):
-            errors.append("mappings must be an array")
-            mappings = []
-        for index, row in enumerate(mappings):
-            if not isinstance(row, dict):
-                errors.append(f"mapping {index} is not an object")
-                continue
-            attr_id = str(row.get("platform_attr_id") or "")
-            key = (schema_id, attr_id)
-            if key not in self.inspected_attribute_ids:
-                errors.append(
-                    f"mapping {index} uses attribute {attr_id} before inspecting it"
-                )
-                continue
-            value_id = str(row.get("platform_value_id") or "")
-            schema = attribute_schema_definition(self.attribute_data, schema_id)
-            definition = next(
-                (
-                    item
-                    for item in schema.get("attributes") or []
-                    if item.get("attr_id") == attr_id
-                ),
-                None,
-            )
-            allowed_values = list((definition or {}).get("values") or [])
-            if allowed_values and value_id not in self.exposed_value_ids.get(
-                key, set()
-            ):
-                errors.append(
-                    f"mapping {index} uses enum value {value_id} before observing it"
-                )
-            if not allowed_values and value_id:
-                errors.append(
-                    f"mapping {index} must leave value ID empty for a free-text attribute"
-                )
-
-        if errors:
-            return None, self._error("finish_attributes", "; ".join(errors))
-        base = TaxonomyResult(
-            category=category,
-            attributes=[],
-            attribute_schema_category_id=schema_id,
-        )
-        mapped = apply_model_attribute_mappings(
-            facts, base, self.attribute_data, mappings
-        )
-        if mappings and len(mapped.attributes) != len(mappings):
-            return None, self._error(
-                "finish_attributes",
-                "one or more mappings failed source/schema validation; inspect exact source pairs, scopes, and IDs",
-            )
-        if not mappings:
-            schema = attribute_schema_definition(self.attribute_data, schema_id)
-            mapped.missing_required = [
-                str(item.get("name") or "")
-                for item in schema.get("attributes") or []
-                if item.get("required")
-            ]
-
         schema = attribute_schema_definition(self.attribute_data, schema_id)
         definitions = {
             (str(item.get("scope") or ""), str(item.get("attr_id") or "")): item
             for item in schema.get("attributes") or []
             if item.get("attr_id")
         }
+        request_errors: list[dict[str, Any]] = []
+        if schema_id not in self.inspected_schema_ids:
+            request_errors.append(
+                {
+                    "code": "schema_not_observed",
+                    "field": "selected_attribute_schema_category_id",
+                    "actual": schema_id,
+                    "message": "schema must appear in read/search/bash output before commit",
+                }
+            )
+
+        mappings = args.get("mappings")
+        if not isinstance(mappings, list):
+            request_errors.append(
+                {
+                    "code": "invalid_mapping_array",
+                    "field": "mappings",
+                    "actual_type": type(mappings).__name__,
+                    "message": "mappings must be an array",
+                }
+            )
+            mappings = []
+        accepted_rows: list[dict[str, Any]] = []
+        rejected_rows: list[dict[str, Any]] = []
+        expanded_mappings: list[dict[str, str]] = []
+        seen_mapping_keys: set[tuple[str, str, str, str]] = set()
+        for index, row in enumerate(mappings):
+            if not isinstance(row, dict):
+                rejected_rows.append(
+                    {
+                        "mapping_index": index,
+                        "submitted": row,
+                        "reasons": [
+                            {
+                                "code": "mapping_not_object",
+                                "field": f"mappings[{index}]",
+                                "message": "mapping must be an object",
+                            }
+                        ],
+                    }
+                )
+                continue
+            scope = str(row.get("scope") or "")
+            attr_id = str(row.get("platform_attr_id") or "")
+            key = (schema_id, scope, attr_id)
+            definition = definitions.get((scope, attr_id))
+            value_id = str(row.get("platform_value_id") or "")
+            source_ref = str(row.get("source_ref") or "")
+            source = self.source_record(source_ref)
+            reasons: list[dict[str, Any]] = []
+            if definition is None:
+                reasons.append(
+                    {
+                        "code": "attribute_not_in_schema",
+                        "field": "platform_attr_id",
+                        "actual": attr_id,
+                        "scope": scope,
+                        "message": "attribute ID/scope is not defined by the selected schema",
+                    }
+                )
+            elif key not in self.inspected_attribute_ids:
+                reasons.append(
+                    {
+                        "code": "attribute_not_observed",
+                        "field": "platform_attr_id",
+                        "actual": attr_id,
+                        "scope": scope,
+                        "expected_ref": f"attributes/{schema_id}/{scope}/{attr_id}",
+                        "message": "read or search the exact attribute record before commit",
+                    }
+                )
+            allowed_values = list((definition or {}).get("values") or [])
+            allowed_value_ids = {
+                str(item.get("value_id") or "") for item in allowed_values
+            }
+            if allowed_values and value_id not in allowed_value_ids:
+                reasons.append(
+                    {
+                        "code": "value_not_in_attribute",
+                        "field": "platform_value_id",
+                        "actual": value_id,
+                        "message": "enum value ID is not defined by this schema attribute",
+                    }
+                )
+            elif allowed_values and value_id not in self.exposed_value_ids.get(key, set()):
+                reasons.append(
+                    {
+                        "code": "value_not_observed",
+                        "field": "platform_value_id",
+                        "actual": value_id,
+                        "expected_ref": f"values/{schema_id}/{scope}/{attr_id}/{value_id}",
+                        "message": "read or search the exact enum value record before commit",
+                    }
+                )
+            if not allowed_values and value_id:
+                reasons.append(
+                    {
+                        "code": "free_text_value_id_must_be_empty",
+                        "field": "platform_value_id",
+                        "actual": value_id,
+                        "message": "leave platform_value_id empty for a free-text attribute",
+                    }
+                )
+            if source is None:
+                same_scope_refs = [
+                    ref
+                    for ref, candidate in self._source_refs.items()
+                    if (scope == "sales" and candidate["source_kind"] == "sku")
+                    or (
+                        scope == "product"
+                        and candidate["source_kind"] in {"product", "canonical"}
+                    )
+                ]
+                reasons.append(
+                    {
+                        "code": "unknown_source_ref",
+                        "field": "source_ref",
+                        "actual": source_ref,
+                        "available_source_refs_for_scope": same_scope_refs[:80],
+                        "message": "source_ref must be copied exactly from evidence/product.json",
+                    }
+                )
+            elif (
+                scope == "sales" and source["source_kind"] != "sku"
+            ) or (
+                scope == "product"
+                and source["source_kind"] not in {"product", "canonical"}
+            ):
+                reasons.append(
+                    {
+                        "code": "source_scope_mismatch",
+                        "field": "source_ref",
+                        "actual": source_ref,
+                        "source_kind": source["source_kind"],
+                        "expected": "sku" if scope == "sales" else "product or canonical",
+                        "message": "source evidence kind does not match platform attribute scope",
+                    }
+                )
+            duplicate_key = (scope, attr_id, value_id, source_ref)
+            if duplicate_key in seen_mapping_keys:
+                reasons.append(
+                    {
+                        "code": "duplicate_mapping",
+                        "field": f"mappings[{index}]",
+                        "message": "an identical mapping already appears in this proposal",
+                    }
+                )
+            seen_mapping_keys.add(duplicate_key)
+            if reasons:
+                rejected_rows.append(
+                    {
+                        "mapping_index": index,
+                        "submitted": row,
+                        "reasons": reasons,
+                    }
+                )
+                continue
+            assert source is not None
+            expanded = {
+                "scope": scope,
+                "platform_attr_id": attr_id,
+                "platform_value_id": value_id,
+                **source,
+            }
+            expanded_mappings.append(expanded)
+            accepted_rows.append(
+                {
+                    "mapping_index": index,
+                    "submitted": row,
+                    "resolved_source": source,
+                }
+            )
+
+        if request_errors or rejected_rows:
+            return None, self._error(
+                "finish_attributes",
+                "attribute proposal was not committed; correct only the rejected rows and resubmit the complete proposal",
+                code="attribute_mapping_rejected",
+                details={
+                    "request_errors": request_errors,
+                    "accepted_mappings": accepted_rows,
+                    "rejected_mappings": rejected_rows,
+                    "accepted_mapping_count": len(accepted_rows),
+                    "rejected_mapping_count": len(rejected_rows),
+                },
+                correction=(
+                    "Keep every accepted mapping unchanged. Replace each rejected row using its exact reason, "
+                    "expected ref, and the stable source refs in evidence/product.json; then resubmit once."
+                ),
+            )
+        base = TaxonomyResult(
+            category=category,
+            attributes=[],
+            attribute_schema_category_id=schema_id,
+        )
+        mapped = apply_model_attribute_mappings(
+            facts, base, self.attribute_data, expanded_mappings
+        )
+        if expanded_mappings and len(mapped.attributes) != len(expanded_mappings):
+            return None, self._error(
+                "finish_attributes",
+                "host mapping installation disagreed with the prevalidated proposal",
+                code="mapping_installation_invariant_failed",
+                details={
+                    "accepted_mappings": accepted_rows,
+                    "expected_count": len(expanded_mappings),
+                    "installed_count": len(mapped.attributes),
+                },
+                correction="Do not retry the identical proposal; inspect the reported source refs and schema records.",
+            )
+        if not expanded_mappings:
+            mapped.missing_required = [
+                str(item.get("name") or "")
+                for item in schema.get("attributes") or []
+                if item.get("required")
+            ]
+
         unresolved_rows = args.get("unresolved_mappings")
         if unresolved_rows is None:
             unresolved_rows = []
         elif not isinstance(unresolved_rows, list):
             return None, self._error(
-                "finish_attributes", "unresolved_mappings must be an array"
+                "finish_attributes",
+                "unresolved_mappings must be an array",
+                code="invalid_unresolved_mapping_array",
+                details={
+                    "field": "unresolved_mappings",
+                    "actual_type": type(unresolved_rows).__name__,
+                    "accepted_mappings": accepted_rows,
+                },
+                correction=(
+                    "Keep accepted mappings unchanged and submit unresolved_mappings as an array; "
+                    "use an empty array when every required/relevant attribute is mapped."
+                ),
             )
         unresolved: dict[tuple[str, str], str] = {}
-        unresolved_errors: list[str] = []
+        accepted_unresolved: list[dict[str, Any]] = []
+        rejected_unresolved: list[dict[str, Any]] = []
         for index, row in enumerate(unresolved_rows):
             if not isinstance(row, dict):
-                unresolved_errors.append(
-                    f"unresolved mapping {index} is not an object"
+                rejected_unresolved.append(
+                    {
+                        "unresolved_index": index,
+                        "submitted": row,
+                        "reasons": [
+                            {
+                                "code": "unresolved_not_object",
+                                "message": "unresolved mapping must be an object",
+                            }
+                        ],
+                    }
                 )
                 continue
             key = (
@@ -885,37 +1259,71 @@ class TaxonomyExplorer:
                 str(row.get("platform_attr_id") or ""),
             )
             reason = str(row.get("reason") or "").strip()
+            reasons: list[dict[str, Any]] = []
             if key not in definitions:
-                unresolved_errors.append(
-                    f"unresolved mapping {index} references an unknown schema attribute"
+                reasons.append(
+                    {
+                        "code": "unresolved_attribute_not_in_schema",
+                        "scope": key[0],
+                        "platform_attr_id": key[1],
+                        "message": "attribute ID/scope is not defined by the selected schema",
+                    }
                 )
-            elif (schema_id, key[1]) not in self.inspected_attribute_ids:
-                unresolved_errors.append(
-                    f"unresolved mapping {index} references attribute {key[1]} before inspecting it"
+            elif (schema_id, key[0], key[1]) not in self.inspected_attribute_ids:
+                reasons.append(
+                    {
+                        "code": "unresolved_attribute_not_observed",
+                        "expected_ref": f"attributes/{schema_id}/{key[0]}/{key[1]}",
+                        "message": "read or search the exact attribute before marking it unresolved",
+                    }
                 )
-            elif len(reason) < 8:
-                unresolved_errors.append(
-                    f"unresolved mapping {index} needs an evidence-based reason"
+            if len(reason) < 8:
+                reasons.append(
+                    {
+                        "code": "unresolved_reason_too_short",
+                        "field": "reason",
+                        "minimum_characters": 8,
+                        "message": "provide the concrete missing or conflicting source evidence",
+                    }
+                )
+            if reasons:
+                rejected_unresolved.append(
+                    {
+                        "unresolved_index": index,
+                        "submitted": row,
+                        "reasons": reasons,
+                    }
                 )
             else:
                 unresolved[key] = reason[:1000]
-        if unresolved_errors:
+                accepted_unresolved.append(
+                    {
+                        "unresolved_index": index,
+                        "scope": key[0],
+                        "platform_attr_id": key[1],
+                        "reason": reason[:1000],
+                    }
+                )
+        if rejected_unresolved:
             return None, self._error(
-                "finish_attributes", "; ".join(unresolved_errors)
+                "finish_attributes",
+                "one or more unresolved dispositions were rejected",
+                code="unresolved_mapping_rejected",
+                details={
+                    "accepted_mappings": accepted_rows,
+                    "accepted_unresolved_mappings": accepted_unresolved,
+                    "rejected_unresolved_mappings": rejected_unresolved,
+                },
+                correction=(
+                    "Keep accepted rows unchanged. Correct only each rejected unresolved row using its exact "
+                    "schema ref and a concrete evidence-gap reason, then resubmit the complete proposal."
+                ),
             )
 
         present = {
             ("sales" if item.sales_attribute else "product", item.attr_id)
             for item in mapped.attributes
         }
-        product_rows = [(item.name, item.value) for item in facts.attributes]
-        sku_rows = list(
-            dict.fromkeys(
-                (item.name, item.value)
-                for sku in facts.skus
-                for item in sku.attributes
-            )
-        )
 
         def evidence_candidates(definition: dict[str, Any]) -> list[dict[str, str]]:
             scope = str(definition.get("scope") or "")
@@ -925,16 +1333,23 @@ class TaxonomyExplorer:
                 for item in definition.get("values") or []
                 if _search_text(item.get("name"))
             }
-            source_rows = sku_rows if scope == "sales" else product_rows
             candidates: list[dict[str, str]] = []
-            for source_name, source_value in source_rows:
+            for source_ref, source in self._source_refs.items():
+                source_kind = source["source_kind"]
+                if scope == "sales" and source_kind != "sku":
+                    continue
+                if scope == "product" and source_kind not in {"product", "canonical"}:
+                    continue
+                source_name = source["source_name"]
+                source_value = source["source_value"]
                 if (
                     _search_text(source_name) == attribute_name
                     or _search_text(source_value) in values
                 ):
                     candidates.append(
                         {
-                            "source_kind": "sku" if scope == "sales" else "product",
+                            "source_ref": source_ref,
+                            "source_kind": source_kind,
                             "source_name": source_name,
                             "source_value": source_value,
                         }
@@ -967,9 +1382,16 @@ class TaxonomyExplorer:
         if completion_gaps:
             return None, self._error(
                 "finish_attributes",
-                "attribute selection is incomplete; map each grounded item or explicitly include it in "
-                "unresolved_mappings with an evidence-based reason: "
-                + json.dumps(completion_gaps, ensure_ascii=False),
+                "attribute selection is incomplete",
+                code="attribute_disposition_incomplete",
+                details={
+                    "completion_gaps": completion_gaps,
+                    "accepted_mappings": accepted_rows,
+                },
+                correction=(
+                    "For every completion gap, either map one of matching_source_evidence refs or add the "
+                    "inspected attribute to unresolved_mappings with an evidence-based reason."
+                ),
             )
         return mapped, self._ok(
             "finish_attributes",
@@ -977,6 +1399,7 @@ class TaxonomyExplorer:
                 "selected_category_id": category.category_id,
                 "selected_attribute_schema_category_id": schema_id,
                 "accepted_mapping_count": len(mapped.attributes),
+                "accepted_mappings": accepted_rows,
                 "unresolved_mapping_count": len(unresolved),
                 "unresolved_mappings": [
                     {
@@ -1030,73 +1453,75 @@ class TaxonomyReActAgent:
         self.trace = trace
         self.max_turns = max_turns
 
-    @staticmethod
     def _product_evidence(
-        facts: ProductFacts, *, decision_context: str = ""
+        self, facts: ProductFacts, *, decision_context: str = ""
     ) -> dict[str, Any]:
-        sku_options: list[dict[str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for sku in facts.skus:
-            for item in sku.attributes:
-                key = (item.name, item.value)
-                if key not in seen:
-                    seen.add(key)
-                    sku_options.append({"name": item.name, "value": item.value})
-        evidence = {
-            "source_title": facts.source_title,
-            "source_category_name": facts.source_category_name,
-            "attributes": [
-                {"name": item.name, "value": item.value} for item in facts.attributes
-            ],
-            "sku_options": sku_options,
-            # This remains evidence, not a host-side routing rule.  The model
-            # decides whether a reconciled conflict changes category/schema or
-            # only affects a particular publication surface.
-            "reconciled_fact_ledger": facts.reconciled_fact_ledger,
-            "canonical_sources": [
-                {
-                    "name": str(item.get("concept") or "visible_design_feature"),
-                    "value": str(item.get("value") or ""),
-                }
-                for item in facts.reconciled_fact_ledger.get(
-                    "canonical_visual_claims", []
-                )
-                if isinstance(item, dict) and str(item.get("value") or "").strip()
-            ],
-        }
+        evidence = self.explorer.install_product_evidence(facts)
         if decision_context:
             evidence["orchestrator_reconsideration_context"] = decision_context[:3000]
+            self.explorer.workspace.host_write_json("evidence/product.json", evidence)
         return evidence
 
     def run(
         self, facts: ProductFacts, *, decision_context: str = ""
     ) -> TaxonomyResult:
-        evidence = self._product_evidence(
+        try:
+            evidence = self._product_evidence(
+                facts, decision_context=decision_context
+            )
+            category = self.resolve_category(facts, evidence=evidence)
+            return self.resolve_attributes(facts, category, evidence=evidence)
+        finally:
+            self.close()
+
+    def resolve_category(
+        self,
+        facts: ProductFacts,
+        *,
+        decision_context: str = "",
+        evidence: dict[str, Any] | None = None,
+    ) -> CategoryChoice:
+        """Run and commit only the independently validated category transaction."""
+
+        phase_evidence = evidence or self._product_evidence(
             facts, decision_context=decision_context
         )
         native_step = getattr(self.client, "chat_tool_step", None)
         if callable(native_step):
-            category = self._run_native_category(evidence)
-            return self._run_native_attributes(facts, category, evidence)
-        category = self._run_json_category(evidence)
-        return self._run_json_attributes(facts, category, evidence)
+            return self._run_native_category(phase_evidence)
+        return self._run_json_category(phase_evidence)
+
+    def resolve_attributes(
+        self,
+        facts: ProductFacts,
+        category: CategoryChoice,
+        *,
+        decision_context: str = "",
+        evidence: dict[str, Any] | None = None,
+    ) -> TaxonomyResult:
+        """Run and commit attributes without changing an accepted category."""
+
+        phase_evidence = evidence or self._product_evidence(
+            facts, decision_context=decision_context
+        )
+        native_step = getattr(self.client, "chat_tool_step", None)
+        if callable(native_step):
+            return self._run_native_attributes(facts, category, phase_evidence)
+        return self._run_json_attributes(facts, category, phase_evidence)
+
+    def close(self) -> None:
+        self.explorer.close()
 
     def _system_prompt(self, phase: str) -> str:
         shared = (
             "You are the reasoning controller of a marketplace taxonomy exploration agent. "
-            "You receive product evidence and generic bounded read-only access to normalized taxonomy records, "
-            "never the complete snapshots in context. Use query_taxonomy like a safe data-query shell: issue up "
-            "to eight independent requests in one call, choosing a collection, filters, match=all/any, fields, "
-            "sorting, and pagination. Operators are eq, neq, contains, not_contains, contains_any, contains_all, "
-            "in, exists, gt/gte/lt/lte. Use read_taxonomy to expand exact refs returned by a query. Categories "
-            "expose parent/child/ancestor IDs and structurally available schema IDs; schemas, attributes, and "
-            "values are separate flat collections linked by schema_category_id and attr_id. Field map: categories "
-            "have category_id/name/path/parent_id/is_leaf/child_ids/ancestor_ids/available_schema_ids; schemas have "
-            "schema_category_id/name/path and attribute counts; attributes have schema_category_id/scope/attr_id/"
-            "name/required/multiple/value_count; values have schema_category_id/scope/attr_id/attribute_name/"
-            "value_id/name. Semantic decisions are yours; tools only query and validate. Batch independent lookups "
-            "instead of spending one turn per term or attribute. Separate alternatives into batched requests when "
-            "OR would be too broad, and follow next_offset when later pages remain. Do not guess IDs or use product "
+            "You receive a bounded workspace instead of complete snapshots in context. Start with workspace/index.json. "
+            "Product evidence is in evidence/product.json; normalized categories, schemas, attributes, and values are "
+            "JSONL files below taxonomy/. Use list/read/search, or a single restricted rg/jq/find/file/ffprobe command "
+            "through bash. Use write_staging only for notes. Every taxonomy record carries a stable ref. Category "
+            "records expose parent/child/ancestor IDs and available_schema_ids; schema, attribute and value records are "
+            "linked by schema_category_id, scope and attr_id. Semantic decisions are yours; host tools only retrieve "
+            "and validate. Batch searches with one regex when practical, then read only useful line ranges. Do not guess IDs or use product "
             "identifiers/benchmark memories. Adapt after empty or ambiguous results. Every turn includes a budget "
             "notice. The last two phase turns are reserved "
             "for a validated finish and one correction, so complete prerequisite inspection before that window. "
@@ -1106,19 +1531,19 @@ class TaxonomyReActAgent:
         if phase == "category":
             phase_rules = (
                 "This task selects only the best platform leaf category. Prefer source category, title, and "
-                "structured facts. Query multiple useful phrases together and inspect exact refs only when needed. "
+                "structured facts. Search multiple useful phrases and inspect exact records only when needed. "
                 "Call finish_category as soon as a suitable observed leaf is identified; provide "
                 "selected_category_id, confidence, and evidence."
             )
         else:
             phase_rules = (
                 "This separate task selects the attribute schema and grounded mappings for an already selected "
-                "leaf. Query its category record for available_schema_ids, then batch schema, attribute, and value "
-                "filters using source names and values. Before finish_attributes, every submitted schema, attribute, "
-                "and enum value ID must have appeared in query/read output. Each mapping contains scope, "
-                "platform_attr_id, platform_value_id, source_kind, and source_name/source_value copied exactly from "
-                "PRODUCT EVIDENCE. Reconciled canonical_sources may use source_kind=canonical; never relabel a raw "
-                "contradictory seller field as canonical. Prioritize every required product attribute and every sales "
+                "leaf. Inspect its category record for available_schema_ids, then search schema, attribute, and value "
+                "records using source names and values. Before finish_attributes, every submitted schema, attribute, "
+                "and enum value ID must have appeared in read/search/bash output. Each mapping contains scope, "
+                "platform_attr_id, platform_value_id, and one source_ref copied exactly from evidence/product.json. "
+                "Stable source refs eliminate manual copying of source kind/name/value. Never substitute a nearby ref. "
+                "Prioritize every required product attribute and every sales "
                 "dimension directly represented by SKU evidence. finish_attributes requires unresolved_mappings: for "
                 "each required or source-relevant attribute you cannot safely map, name the inspected platform attr ID "
                 "and explain the evidence gap. This is a disposition ledger, not permission to skip inspection. "
@@ -1234,6 +1659,7 @@ class TaxonomyReActAgent:
         messages: list[dict[str, Any]] = [{"role": "user", "content": initial_prompt}]
         repeated_actions: dict[str, int] = {}
         for phase_turn in range(1, phase_budget + 1):
+            stalled_error = ""
             remaining = phase_budget - phase_turn + 1
             available_names = set(
                 self._available_names(tool_names, finish_name, remaining)
@@ -1292,10 +1718,25 @@ class TaxonomyReActAgent:
                             f"tool is unavailable in the current {phase} budget window; "
                             f"available tools: {sorted(available_names)}",
                         )
+                    elif action == finish_name and repeated_actions[signature] > 1:
+                        observation = TaxonomyExplorer._error(
+                            action or "unknown",
+                            "identical rejected finish repeated without changing the proposal",
+                            code="no_progress",
+                            correction=(
+                                "Use the previous rejection's rejected_mappings, expected refs, and correction "
+                                "fields. An unchanged proposal cannot pass deterministic validation."
+                            ),
+                        )
+                        stalled_error = (
+                            f"native taxonomy {phase} stopped after an identical rejected finish; "
+                            "the successful prior phase remains committed"
+                        )
                     elif repeated_actions[signature] > 2:
                         observation = TaxonomyExplorer._error(
                             action or "unknown",
-                            "identical action repeated; revise the query or browse another node",
+                            "identical exploration action repeated; change the query or read another range",
+                            code="no_progress",
                         )
                     elif action == finish_name:
                         completed, observation = finish(arguments)
@@ -1317,6 +1758,8 @@ class TaxonomyReActAgent:
                 )
             if completed is not None:
                 return completed, phase_turn
+            if stalled_error:
+                raise TaxonomyAgentError(stalled_error)
         raise TaxonomyAgentError(
             f"native taxonomy {phase} exploration did not finish within its {phase_budget}-turn "
             "independent task budget"
@@ -1414,10 +1857,36 @@ class TaxonomyReActAgent:
                 self._trace(
                     phase_turn, phase, phase_turn, action, arguments, observation
                 )
+            elif action == finish_name and repeated_actions[signature] > 1:
+                observation = TaxonomyExplorer._error(
+                    action or "unknown",
+                    "identical rejected finish repeated without changing the proposal",
+                    code="no_progress",
+                    correction=(
+                        "Use the previous rejection's rejected_mappings, expected refs, and correction fields. "
+                        "An unchanged proposal cannot pass deterministic validation."
+                    ),
+                )
+                self._trace(
+                    phase_turn, phase, phase_turn, action, arguments, observation
+                )
+                history.append(
+                    {
+                        "action": action,
+                        "arguments": arguments if isinstance(arguments, dict) else {},
+                        "reason": str(response.get("reason") or "")[:500],
+                        "observation": observation,
+                    }
+                )
+                raise TaxonomyAgentError(
+                    f"taxonomy {phase} stopped after an identical rejected finish; "
+                    "the successful prior phase remains committed"
+                )
             elif repeated_actions[signature] > 2:
                 observation = TaxonomyExplorer._error(
                     action or "unknown",
-                    "identical action repeated; revise the query or browse another node",
+                    "identical exploration action repeated; change the query or read another range",
+                    code="no_progress",
                 )
                 self._trace(
                     phase_turn, phase, phase_turn, action, arguments, observation

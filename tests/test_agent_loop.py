@@ -77,11 +77,23 @@ class NativeToolAgentLoopTests(unittest.TestCase):
         self.assertIsNotNone(client.body)
         body = client.body or {}
         tool_names = [item["function"]["name"] for item in body["tools"]]
-        self.assertEqual(tool_names, ["inspect_evidence", "submit_delivery_plan"])
+        self.assertEqual(
+            set(tool_names),
+            {
+                "list",
+                "read",
+                "search",
+                "bash",
+                "write_staging",
+                "inspect_evidence",
+                "submit_delivery_plan",
+            },
+        )
+        self.assertEqual(tool_names[-1], "submit_delivery_plan")
         encoded = json.dumps(
             body, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
-        self.assertLess(len(encoded), 7_500)
+        self.assertLess(len(encoded), 13_000)
 
     def test_complete_protocol_exposes_observations_and_finishes(self) -> None:
         client = ScriptedToolClient()

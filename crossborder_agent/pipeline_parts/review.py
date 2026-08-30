@@ -6,11 +6,13 @@ import copy
 import hashlib
 import json
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 from ..agent_loop import AgentLoopTool, AgentToolOutcome, NativeToolAgentLoop
+from ..agent_workspace import BoundedAgentWorkspace
 from ..agent_tools import BoundedToolRegistry
 from ..api import ApiError
 from ..decision_state import (
@@ -553,10 +555,72 @@ class ReviewPipelineMixin:
             "properties": {},
             "additionalProperties": False,
         }
+        runtime_dir = Path(
+            tempfile.mkdtemp(prefix=".agent-runtime-", dir=work_dir)
+        )
+        runtime_prefix = runtime_dir.relative_to(work_dir).as_posix()
+        workspace = BoundedAgentWorkspace(
+            work_dir,
+            staging_dir=f"{runtime_prefix}/staging",
+        )
+
+        def refresh_agent_workspace() -> None:
+            workspace.host_write_json(
+                f"{runtime_prefix}/workspace/index.json",
+                {
+                    "current_state": f"{runtime_prefix}/state/delivery.json",
+                    "problem_state": f"{runtime_prefix}/state/problems.json",
+                    "product_evidence": f"{runtime_prefix}/evidence/product.json",
+                    "expected_delivery_spec": f"{runtime_prefix}/evidence/expected_delivery_spec.json",
+                    "repair_capabilities": f"{runtime_prefix}/state/repair_tools.json",
+                    "artifact_files": sorted(
+                        path.name
+                        for path in work_dir.iterdir()
+                        if path.is_file() and not path.name.startswith(".")
+                    ),
+                    "notes": (
+                        "Artifact files at workspace root are read-only to the agent. "
+                        "Use file/ffprobe through restricted bash for local physical inspection."
+                    ),
+                },
+            )
+            workspace.host_write_json(
+                f"{runtime_prefix}/evidence/product.json", facts.compact_dict()
+            )
+            workspace.host_write_json(
+                f"{runtime_prefix}/evidence/expected_delivery_spec.json",
+                state.expected_delivery_spec,
+            )
+            workspace.host_write_json(
+                f"{runtime_prefix}/state/delivery.json", inspect_delivery({})
+            )
+            workspace.host_write_json(
+                f"{runtime_prefix}/state/problems.json", problem_state({})
+            )
+            workspace.host_write_json(
+                f"{runtime_prefix}/state/repair_tools.json", catalog
+            )
+
+        def workspace_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            refresh_agent_workspace()
+            return workspace.execute(name, arguments)
+
+        refresh_agent_workspace()
         loop_tools = [
+            *[
+                AgentLoopTool(
+                    str(item["function"]["name"]),
+                    str(item["function"]["description"]),
+                    dict(item["function"]["parameters"]),
+                    lambda arguments, name=str(item["function"]["name"]): workspace_tool(
+                        name, arguments
+                    ),
+                )
+                for item in BoundedAgentWorkspace.openai_tools()
+            ],
             AgentLoopTool(
                 "inspect_delivery",
-                "Inspect current artifacts, prior visual-set evidence, available repairs, and deterministic validation.",
+                "Inspect the full current delivery snapshot. Prefer workspace read/search when only one evidence section is needed.",
                 empty_schema,
                 inspect_delivery,
             ),
@@ -633,17 +697,20 @@ class ReviewPipelineMixin:
             10, min(64, int(available_loop_seconds // 20.0) or 10)
         )
         try:
-            result = loop.run(
-                "Initial production is complete. Inspect and review it, choose any valuable targeted repairs, "
-                "review changed states, and call finish_delivery when the evidence is sufficient. Avoid cosmetic "
-                "churn; prioritize product identity, factual grounding, buyer-facing compliance, and artifact integrity. "
-                "Use inspect_problem_state whenever attempt history, no-change results, remaining time, or tool costs "
-                "would help you decide the next action. You own the repair strategy; no fixed repair order is implied.",
-                loop_tools,
-                max_turns=max_orchestrator_turns,
-                deadline=self.deadline,
-                reserve_seconds=120,
-            )
+            try:
+                result = loop.run(
+                    f"Initial production is complete. Start from {runtime_prefix}/workspace/index.json. Inspect and review it, choose any valuable targeted repairs, "
+                    "review changed states, and call finish_delivery when the evidence is sufficient. Avoid cosmetic "
+                    "churn; prioritize product identity, factual grounding, buyer-facing compliance, and artifact integrity. "
+                    "Use the workspace or inspect_problem_state whenever attempt history, no-change results, remaining time, or tool costs "
+                    "would help you decide the next action. You own the repair strategy; no fixed repair order is implied.",
+                    loop_tools,
+                    max_turns=max_orchestrator_turns,
+                    deadline=self.deadline,
+                    reserve_seconds=120,
+                )
+            finally:
+                shutil.rmtree(runtime_dir, ignore_errors=True)
         except ApiError as exc:
             self.warnings.append(f"顶层交付编排器提前停止: {exc}")
             self.trace.emit("orchestrator.delivery_failed", error=str(exc))

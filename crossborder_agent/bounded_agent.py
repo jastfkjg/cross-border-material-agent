@@ -7,11 +7,13 @@ import hashlib
 import json
 import logging
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 from .agent_loop import AgentLoopTool, AgentToolOutcome, NativeToolAgentLoop
+from .agent_workspace import BoundedAgentWorkspace
 from .agent_tools import BoundedToolRegistry
 from .api import ApiError, QwenClient
 from .media import MediaError, inspect_image, inspect_image_quality, inspect_video
@@ -132,6 +134,56 @@ class BoundedDeliveryAgent:
         }
         if self.client is None or not use_model:
             return default
+        workspace_temp = tempfile.TemporaryDirectory(
+            prefix="delivery-planner-workspace-"
+        )
+        workspace = BoundedAgentWorkspace(Path(workspace_temp.name))
+        workspace.host_write_json("evidence/product.json", facts.compact_dict())
+        workspace.host_write_json(
+            "evidence/canonical.json", getattr(facts, "reconciled_fact_ledger", {})
+        )
+        workspace.host_write_json(
+            "evidence/taxonomy.json",
+            {
+                "category": {
+                    "id": taxonomy.category.category_id,
+                    "name": taxonomy.category.name,
+                    "path": taxonomy.category.path,
+                },
+                "attribute_schema_category_id": getattr(
+                    taxonomy, "attribute_schema_category_id", ""
+                ),
+                "mapped_attributes": [
+                    {
+                        "id": item.attr_id,
+                        "name": item.name,
+                        "source_name": item.source_name,
+                        "source_value": item.source_value,
+                        "platform_value_id": item.value_id,
+                        "platform_value": item.platform_value,
+                        "evidence_pointer": item.source_evidence_pointer,
+                    }
+                    for item in taxonomy.attributes
+                ],
+                "missing_required": taxonomy.missing_required,
+            },
+        )
+        workspace.host_write_json("evidence/visual.json", vision)
+        workspace.host_write_json(
+            "workspace/index.json",
+            {
+                "evidence_files": [
+                    "evidence/product.json",
+                    "evidence/canonical.json",
+                    "evidence/taxonomy.json",
+                    "evidence/visual.json",
+                ],
+                "notes": (
+                    "Use list/read/search or restricted bash for on-demand evidence. "
+                    "write_staging is optional and cannot change source evidence."
+                ),
+            },
+        )
         self.orchestrator_system_prompt = (
             "You are the top-level autonomous orchestrator for one cross-border commerce delivery. "
             "You own semantic decisions: what evidence to inspect, the creative storyboard and its order, "
@@ -348,9 +400,20 @@ class BoundedDeliveryAgent:
             "additionalProperties": False,
         }
         agent_tools = [
+            *[
+                AgentLoopTool(
+                    str(item["function"]["name"]),
+                    str(item["function"]["description"]),
+                    dict(item["function"]["parameters"]),
+                    lambda arguments, name=str(item["function"]["name"]): workspace.execute(
+                        name, arguments
+                    ),
+                )
+                for item in BoundedAgentWorkspace.openai_tools()
+            ],
             AgentLoopTool(
                 "inspect_evidence",
-                "Read evidence.",
+                "Read one compatibility evidence section. Prefer workspace read/search for focused inspection.",
                 inspect_schema,
                 inspect_evidence,
             ),
@@ -363,7 +426,7 @@ class BoundedDeliveryAgent:
             ),
         ]
         prompt = (
-            "Plan this delivery. Inspect whatever evidence you need, then submit one complete plan. "
+            "Plan this delivery. Start from workspace/index.json and inspect whatever evidence you need, then submit one complete plan. "
             "The output contract requires one square hero, exactly five vertical detail images, one short video, "
             "and localized en-US, ko-KR, and pt-BR copy. Detail jobs and their order are yours to choose. "
             "Inspect the indexed source images and bind every visual job to the exact safe evidence indexes it needs. "
@@ -387,6 +450,8 @@ class BoundedDeliveryAgent:
         except ApiError as exc:
             self.logger.warning("LLM 编排规划不可用，采用保守有界策略: %s", exc)
             return default
+        finally:
+            workspace_temp.cleanup()
         if not submitted:
             self.logger.warning("编排器未在预算内提交有效计划，采用保守计划")
             return default
@@ -883,6 +948,70 @@ question to investigate, never as evidence by itself):
                 "marketplace-materials",
             )
         )
+        resolved_platform_result = {
+            "category_id": taxonomy.category.category_id,
+            "category": taxonomy.category.name,
+            "path": taxonomy.category.path,
+            "attribute_schema_category_id": taxonomy.attribute_schema_category_id,
+            "attributes": [
+                {
+                    "id": item.attr_id,
+                    "name": item.name,
+                    "value_id": item.value_id,
+                    "value": item.platform_value,
+                    "source_name": item.source_name,
+                    "source_value": item.source_value,
+                    "source_evidence_pointer": item.source_evidence_pointer,
+                }
+                for item in taxonomy.attributes
+            ],
+            "missing_required": taxonomy.missing_required,
+        }
+        creative_plan_evidence = {
+            "theme": creative_plan.visual_theme,
+            "main": creative_plan.main_prompt,
+            "main_reference_indexes": creative_plan.main_reference_indexes,
+            "details": [
+                {
+                    "role": (
+                        creative_plan.detail_roles[index]
+                        if index < len(creative_plan.detail_roles)
+                        else f"detail_{index + 1}"
+                    ),
+                    "prompt": detail_prompt,
+                    "reference_indexes": (
+                        creative_plan.detail_reference_indexes[index]
+                        if index < len(creative_plan.detail_reference_indexes)
+                        else []
+                    ),
+                }
+                for index, detail_prompt in enumerate(creative_plan.detail_prompts)
+            ],
+            "video": creative_plan.video_prompt,
+        }
+        # Evaluators and the disagreement adjudicator consume this same bundle.
+        # The host fixes the bounded evidence universe; models decide relevance.
+        # Keeping one projection prevents a valid finding from becoming
+        # unverifiable merely because a second hand-written projection omitted a
+        # field such as category path, provenance, or the frozen target spec.
+        evaluation_evidence_bundle = {
+            "bundle_version": "delivery-evidence-v2",
+            "verified_fact_ledger": facts.compact_dict(),
+            "resolved_platform_result": resolved_platform_result,
+            "frozen_expected_delivery_spec": expected_delivery_spec or {},
+            "manager_plan": agent_plan,
+            "creative_plan_actually_used": creative_plan_evidence,
+            "localized_copy_payloads": localization_payloads,
+            "copy_generation_sources": localization_sources,
+            "six_image_set_review": visual_set_review,
+            "rendered_localized_copy_evidence": copy_artifacts,
+            "artifact_manifest": manifest,
+            "visual_input_map": [
+                {"input_index": index, "url": url}
+                for index, url in enumerate(image_urls)
+            ],
+            "allowed_artifact_targets": sorted(allowed_targets),
+        }
         prompt = f"""
 Evaluate this whole delivery. Every image in the visual input map is a directly reviewable final delivery
 image. Source references are intentionally excluded from this pass because source-to-output comparison is
@@ -919,44 +1048,44 @@ Complete rubric definitions and weights (use these exact dimension meanings):
 {json.dumps(_RUBRIC_DEFINITIONS, ensure_ascii=False)}
 
 Verified fact ledger:
-{json.dumps(facts.compact_dict(), ensure_ascii=False)}
+{json.dumps(evaluation_evidence_bundle["verified_fact_ledger"], ensure_ascii=False)}
 
 Resolved platform result:
-{json.dumps({"category_id": taxonomy.category.category_id, "category": taxonomy.category.name, "path": taxonomy.category.path, "attributes": [{"id": item.attr_id, "name": item.name, "value_id": item.value_id, "value": item.platform_value} for item in taxonomy.attributes], "missing_required": taxonomy.missing_required}, ensure_ascii=False)}
+{json.dumps(evaluation_evidence_bundle["resolved_platform_result"], ensure_ascii=False)}
 
 Frozen expected delivery specification (independent of current artifacts):
-{json.dumps(expected_delivery_spec or {}, ensure_ascii=False)}
+{json.dumps(evaluation_evidence_bundle["frozen_expected_delivery_spec"], ensure_ascii=False)}
 
 Treat a missing frozen mapping source, publishable claim, required locale, required file, or visual evidence
 dependency as a defect even when the current artifacts agree with one another. The current output cannot redefine
 its own acceptance target.
 
 Manager plan:
-{json.dumps(agent_plan, ensure_ascii=False)}
+{json.dumps(evaluation_evidence_bundle["manager_plan"], ensure_ascii=False)}
 
 Creative plan actually used:
-{json.dumps({"theme": creative_plan.visual_theme, "main": creative_plan.main_prompt, "main_reference_indexes": creative_plan.main_reference_indexes, "details": [{"role": creative_plan.detail_roles[index] if index < len(creative_plan.detail_roles) else f"detail_{index + 1}", "prompt": prompt, "reference_indexes": creative_plan.detail_reference_indexes[index] if index < len(creative_plan.detail_reference_indexes) else []} for index, prompt in enumerate(creative_plan.detail_prompts)], "video": creative_plan.video_prompt}, ensure_ascii=False)}
+{json.dumps(evaluation_evidence_bundle["creative_plan_actually_used"], ensure_ascii=False)}
 
 Localized copy payloads:
-{json.dumps(localization_payloads, ensure_ascii=False)}
+{json.dumps(evaluation_evidence_bundle["localized_copy_payloads"], ensure_ascii=False)}
 
 Copy generation sources:
-{json.dumps(localization_sources, ensure_ascii=False)}
+{json.dumps(evaluation_evidence_bundle["copy_generation_sources"], ensure_ascii=False)}
 
 Six-image set review:
-{json.dumps(visual_set_review, ensure_ascii=False)}
+{json.dumps(evaluation_evidence_bundle["six_image_set_review"], ensure_ascii=False)}
 
 Rendered localized-copy evidence:
-{json.dumps(copy_artifacts, ensure_ascii=False)}
+{json.dumps(evaluation_evidence_bundle["rendered_localized_copy_evidence"], ensure_ascii=False)}
 
 Artifact manifest and local physical inspection:
-{json.dumps(manifest, ensure_ascii=False)}
+{json.dumps(evaluation_evidence_bundle["artifact_manifest"], ensure_ascii=False)}
 
 Visual input map:
-{json.dumps([{"input_index": index, "url": url} for index, url in enumerate(image_urls)], ensure_ascii=False)}
+{json.dumps(evaluation_evidence_bundle["visual_input_map"], ensure_ascii=False)}
 
 Allowed artifact target names (use only these exact names):
-{json.dumps(sorted(allowed_targets), ensure_ascii=False)}
+{json.dumps(evaluation_evidence_bundle["allowed_artifact_targets"], ensure_ascii=False)}
 """.strip()
         minimum_score = max(
             _INTERNAL_MINIMUM_WEIGHTED_SCORE,
@@ -1015,24 +1144,7 @@ Allowed artifact target names (use only these exact names):
             round_index=round_index,
             minimum_weighted_score=minimum_score,
             artifact_fingerprint=artifact_fingerprint,
-            adjudication_context={
-                "verified_facts": facts.compact_dict(),
-                "taxonomy": {
-                    "category_id": taxonomy.category.category_id,
-                    "category": taxonomy.category.name,
-                    "attributes": [
-                        {
-                            "id": item.attr_id,
-                            "value_id": item.value_id,
-                            "value": item.platform_value,
-                        }
-                        for item in taxonomy.attributes
-                    ],
-                },
-                "localized_copy": copy_artifacts,
-                "artifact_manifest": manifest,
-                "visual_set_review": visual_set_review,
-            },
+            adjudication_context=evaluation_evidence_bundle,
             image_urls=image_urls,
             video_urls=video_urls,
         )

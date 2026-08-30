@@ -433,13 +433,19 @@ def apply_model_attribute_mappings(
         if item.get("attr_id")
     }
     source_rows: dict[tuple[str, str, str], str] = {}
-    for item in facts.attributes:
+    for index, item in enumerate(facts.attributes):
         source_rows.setdefault(
-            ("product", item.name, item.value), item.evidence_pointer
+            ("product", item.name, item.value),
+            item.evidence_pointer or f"attributes[{index}]",
         )
-    for sku in facts.skus:
-        for item in sku.attributes:
-            source_rows.setdefault(("sku", item.name, item.value), item.evidence_pointer)
+    for sku_index, sku in enumerate(facts.skus):
+        for attribute_index, item in enumerate(sku.attributes):
+            source_rows.setdefault(
+                ("sku", item.name, item.value),
+                item.evidence_pointer
+                or sku.evidence_pointer
+                or f"skus[{sku_index}].attributes[{attribute_index}]",
+            )
     canonical_claims = facts.reconciled_fact_ledger.get("canonical_visual_claims", [])
     for index, item in enumerate(canonical_claims if isinstance(canonical_claims, list) else []):
         if not isinstance(item, dict):

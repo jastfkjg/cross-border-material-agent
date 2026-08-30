@@ -23,6 +23,7 @@ from ..models import (
     TaxonomyResult,
 )
 from ..qa import EXPECTED_FILES
+from ..taxonomy import resolve_taxonomy
 from ..taxonomy_agent import TaxonomyReActAgent
 
 
@@ -54,19 +55,45 @@ class TaxonomyPipelineMixin:
             ensure_ascii=False,
             sort_keys=True,
         )
+        explorer = TaxonomyReActAgent(
+            self.client,
+            category_tree,
+            attribute_data,
+            skill_instructions=self.skills.compile(
+                "taxonomy", "product-grounding", "aliexpress-taxonomy"
+            ),
+            trace=self.trace,
+            max_turns=20,
+        )
         try:
-            revised = TaxonomyReActAgent(
-                self.client,
-                category_tree,
-                attribute_data,
-                skill_instructions=self.skills.compile(
-                    "taxonomy", "product-grounding", "aliexpress-taxonomy"
-                ),
-                trace=self.trace,
-                max_turns=20,
-            ).run(facts, decision_context=instruction)
+            revised_category = explorer.resolve_category(
+                facts, decision_context=instruction
+            )
         except ApiError as exc:
-            return ToolExecution("failed", f"taxonomy reconsideration failed: {exc}")
+            explorer.close()
+            return ToolExecution("failed", f"category reconsideration failed: {exc}")
+        category_anchored_fallback = resolve_taxonomy(
+            facts,
+            category_tree,
+            attribute_data,
+            preferred_category_id=revised_category.category_id,
+        )
+        try:
+            revised = explorer.resolve_attributes(
+                facts,
+                revised_category,
+                decision_context=instruction,
+            )
+        except ApiError as exc:
+            revised = category_anchored_fallback
+            self.trace.emit(
+                "taxonomy.attribute_transaction_failed",
+                selected_category_id=revised_category.category_id,
+                fallback_schema_id=revised.attribute_schema_category_id,
+                error=str(exc),
+            )
+        finally:
+            explorer.close()
         provenance_warnings = filter_invalid_mapping_provenance(facts, revised)
         after = json.dumps(
             {
@@ -238,25 +265,58 @@ class TaxonomyPipelineMixin:
     ) -> TaxonomyResult:
         if self.client is None:
             return taxonomy
+        explorer = TaxonomyReActAgent(
+            self.client,
+            category_tree,
+            attribute_data,
+            skill_instructions=self.skills.compile(
+                "taxonomy", "product-grounding", "aliexpress-taxonomy"
+            ),
+            trace=self.trace,
+        )
         try:
-            resolved = TaxonomyReActAgent(
-                self.client,
-                category_tree,
-                attribute_data,
-                skill_instructions=self.skills.compile(
-                    "taxonomy", "product-grounding", "aliexpress-taxonomy"
-                ),
-                trace=self.trace,
-            ).run(facts)
+            resolved_category = explorer.resolve_category(facts)
         except ApiError as exc:
-            self.logger.warning("类目/属性 ReAct 探索失败，保留离线降级结果: %s", exc)
+            explorer.close()
+            self.logger.warning("类目 ReAct 探索失败，保留离线降级结果: %s", exc)
             self.trace.emit(
-                "taxonomy.react_failed",
+                "taxonomy.category_transaction_failed",
                 category=taxonomy.category.category_id,
                 confidence=taxonomy.category.confidence,
                 error=str(exc),
             )
             return taxonomy
+        category_anchored_fallback = resolve_taxonomy(
+            facts,
+            category_tree,
+            attribute_data,
+            preferred_category_id=resolved_category.category_id,
+        )
+        self.trace.emit(
+            "taxonomy.category_transaction_committed",
+            local_fallback_category_id=taxonomy.category.category_id,
+            selected_category_id=resolved_category.category_id,
+            selected_category_path=resolved_category.path,
+        )
+        try:
+            resolved = explorer.resolve_attributes(facts, resolved_category)
+        except ApiError as exc:
+            resolved = category_anchored_fallback
+            self.logger.warning(
+                "属性 ReAct 探索失败，保留已提交类目并仅降级 schema/mapping: %s",
+                exc,
+            )
+            self.trace.emit(
+                "taxonomy.attribute_transaction_failed",
+                selected_category_id=resolved_category.category_id,
+                selected_category_path=resolved_category.path,
+                fallback_schema_id=resolved.attribute_schema_category_id,
+                fallback_mapping_count=len(resolved.attributes),
+                error=str(exc),
+            )
+            return resolved
+        finally:
+            explorer.close()
         self.trace.emit(
             "taxonomy.react_resolved",
             local_fallback_category_id=taxonomy.category.category_id,
