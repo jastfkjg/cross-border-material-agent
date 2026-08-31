@@ -1,12 +1,10 @@
-"""End-to-end bounded agent orchestration."""
+"""End-to-end bounded agent orchestration facade."""
 
 from __future__ import annotations
 
 import concurrent.futures
-import json
 import logging
 import os
-import re
 import shutil
 import threading
 import time
@@ -15,58 +13,56 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .api import ApiConfig, ApiError, HttpJsonClient, QwenClient
-from .compliance import normalize_source_image_observations
-from .input_loader import discover_input_files, load_json, load_product_facts
-from .localization import generate_copy_payload, render_description
-from .media import (
-    MediaError,
-    create_catalog_video,
-    create_size_chart_image,
-    create_slideshow_video,
-    hash_distance,
-    inspect_image_quality,
-    inspect_video,
-    normalize_image,
-    strip_video_audio,
+from .api import ApiConfig, HttpJsonClient, QwenClient
+from .bounded_agent import BoundedDeliveryAgent
+from .claims import build_claim_ledger, filter_invalid_mapping_provenance
+from .debug_trace import DebugTrace
+from .decision_state import (
+    DependencyState,
+    assess_evidence_sufficiency,
+    build_canonical_product_state,
+    build_expected_delivery_spec,
 )
+from .input_loader import discover_input_files, load_json, load_product_facts
+from .localization import generate_copy_payload
 from .models import (
     AssetResult,
+    CategoryChoice,
     CreativePlan,
     ProductFacts,
     RunState,
-    SizeChartRow,
     TaxonomyResult,
 )
-from .planning import create_creative_plan
+from .pipeline_parts import (
+    EvidencePipelineMixin,
+    PlanningPipelineMixin,
+    ProductionPipelineMixin,
+    ReviewPipelineMixin,
+    TaxonomyPipelineMixin,
+    TransactionPipelineMixin,
+)
+from .pipeline_parts.evidence import (
+    _merge_source_vision_batches as _merge_source_vision_batches,
+)
+from .pipeline_parts.common import (
+    PipelineError,
+    SemanticRejection as SemanticRejection,
+)
+from .planning import create_creative_plan, fallback_creative_plan
 from .qa import EXPECTED_FILES, validate_delivery
+from .skill_runtime import SkillLibrary
+from .table_evidence import select_render_table
 from .taxonomy import resolve_taxonomy
 
 
-class PipelineError(RuntimeError):
-    """Raised when the agent cannot produce a complete, validated delivery."""
-
-
-_IMAGE_NEGATIVE_PROMPT = (
-    "written text, letters, numbers, watermark, logo, brand mark, price tag, promotional badge, "
-    "unreadable typography, distorted anatomy, extra limbs, malformed hands, product deformation, "
-    "changed buttons, changed fasteners, changed pattern, changed color, blur, low resolution"
-)
-
-_MAIN_NEGATIVE_PROMPT = (
-    _IMAGE_NEGATIVE_PROMPT
-    + ", collage, montage, split screen, inset, duplicate garment, multiple products, multiple colorways, "
-    "cropped product, person, mannequin body"
-)
-
-_VIDEO_NEGATIVE_PROMPT = (
-    "product morphing, changed garment construction, changed color, changed pattern, added pockets, "
-    "added buttons, duplicate product, extra garment, warped fabric, flicker, scene cut, camera shake, "
-    "hands covering product, text, subtitles, watermark, logo animation, speech, music"
-)
-
-
-class Pipeline:
+class Pipeline(
+    PlanningPipelineMixin,
+    EvidencePipelineMixin,
+    TaxonomyPipelineMixin,
+    ProductionPipelineMixin,
+    ReviewPipelineMixin,
+    TransactionPipelineMixin,
+):
     def __init__(
         self,
         *,
@@ -76,25 +72,55 @@ class Pipeline:
         product_id: str = "",
         timeout_seconds: int = 29 * 60,
         offline: bool = False,
+        debug: bool = False,
+        run_profile: str = "full",
     ):
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.logger = logger
         self.product_id = product_id
+        self.offline = offline
+        self.debug = debug
+        if run_profile not in {"full", "fast"}:
+            raise ValueError(f"unsupported run profile: {run_profile}")
+        self.run_profile = run_profile
+        self.fast_mode = run_profile == "fast"
         self.started_monotonic = time.monotonic()
         self.deadline = self.started_monotonic + timeout_seconds
+        self.trace = DebugTrace(logger, enabled=debug)
         self.api_config = None if offline else ApiConfig.from_environment()
+        if not offline and self.api_config is None:
+            required = (
+                "DASHSCOPE_API_KEY",
+                "DASHSCOPE_BASE_URL",
+                "OPENAI_BASE_URL",
+            )
+            missing = [
+                name for name in required if not os.environ.get(name, "").strip()
+            ]
+            self.offline = True
+            self.logger.warning(
+                "模型配置不完整，切换到确定性保底而不是中止: %s",
+                ", ".join(missing),
+            )
         self.client = (
-            QwenClient(self.api_config, logger, self.deadline)
+            QwenClient(self.api_config, logger, self.deadline, self.trace)
             if self.api_config
             else None
         )
         self.downloader = (
-            self.client.http if self.client else HttpJsonClient(logger, self.deadline)
+            self.client.http
+            if self.client
+            else HttpJsonClient(logger, self.deadline, self.trace)
         )
+        self.skills = SkillLibrary()
+        self.agent = BoundedDeliveryAgent(self.client, logger, self.skills)
         self.warnings: list[str] = []
         self._raw_counter = 0
         self._raw_counter_lock = threading.Lock()
+        self._detail_candidate_pool_lock = threading.Lock()
+        self._detail_candidate_pools: dict[int, dict[str, Any]] = {}
+        self._detail_candidate_reviews: dict[int, dict[str, Any]] = {}
         self._source_image_observations: dict[str, dict[str, Any]] = {}
         self._source_selection_warnings: set[str] = set()
 
@@ -104,22 +130,109 @@ class Pipeline:
             raise PipelineError(f"剩余运行时间不足，需要保留 {reserve_seconds:.0f} 秒")
 
     def run(self) -> RunState:
+        self.trace.emit(
+            "run.start",
+            input_dir=str(self.input_dir),
+            output_dir=str(self.output_dir),
+            product_id=self.product_id,
+            offline=self.offline,
+            debug=self.debug,
+            run_profile=self.run_profile,
+            models=self.client.model_summary if self.client else {"mode": "offline"},
+            deadline_seconds=round(self.deadline - self.started_monotonic, 1),
+        )
         self.output_dir.mkdir(parents=True, exist_ok=True)
         work_dir = self.output_dir / f".agent-work-{uuid.uuid4().hex}"
         downloads_dir = work_dir / "_downloads"
         work_dir.mkdir(parents=True, exist_ok=False)
         downloads_dir.mkdir(parents=True, exist_ok=False)
 
+        facts: ProductFacts | None = None
+        taxonomy: TaxonomyResult | None = None
+        creative_plan: CreativePlan | None = None
+        state: RunState | None = None
+        category_tree: Any = None
+        attribute_data: Any = None
+        localization_sources: dict[str, str] = {}
+        localization_payloads: dict[str, dict[str, Any]] = {}
+        plan_model = "deterministic-availability-fallback"
+
         try:
             product_path, categories_path, attributes_path = discover_input_files(
                 self.input_dir, self.product_id
             )
             facts = load_product_facts(product_path)
+            self.trace.emit(
+                "input.loaded",
+                offer_id=facts.offer_id,
+                fingerprint=facts.fingerprint,
+                source_category=facts.source_category_name,
+                attribute_count=len(facts.attributes),
+                sku_count=len(facts.skus),
+                image_count=len(facts.all_image_urls()),
+            )
             category_tree = load_json(categories_path)
             attribute_data = load_json(attributes_path)
+            # Establish visual evidence and one canonical product decision before
+            # any downstream projection is allowed to choose taxonomy or claims.
+            vision = self._analyze_source_images(facts)
+            self.trace.emit("vision.source_review", result=vision)
+            facts.reconciled_fact_ledger = self.agent.reconcile_facts(facts, vision)
+            canonical_state = build_canonical_product_state(
+                facts, facts.reconciled_fact_ledger
+            )
+            evidence_sufficiency = assess_evidence_sufficiency(vision, canonical_state)
+            self.trace.emit(
+                "facts.reconciled",
+                ledger=facts.reconciled_fact_ledger,
+                canonical_state=canonical_state.to_dict(),
+                evidence_sufficiency=evidence_sufficiency.to_dict(),
+                models=facts.reconciled_fact_ledger.get("models", []),
+                conflict_count=len(facts.reconciled_fact_ledger.get("conflicts", [])),
+            )
+            self.logger.info(
+                "事实证据裁决完成: models=%s conflicts=%d attribute_decisions=%d",
+                ",".join(facts.reconciled_fact_ledger.get("models", [])) or "none",
+                len(facts.reconciled_fact_ledger.get("conflicts", [])),
+                len(facts.reconciled_fact_ledger.get("attribute_decisions", [])),
+            )
+            self._apply_evidence_table_observations(facts, vision)
             taxonomy = resolve_taxonomy(facts, category_tree, attribute_data)
-            taxonomy = self._adjudicate_taxonomy(
-                facts, taxonomy, category_tree, attribute_data
+            if not self.fast_mode:
+                taxonomy = self._adjudicate_taxonomy(
+                    facts, taxonomy, category_tree, attribute_data
+                )
+            else:
+                self.trace.emit("taxonomy.adjudication_skipped", reason="fast-profile")
+            provenance_warnings = filter_invalid_mapping_provenance(facts, taxonomy)
+            self.warnings.extend(provenance_warnings)
+            for warning in provenance_warnings:
+                self.logger.warning(warning)
+            self.trace.emit(
+                "taxonomy.resolved",
+                category=taxonomy.category.__dict__
+                if hasattr(taxonomy.category, "__dict__")
+                else {
+                    "category_id": taxonomy.category.category_id,
+                    "name": taxonomy.category.name,
+                    "path": taxonomy.category.path,
+                    "confidence": taxonomy.category.confidence,
+                    "method": taxonomy.category.method,
+                    "candidates": taxonomy.category.candidates,
+                },
+                mapped_attributes=[
+                    {
+                        "attr_id": item.attr_id,
+                        "name": item.name,
+                        "source_name": item.source_name,
+                        "source_value": item.source_value,
+                        "value_id": item.value_id,
+                        "platform_value": item.platform_value,
+                        "sales_attribute": item.sales_attribute,
+                    }
+                    for item in taxonomy.attributes
+                ],
+                missing_required=taxonomy.missing_required,
             )
             self.logger.info(
                 "商品 %s: 类目 %s %s (%.2f, %s)",
@@ -130,12 +243,93 @@ class Pipeline:
                 taxonomy.category.method,
             )
 
-            vision = self._analyze_source_images(facts)
-            self._apply_size_chart_observations(facts, vision)
+            claim_ledger = build_claim_ledger(facts, taxonomy, vision)
+            self.trace.emit(
+                "claims.ledger",
+                count=len(claim_ledger),
+                publishable_count=sum(
+                    "buyer_copy" in item.allowed_surfaces for item in claim_ledger
+                ),
+            )
+            selected_table = select_render_table(facts.evidence_tables)
+            protected_detail_indexes = (
+                {int(selected_table.presentation["target_detail_index"])}
+                if selected_table is not None
+                else set()
+            )
+            tool_registry = self._create_tool_registry(
+                protected_detail_indexes=protected_detail_indexes
+            )
+            agent_plan = self.agent.plan_delivery(
+                facts,
+                taxonomy,
+                vision,
+                tool_registry,
+                use_model=not self.fast_mode,
+            )
+            self.trace.emit("agent.plan", plan=agent_plan)
             creative_plan, plan_model = create_creative_plan(
-                facts, taxonomy, vision, self.client
+                facts,
+                taxonomy,
+                vision,
+                self.client,
+                agent_guidance=agent_plan,
+                skill_instructions=self.skills.compile(
+                    "creative-plan",
+                    "product-grounding",
+                    "marketplace-materials",
+                ),
             )
             self.logger.info("创意计划来源: %s", plan_model)
+            self.trace.emit(
+                "creative.plan",
+                source=plan_model,
+                plan={
+                    "visual_theme": creative_plan.visual_theme,
+                    "main_prompt": creative_plan.main_prompt,
+                    "detail_prompts": creative_plan.detail_prompts,
+                    "video_prompt": creative_plan.video_prompt,
+                    "market_angles": creative_plan.market_angles,
+                },
+            )
+
+            expected_delivery_spec = build_expected_delivery_spec(
+                canonical=canonical_state,
+                taxonomy=taxonomy,
+                claim_ledger=claim_ledger,
+                evidence=evidence_sufficiency,
+                required_files=EXPECTED_FILES,
+            )
+            dependencies = DependencyState()
+            dependencies.record("evidence", evidence_sufficiency.to_dict())
+            dependencies.record(
+                "canonical",
+                canonical_state.to_dict(),
+                evidence=evidence_sufficiency.version,
+            )
+            dependencies.record(
+                "taxonomy",
+                {
+                    "category": taxonomy.category.category_id,
+                    "schema": taxonomy.attribute_schema_category_id,
+                    "attributes": [
+                        (
+                            item.attr_id,
+                            item.value_id,
+                            item.source_name,
+                            item.source_value,
+                        )
+                        for item in taxonomy.attributes
+                    ],
+                },
+                canonical=canonical_state.version,
+            )
+            dependencies.record(
+                "delivery_spec",
+                expected_delivery_spec.to_dict(),
+                canonical=canonical_state.version,
+                taxonomy=expected_delivery_spec.taxonomy_version,
+            )
 
             state = RunState(
                 started_at=datetime.now(timezone.utc).isoformat(),
@@ -144,8 +338,14 @@ class Pipeline:
                 facts=facts,
                 taxonomy=taxonomy,
                 creative_plan=creative_plan,
+                claim_ledger=claim_ledger,
                 vision_observations=vision,
                 warnings=self.warnings,
+                agent_plan=agent_plan,
+                canonical_product_state=canonical_state.to_dict(),
+                evidence_sufficiency=evidence_sufficiency.to_dict(),
+                expected_delivery_spec=expected_delivery_spec.to_dict(),
+                dependency_state=dependencies.to_dict(),
             )
 
             main_asset, main_reference_url = self._build_main_image(
@@ -153,54 +353,126 @@ class Pipeline:
             )
             state.assets.append(main_asset)
 
-            localization_sources: dict[str, str] = {}
-            localization_payloads: dict[str, dict[str, Any]] = {}
             detail_assets: dict[int, AssetResult] = {}
             video_result: AssetResult | None = None
 
             with concurrent.futures.ThreadPoolExecutor(
-                max_workers=7, thread_name_prefix="asset"
+                # Keep enough parallelism to finish inside the evaluation window
+                # without bursting nine model jobs into provider rate/queue limits.
+                max_workers=4,
+                thread_name_prefix="asset",
             ) as executor:
-                video_future = executor.submit(
-                    self._build_video,
-                    facts,
-                    creative_plan,
-                    main_reference_url,
-                    Path(main_asset.path),
-                    work_dir,
-                    downloads_dir,
-                    main_asset.generated
-                    or self._safe_generation_reference(main_reference_url),
+                video_future: concurrent.futures.Future[AssetResult] | None = None
+                detail_futures: dict[concurrent.futures.Future[AssetResult], int] = {}
+                copy_futures: dict[concurrent.futures.Future[Any], str] = {}
+                execution_order = [
+                    item
+                    for item in agent_plan.get(
+                        "execution_order", ["hero", "details", "copy", "video"]
+                    )
+                    if item != "hero"
+                ]
+                for stage in execution_order:
+                    if stage == "video":
+                        video_future = executor.submit(
+                            self._build_video,
+                            facts,
+                            creative_plan,
+                            main_reference_url,
+                            Path(main_asset.path),
+                            work_dir,
+                            downloads_dir,
+                            (
+                                main_asset.generated
+                                or self._safe_generation_reference(main_reference_url)
+                            )
+                            and not self.fast_mode,
+                        )
+                    elif stage == "details":
+                        detail_futures.update(
+                            {
+                                executor.submit(
+                                    self._build_detail_image,
+                                    index,
+                                    facts,
+                                    creative_plan,
+                                    main_reference_url,
+                                    work_dir,
+                                    downloads_dir,
+                                ): index
+                                for index in range(1, 6)
+                            }
+                        )
+                    elif stage == "copy":
+                        copy_futures.update(
+                            {
+                                executor.submit(
+                                    generate_copy_payload,
+                                    language,
+                                    facts,
+                                    taxonomy,
+                                    creative_plan,
+                                    self.client,
+                                    claim_ledger=claim_ledger,
+                                    agent_guidance=str(
+                                        agent_plan.get(
+                                            "localization_priorities", {}
+                                        ).get(language, "")
+                                    ),
+                                    skill_instructions=self.skills.compile(
+                                        "copy",
+                                        "product-grounding",
+                                        "marketplace-materials",
+                                    ),
+                                    audit_valid_draft=not self.fast_mode,
+                                ): language
+                                for language in ("en", "ko", "pt")
+                            }
+                        )
+                self.trace.emit(
+                    "orchestrator.production_order",
+                    requested=agent_plan.get("execution_order", []),
+                    actual=["hero", *execution_order],
+                    dependency="hero precedes video because video requires its accepted first frame",
                 )
-                detail_futures = {
-                    executor.submit(
-                        self._build_detail_image,
-                        index,
-                        facts,
-                        creative_plan,
-                        main_reference_url,
-                        work_dir,
-                        downloads_dir,
-                    ): index
-                    for index in range(1, 6)
-                }
-                copy_futures = {
-                    executor.submit(
-                        generate_copy_payload,
-                        language,
-                        facts,
-                        taxonomy,
-                        creative_plan,
-                        self.client,
-                    ): language
-                    for language in ("en", "ko", "pt")
-                }
 
                 for future, index in detail_futures.items():
                     try:
                         detail_assets[index] = future.result()
                     except Exception as exc:
                         raise PipelineError(f"详情图 {index} 构建失败: {exc}") from exc
+
+                self._apply_global_detail_candidate_selection(
+                    facts=facts,
+                    creative_plan=creative_plan,
+                    main_asset=main_asset,
+                    detail_assets=detail_assets,
+                    work_dir=work_dir,
+                    downloads_dir=downloads_dir,
+                )
+
+                # The six-image collection is complete now. Review it immediately
+                # while copy/video futures continue in parallel, so a slow text or
+                # video call cannot consume the semantic image-QA budget.
+                for index in range(1, 6):
+                    state.assets.append(detail_assets[index])
+                self._install_evidence_table_detail(facts, state.assets, work_dir)
+                self._repair_duplicate_fallback_details(
+                    state.assets,
+                    main_reference_url=main_reference_url,
+                    work_dir=work_dir,
+                    downloads_dir=downloads_dir,
+                )
+                self._record_visual_delivery_quality(state.assets)
+                state.visual_set_review = self._review_visual_set(facts, state.assets)
+                self.trace.emit(
+                    "image.set_repair_deferred",
+                    reason=(
+                        "top-level-orchestrator-owns-repair-selection"
+                        if not self.fast_mode
+                        else "fast-profile"
+                    ),
+                )
                 for future, language in copy_futures.items():
                     try:
                         payload, source = future.result()
@@ -209,36 +481,196 @@ class Pipeline:
                     localization_sources[language] = source
                     localization_payloads[language] = payload
                 try:
+                    if video_future is None:
+                        raise PipelineError("编排计划未提交视频生产步骤")
                     video_result = video_future.result()
                 except Exception as exc:
                     raise PipelineError(f"视频构建失败: {exc}") from exc
 
-            for index in range(1, 6):
-                state.assets.append(detail_assets[index])
             if video_result:
                 state.assets.append(video_result)
-
-            self._review_generated_assets(facts, state.assets, work_dir, downloads_dir)
-            self._write_localized_descriptions(
-                facts, taxonomy, localization_payloads, state.assets, work_dir
+            self.trace.emit(
+                "assets.initial_complete",
+                assets=[
+                    {
+                        "name": item.name,
+                        "model": item.model,
+                        "generated": item.generated,
+                        "source_url": item.source_url,
+                        "fallback_reason": item.fallback_reason,
+                        "description": item.description,
+                    }
+                    for item in state.assets
+                ],
+                localization_sources=localization_sources,
+                localization_payloads=localization_payloads,
             )
+
+            # Initial generation failures may use deterministic emergency assets so the
+            # delivery remains complete. Evaluation never replaces an accepted artifact
+            # with a fallback: it selects a targeted, non-destructive repair tool below.
+            self._enhance_fallback_video(state.assets, work_dir)
+            self._record_visual_delivery_quality(state.assets)
+            self._write_localized_descriptions(
+                facts,
+                taxonomy,
+                creative_plan,
+                localization_payloads,
+                state.assets,
+                work_dir,
+                state.visual_set_review,
+            )
+            # The strategy document is part of the delivery contract and must
+            # exist before the final orchestrator validates the current state.
+            self._write_strategy_document(
+                state,
+                localization_sources,
+                localization_payloads,
+                plan_model,
+                work_dir,
+            )
+            dependencies.record(
+                "localization",
+                localization_payloads,
+                taxonomy=expected_delivery_spec.taxonomy_version,
+                canonical=canonical_state.version,
+            )
+            dependencies.record(
+                "artifacts",
+                [
+                    (item.name, item.model, item.source_url, item.generated)
+                    for item in state.assets
+                ],
+                creative_plan=plan_model,
+                canonical=canonical_state.version,
+            )
+            dependencies.invalidate(
+                "artifacts",
+                ["review"],
+                "initial production requires independent review",
+            )
+            state.dependency_state = dependencies.to_dict()
+            self._bind_repair_tools(
+                tool_registry,
+                facts=facts,
+                taxonomy=taxonomy,
+                vision=vision,
+                creative_plan=creative_plan,
+                agent_plan=agent_plan,
+                state=state,
+                localization_payloads=localization_payloads,
+                localization_sources=localization_sources,
+                work_dir=work_dir,
+                downloads_dir=downloads_dir,
+                category_tree=category_tree,
+                attribute_data=attribute_data,
+            )
+            if not self.fast_mode:
+                self._run_agentic_delivery_loop(
+                    tool_registry,
+                    facts=facts,
+                    taxonomy=taxonomy,
+                    creative_plan=creative_plan,
+                    agent_plan=agent_plan,
+                    state=state,
+                    localization_payloads=localization_payloads,
+                    localization_sources=localization_sources,
+                    work_dir=work_dir,
+                )
+            else:
+                self.trace.emit("agent.evaluation_skipped", reason="fast-profile")
+            if not self.fast_mode and self.client is not None:
+                final_fingerprint = self._delivery_fingerprint(
+                    state=state,
+                    localization_payloads=localization_payloads,
+                    localization_sources=localization_sources,
+                    work_dir=work_dir,
+                )
+                if final_fingerprint != state.accepted_artifact_fingerprint:
+                    warning = (
+                        "交付在最终语义评审后发生变化；保留该事实并提交当前确定性可用快照"
+                    )
+                    self.warnings.append(warning)
+                    self.logger.warning(warning)
+                    state.accepted_artifact_fingerprint = final_fingerprint
             if self.client is not None:
                 state.api_calls = self.client.metrics
-            self._write_strategy_document(
-                state, localization_sources, plan_model, work_dir
+            self._ensure_minimum_delivery(
+                facts=facts,
+                taxonomy=taxonomy,
+                creative_plan=creative_plan,
+                state=state,
+                localization_payloads=localization_payloads,
+                localization_sources=localization_sources,
+                work_dir=work_dir,
+                downloads_dir=downloads_dir,
+                plan_model=plan_model,
+                reason="",
             )
 
             report = validate_delivery(work_dir, facts, taxonomy)
+            self.trace.emit(
+                "qa.work_directory",
+                valid=report.valid,
+                errors=report.errors,
+                warnings=report.warnings,
+            )
             for warning in report.warnings:
                 self.logger.warning("交付告警: %s", warning)
             if not report.valid:
-                raise PipelineError("交付校验失败: " + "; ".join(report.errors))
+                warning = "交付确定性校验仍有问题: " + "; ".join(report.errors)
+                self.warnings.append(warning)
+                self.logger.error(warning)
+
+            self.trace.emit(
+                "decision.final_snapshot",
+                canonical_version=state.canonical_product_state.get("version", ""),
+                delivery_spec_version=state.expected_delivery_spec.get("version", ""),
+                category_id=taxonomy.category.category_id,
+                schema_id=taxonomy.attribute_schema_category_id,
+                mapping_count=len(taxonomy.attributes),
+                dependency_state=state.dependency_state,
+            )
+            self.logger.info(
+                "最终决策快照: category=%s schema=%s mappings=%d canonical=%s spec=%s",
+                taxonomy.category.category_id,
+                taxonomy.attribute_schema_category_id,
+                len(taxonomy.attributes),
+                str(state.canonical_product_state.get("version") or "")[:12],
+                str(state.expected_delivery_spec.get("version") or "")[:12],
+            )
 
             self._commit_delivery(work_dir)
             final_report = validate_delivery(self.output_dir, facts, taxonomy)
+            self.trace.emit(
+                "run.complete",
+                contract_valid=final_report.valid,
+                errors=final_report.errors,
+                contract_warnings=final_report.warnings,
+                pipeline_warnings=list(dict.fromkeys(self.warnings)),
+                visual_set_review_status=(
+                    "completed" if state.visual_set_review else "not-completed"
+                ),
+                global_evaluation_status=(
+                    "completed" if state.agent_evaluations else "not-completed"
+                ),
+                localization_sources=localization_sources,
+                assets=[
+                    {
+                        "name": item.name,
+                        "model": item.model,
+                        "generated": item.generated,
+                        "fallback_reason": item.fallback_reason,
+                    }
+                    for item in state.assets
+                ],
+                api_calls=state.api_calls,
+                remaining_seconds=round(self.deadline - time.monotonic(), 1),
+            )
             if not final_report.valid:
-                raise PipelineError(
-                    "最终目录复核失败: " + "; ".join(final_report.errors)
+                self.logger.error(
+                    "最终目录复核仍有问题，但已保留可评分结果: %s",
+                    "; ".join(final_report.errors),
                 )
             self.logger.info(
                 "商品 %s 交付完成，共 %d 个文件，用时 %.1f 秒",
@@ -247,1388 +679,104 @@ class Pipeline:
                 time.monotonic() - self.started_monotonic,
             )
             return state
+        except Exception as exc:
+            if facts is None:
+                # A grounded result cannot be fabricated when the supplied
+                # product itself is unreadable. This is the only intentional
+                # pre-production failure boundary.
+                raise
+            self.logger.exception(
+                "主流程异常，转入最佳可用快照提交而不是退出: %s", exc
+            )
+            recovery_reason = f"{type(exc).__name__}: {exc}"
+            if taxonomy is None:
+                try:
+                    if category_tree is None or attribute_data is None:
+                        raise ValueError("platform taxonomy snapshot unavailable")
+                    taxonomy = resolve_taxonomy(facts, category_tree, attribute_data)
+                except Exception as taxonomy_exc:
+                    self.logger.warning("平台类目保底解析失败，保留来源类目: %s", taxonomy_exc)
+                    taxonomy = TaxonomyResult(
+                        category=CategoryChoice(
+                            category_id=facts.source_category_id or "unresolved",
+                            name=facts.source_category_name or "Unresolved category",
+                            path=facts.source_category_name or "Unresolved category",
+                            confidence=0.0,
+                            method="source-availability-fallback",
+                        ),
+                        attribute_schema_category_id=facts.source_category_id,
+                    )
+            if creative_plan is None:
+                creative_plan = fallback_creative_plan(facts, taxonomy, {})
+            if state is None:
+                state = RunState(
+                    started_at=datetime.now(timezone.utc).isoformat(),
+                    input_dir=str(self.input_dir),
+                    output_dir=str(self.output_dir),
+                    facts=facts,
+                    taxonomy=taxonomy,
+                    creative_plan=creative_plan,
+                    warnings=self.warnings,
+                    vision_observations={},
+                    agent_plan={},
+                )
+            if self.client is not None:
+                state.api_calls = self.client.metrics
+            try:
+                self._ensure_minimum_delivery(
+                    facts=facts,
+                    taxonomy=taxonomy,
+                    creative_plan=creative_plan,
+                    state=state,
+                    localization_payloads=localization_payloads,
+                    localization_sources=localization_sources,
+                    work_dir=work_dir,
+                    downloads_dir=downloads_dir,
+                    plan_model=plan_model,
+                    reason=recovery_reason,
+                )
+            except Exception as recovery_exc:
+                # A model-backed recovery may itself lose its service or time
+                # budget. Retry the same availability boundary without remote
+                # dependencies before allowing a valid-input run to exit.
+                self.logger.exception(
+                    "模型辅助保底异常，切换到纯本地交付保底: %s", recovery_exc
+                )
+                saved_client = self.client
+                self.client = None
+                try:
+                    self._ensure_minimum_delivery(
+                        facts=facts,
+                        taxonomy=taxonomy,
+                        creative_plan=creative_plan,
+                        state=state,
+                        localization_payloads=localization_payloads,
+                        localization_sources=localization_sources,
+                        work_dir=work_dir,
+                        downloads_dir=downloads_dir,
+                        plan_model="local-availability-recovery",
+                        reason=(
+                            f"{recovery_reason}; recovery={type(recovery_exc).__name__}: "
+                            f"{recovery_exc}"
+                        ),
+                    )
+                finally:
+                    self.client = saved_client
+            recovery_report = validate_delivery(work_dir, facts, taxonomy)
+            self.trace.emit(
+                "run.degraded_snapshot",
+                trigger=recovery_reason,
+                contract_valid=recovery_report.valid,
+                errors=recovery_report.errors,
+                warnings=recovery_report.warnings,
+            )
+            self._commit_delivery(work_dir)
+            self.logger.info(
+                "商品 %s 已提交最佳可用结果，共 %d 个文件，用时 %.1f 秒",
+                facts.offer_id,
+                len(EXPECTED_FILES),
+                time.monotonic() - self.started_monotonic,
+            )
+            return state
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
-
-    def _write_localized_descriptions(
-        self,
-        facts: ProductFacts,
-        taxonomy: TaxonomyResult,
-        payloads: dict[str, dict[str, Any]],
-        assets: list[AssetResult],
-        work_dir: Path,
-    ) -> None:
-        asset_by_name = {asset.name: asset for asset in assets}
-        fallback_templates = {
-            "en": {
-                "image": "Source-derived product view normalized to the required listing format to preserve visual facts.",
-                "video": "Eight-second catalog video assembled from perceptually distinct validated product images.",
-                "single_video": "Eight-second single-image product presentation with restrained camera motion.",
-                "size_chart": "Clean chart rendered from verified seller-provided garment measurements and weight guidance.",
-            },
-            "ko": {
-                "image": "상품의 시각적 사실을 유지하기 위해 원본 이미지를 필수 등록 규격에 맞춰 정리한 이미지입니다.",
-                "video": "서로 다른 최종 검수 상품 이미지로 구성한 8초 카탈로그 영상입니다.",
-                "single_video": "절제된 카메라 움직임을 적용한 8초 단일 이미지 상품 영상입니다.",
-                "size_chart": "판매자 원본의 의류 실측과 권장 체중을 검증해 다시 구성한 사이즈표입니다.",
-            },
-            "pt": {
-                "image": "Imagem derivada da fonte e ajustada ao formato exigido para preservar os dados visuais do produto.",
-                "video": "Vídeo de catálogo de 8 segundos montado com imagens finais distintas e validadas do produto.",
-                "single_video": "Apresentação de 8 segundos com uma única imagem e movimento de câmera discreto.",
-                "size_chart": "Tabela limpa recriada a partir das medidas da peça e do peso indicados pelo vendedor.",
-            },
-        }
-        for language, payload in payloads.items():
-            media = payload.get("media_descriptions")
-            if not isinstance(media, dict):
-                media = {}
-                payload["media_descriptions"] = media
-            for name in (
-                "main_image.jpeg",
-                "detail_image_1.jpeg",
-                "detail_image_2.jpeg",
-                "detail_image_3.jpeg",
-                "detail_image_4.jpeg",
-                "detail_image_5.jpeg",
-                "product_video.mp4",
-            ):
-                asset = asset_by_name.get(name)
-                if asset is None or asset.generated:
-                    continue
-                if asset.model == "deterministic-size-chart":
-                    kind = "size_chart"
-                elif name == "product_video.mp4":
-                    kind = (
-                        "video"
-                        if asset.model == "ffmpeg-catalog-fallback"
-                        else "single_video"
-                    )
-                else:
-                    kind = "image"
-                media[name] = fallback_templates[language][kind]
-            description = render_description(language, payload, facts, taxonomy)
-            (work_dir / f"product_description_{language}.md").write_text(
-                description, encoding="utf-8"
-            )
-
-    def _adjudicate_taxonomy(
-        self,
-        facts: ProductFacts,
-        taxonomy: TaxonomyResult,
-        category_tree: dict[str, Any],
-        attribute_data: dict[str, Any],
-    ) -> TaxonomyResult:
-        if self.client is None or taxonomy.category.confidence >= 0.85:
-            return taxonomy
-        candidates = taxonomy.category.candidates[:12]
-        allowed_ids = {str(item.get("category_id")) for item in candidates}
-        if not allowed_ids:
-            return taxonomy
-        system = (
-            "You are a conservative AliExpress apparel taxonomy classifier. Return JSON only. "
-            "You must choose exactly one supplied leaf category ID. Do not invent an ID."
-        )
-        prompt = f"""
-Choose the most accurate leaf category for the verified product.
-Return JSON with selected_category_id and concise evidence.
-
-Product:
-{json.dumps(facts.compact_dict(), ensure_ascii=False)}
-
-Allowed leaf candidates:
-{json.dumps(candidates, ensure_ascii=False)}
-""".strip()
-        try:
-            response = self.client.chat_json(system, prompt)
-        except ApiError as exc:
-            self.logger.warning("类目候选裁决失败，保留本地结果: %s", exc)
-            return taxonomy
-        selected_id = str(response.get("selected_category_id") or "")
-        if selected_id not in allowed_ids:
-            self.logger.warning("类目裁决返回候选外 ID，已忽略: %s", selected_id)
-            return taxonomy
-        return resolve_taxonomy(
-            facts,
-            category_tree,
-            attribute_data,
-            preferred_category_id=selected_id,
-        )
-
-    def _analyze_source_images(self, facts: ProductFacts) -> dict[str, Any]:
-        if self.client is None:
-            self.warnings.append("模型配置不可用，跳过源图片视觉理解")
-            return {}
-        self._ensure_time(10 * 60)
-        preferred = facts.product_image_urls[:5]
-        sku_sample = _even_sample(facts.sku_image_urls, 4)
-        description_sample = _even_sample(facts.description_image_urls, 3)
-        urls = _unique(preferred + sku_sample + description_sample)[:12]
-        try:
-            result = self.client.analyze_product_images(
-                json.dumps(facts.compact_dict(), ensure_ascii=False), urls
-            )
-            source_images = normalize_source_image_observations(result, urls)
-            result["source_images"] = source_images
-            self._source_image_observations = {
-                str(item["url"]): item for item in source_images
-            }
-            rejected = sum(
-                not item.get("safe_for_generation_reference", False)
-                for item in source_images
-            )
-            self.logger.info("完成 %d 张源图片的视觉理解", len(urls))
-            if rejected:
-                self.logger.info("源图片风控筛出 %d 张不宜作为生成参考图", rejected)
-            third_party_count = sum(
-                item.get("has_third_party_brand") is True for item in source_images
-            )
-            if third_party_count:
-                self.warnings.append(
-                    f"{third_party_count} 张源图疑似含第三方品牌或角色；发布前须核验授权，且不用于衍生生成"
-                )
-            global_risks = result.get("prohibited_or_risky_visuals")
-            if isinstance(global_risks, list) and global_risks:
-                risk_summary = "; ".join(
-                    str(item).strip() for item in global_risks[:3] if str(item).strip()
-                )
-                if risk_summary:
-                    self.warnings.append(f"源图视觉风险需人工复核: {risk_summary[:500]}")
-            return result
-        except ApiError as exc:
-            self.logger.warning("源图片视觉理解失败，使用结构化事实继续: %s", exc)
-            self.warnings.append(f"源图片视觉理解失败: {exc}")
-            return {}
-
-    def _apply_size_chart_observations(
-        self, facts: ProductFacts, vision: dict[str, Any]
-    ) -> None:
-        """Promote only clearly structured, SKU-aligned visual measurements to facts."""
-
-        raw_rows = vision.get("size_chart_rows") if isinstance(vision, dict) else None
-        source_images = vision.get("source_images") if isinstance(vision, dict) else None
-        if not isinstance(raw_rows, list) or not isinstance(source_images, list):
-            return
-
-        known_codes: list[str] = []
-        for sku in facts.skus:
-            for item in sku.attributes:
-                if "尺码" not in item.name and "size" not in item.name.casefold():
-                    continue
-                match = re.match(r"\s*([A-Za-z0-9]+)", item.value)
-                if match and match.group(1).upper() not in known_codes:
-                    known_codes.append(match.group(1).upper())
-        if not known_codes:
-            return
-
-        aliases = {
-            "XXL": "2XL",
-            "XXXL": "3XL",
-            "XXXXL": "4XL",
-        }
-        image_by_index = {
-            item.get("index"): item
-            for item in source_images
-            if isinstance(item, dict) and isinstance(item.get("index"), int)
-        }
-
-        def measurement(value: Any) -> str:
-            match = re.fullmatch(
-                r"\s*(\d{1,3}(?:\.\d+)?)\s*(?:cm)?\s*", str(value or ""), re.I
-            )
-            if not match:
-                return ""
-            numeric = float(match.group(1))
-            return match.group(1) if 20 <= numeric <= 300 else ""
-
-        conversions: dict[str, tuple[str, str]] = {}
-        for item in facts.size_conversions:
-            match = re.match(r"\s*([A-Za-z0-9]+)", item.source_label)
-            if match:
-                conversions[match.group(1).upper()] = (item.kilograms, item.pounds)
-
-        rows: list[SizeChartRow] = []
-        seen: set[str] = set()
-        for raw in raw_rows:
-            if not isinstance(raw, dict):
-                continue
-            raw_code = str(raw.get("size_label") or "").strip().upper()
-            code = aliases.get(raw_code, raw_code)
-            bust = measurement(raw.get("bust_cm"))
-            length = measurement(raw.get("length_cm"))
-            source_index = raw.get("source_image_index")
-            source_item = image_by_index.get(source_index)
-            if (
-                code not in known_codes
-                or code in seen
-                or not source_item
-                or str(source_item.get("role") or "") != "size_chart"
-                or not (bust or length)
-            ):
-                continue
-            kilograms, pounds = conversions.get(code, ("", ""))
-            rows.append(
-                SizeChartRow(
-                    size_label=code,
-                    bust_cm=bust,
-                    length_cm=length,
-                    weight_kg=kilograms,
-                    weight_lb=pounds,
-                    evidence_pointer=f"source-image:{source_index}",
-                )
-            )
-            seen.add(code)
-        rows.sort(key=lambda item: known_codes.index(item.size_label))
-        if len(rows) < 2:
-            return
-        facts.size_chart_rows = rows
-        self.logger.info("从源详情图提取并核验 %d 行尺码表", len(rows))
-
-    def _ordered_source_urls(
-        self, facts: ProductFacts, vision: dict[str, Any]
-    ) -> list[str]:
-        ordered = _unique(
-            facts.product_image_urls
-            + facts.sku_image_urls
-            + facts.description_image_urls
-        )
-        best_url = ""
-        source_images = vision.get("source_images") if isinstance(vision, dict) else None
-        best = vision.get("best_hero_image_index") if isinstance(vision, dict) else None
-        if isinstance(source_images, list) and isinstance(best, int):
-            best_item = next(
-                (
-                    item
-                    for item in source_images
-                    if isinstance(item, dict) and item.get("index") == best
-                ),
-                None,
-            )
-            if isinstance(best_item, dict):
-                best_url = str(best_item.get("url") or "")
-        if best_url in ordered:
-            ordered.insert(0, ordered.pop(ordered.index(best_url)))
-        ranked = self._source_urls_for_use(
-            ordered,
-            use="reference",
-            preferred_roles=("hero", "front", "variant", "detail"),
-        )
-        product_roles = {"hero", "front", "back", "side", "detail", "variant", "lifestyle"}
-        inspected_product = [
-            url
-            for url in ranked
-            if self._source_image_observations.get(url, {}).get("role") in product_roles
-        ]
-        return inspected_product or [
-            url for url in ranked if url in facts.product_image_urls or url in facts.sku_image_urls
-        ]
-
-    def _source_urls_for_use(
-        self,
-        urls: list[str],
-        *,
-        use: str,
-        preferred_roles: tuple[str, ...] = (),
-    ) -> list[str]:
-        """Rank safe source images first and isolate known hard-risk material."""
-
-        unique_urls = _unique(urls)
-        role_rank = {role: index for index, role in enumerate(preferred_roles)}
-
-        def rank(url: str) -> tuple[int, int]:
-            observation = self._source_image_observations.get(url)
-            if not observation or not observation.get("inspection_complete"):
-                safety = 3 if use == "reference" and self._source_image_observations else 2
-                return safety, len(role_rank)
-            safe_key = (
-                "safe_for_listing_fallback"
-                if use == "fallback"
-                else "safe_for_generation_reference"
-            )
-            if observation.get(safe_key) is True:
-                safety = 0
-            elif use == "fallback" and not self._terminal_fallback_risks(observation):
-                safety = 1
-            else:
-                safety = 3
-            return safety, role_rank.get(
-                str(observation.get("role") or "unknown"), len(role_rank)
-            )
-
-        ranked = sorted(enumerate(unique_urls), key=lambda pair: (*rank(pair[1]), pair[0]))
-        non_hard_risk = [url for _, url in ranked if rank(url)[0] < 3]
-        if non_hard_risk:
-            return non_hard_risk
-
-        warning = f"所有可用源图均触发视觉风险信号，{use} 阶段仅作最后兜底"
-        if warning not in self._source_selection_warnings:
-            self._source_selection_warnings.add(warning)
-            self.warnings.append(warning)
-            self.logger.warning(warning)
-        if use == "reference":
-            return []
-        return [url for _, url in ranked]
-
-    @staticmethod
-    def _terminal_fallback_risks(observation: dict[str, Any]) -> list[str]:
-        terminal_fields = {
-            "has_watermark",
-            "has_contact_info",
-            "has_qr_code",
-            "has_price_or_discount",
-            "has_review_graphic",
-            "has_certification_seal",
-            "has_platform_mark",
-            "has_before_after",
-            "adult_or_sensitive_visual",
-            "has_hate_or_extremism",
-            "has_violence_or_weapon",
-            "has_drugs_tobacco_or_alcohol",
-        }
-        reasons = [
-            str(reason).casefold()
-            for reason in observation.get("risk_reasons", [])
-            if str(reason) != "inspection_incomplete"
-        ]
-        explicit = [field for field in terminal_fields if observation.get(field) is True]
-        keywords = (
-            "contact",
-            "phone",
-            "email",
-            "qr",
-            "watermark",
-            "price",
-            "discount",
-            "review",
-            "certification",
-            "platform mark",
-            "before and after",
-            "adult",
-            "hate",
-            "extrem",
-            "violence",
-            "weapon",
-            "drug",
-            "tobacco",
-            "alcohol",
-        )
-        return explicit + [reason for reason in reasons if any(key in reason for key in keywords)]
-
-    def _fallback_source_urls(
-        self, facts: ProductFacts, *, asset_name: str
-    ) -> list[str]:
-        primary = _unique(facts.product_image_urls + facts.sku_image_urls)
-        if asset_name == "main_image.jpeg":
-            all_sources = _unique(primary + facts.description_image_urls)
-            inspected_hero_sources = [
-                url
-                for url in all_sources
-                if self._source_image_observations.get(url, {}).get(
-                    "safe_for_main_image"
-                )
-                is True
-            ]
-            if inspected_hero_sources:
-                return self._source_urls_for_use(
-                    inspected_hero_sources,
-                    use="fallback",
-                    preferred_roles=("hero", "front", "variant"),
-                )
-            if self._source_image_observations:
-                warning = (
-                    "未发现同时满足单品、完整展示、无人物道具和干净背景的源主图；"
-                    "主图进入质量降级兜底"
-                )
-                if warning not in self.warnings:
-                    self.warnings.append(warning)
-                    self.logger.warning(warning)
-        if asset_name.startswith("detail_image_") and primary:
-            try:
-                index = int(asset_name.removeprefix("detail_image_").split(".", 1)[0])
-            except ValueError:
-                index = 1
-            offset = (index - 1) % len(primary)
-            primary = primary[offset:] + primary[:offset]
-        preferred = (
-            ("hero", "front", "variant", "side", "back", "detail", "lifestyle")
-            if asset_name == "main_image.jpeg"
-            else ("detail", "front", "side", "back", "variant", "lifestyle", "hero")
-        )
-        ranked_primary = self._source_urls_for_use(
-            primary, use="fallback", preferred_roles=preferred
-        )
-        usable_primary = [
-            url
-            for url in ranked_primary
-            if self._source_image_observations.get(url, {}).get("role")
-            not in {"size_chart", "packaging"}
-            and not self._source_image_observations.get(url, {}).get(
-                "has_overlay_text", False
-            )
-            and not self._terminal_fallback_risks(
-                self._source_image_observations.get(url, {})
-            )
-        ]
-        if usable_primary:
-            return usable_primary
-        ranked_description = self._source_urls_for_use(
-            facts.description_image_urls,
-            use="fallback",
-            preferred_roles=preferred,
-        )
-        usable_description = [
-            url
-            for url in ranked_description
-            if self._source_image_observations.get(url, {}).get("role")
-            not in {"size_chart", "packaging"}
-            and not self._source_image_observations.get(url, {}).get(
-                "has_overlay_text", False
-            )
-            and not self._terminal_fallback_risks(
-                self._source_image_observations.get(url, {})
-            )
-        ]
-        return usable_description or ranked_primary or ranked_description
-
-    def _safe_generation_reference(self, url: str) -> bool:
-        observation = self._source_image_observations.get(url)
-        return not observation or observation.get("safe_for_generation_reference") is True
-
-    def _next_raw_path(self, downloads_dir: Path, suffix: str) -> Path:
-        with self._raw_counter_lock:
-            self._raw_counter += 1
-            counter = self._raw_counter
-        return downloads_dir / f"raw-{counter:03d}{suffix}"
-
-    def _download_and_normalize(
-        self,
-        url: str,
-        destination: Path,
-        downloads_dir: Path,
-        *,
-        canvas: tuple[int, int],
-        white_background: bool,
-    ) -> None:
-        raw_path = self._next_raw_path(downloads_dir, ".asset")
-        self.downloader.download(url, raw_path, max_bytes=30 * 1024 * 1024, timeout=180)
-        normalize_image(
-            raw_path,
-            destination,
-            canvas=canvas,
-            max_bytes=5 * 1024 * 1024,
-            white_background=white_background,
-        )
-
-    def _fallback_image(
-        self,
-        source_urls: list[str],
-        destination: Path,
-        downloads_dir: Path,
-        *,
-        canvas: tuple[int, int],
-        white_background: bool,
-        avoid_hashes: list[int] | None = None,
-    ) -> str:
-        errors: list[str] = []
-        for url in source_urls:
-            candidate_destination = destination
-            if avoid_hashes:
-                candidate_destination = destination.with_name(
-                    f".{destination.stem}-{uuid.uuid4().hex}.candidate.jpeg"
-                )
-            try:
-                self._download_and_normalize(
-                    url,
-                    candidate_destination,
-                    downloads_dir,
-                    canvas=canvas,
-                    white_background=white_background,
-                )
-                if avoid_hashes:
-                    quality = inspect_image_quality(candidate_destination)
-                    if quality is not None and any(
-                        hash_distance(quality.difference_hash, seen_hash) <= 2
-                        for seen_hash in avoid_hashes
-                    ):
-                        errors.append(f"候选源图与已用详情图近重复: {url}")
-                        candidate_destination.unlink(missing_ok=True)
-                        continue
-                    os.replace(candidate_destination, destination)
-                return url
-            except (ApiError, MediaError) as exc:
-                errors.append(str(exc))
-                candidate_destination.unlink(missing_ok=True)
-        raise PipelineError("所有源图片回退均失败: " + "; ".join(errors[-3:]))
-
-    def _build_main_image(
-        self,
-        facts: ProductFacts,
-        plan: CreativePlan,
-        vision: dict[str, Any],
-        work_dir: Path,
-        downloads_dir: Path,
-    ) -> tuple[AssetResult, str]:
-        destination = work_dir / "main_image.jpeg"
-        source_urls = self._ordered_source_urls(facts, vision)
-        generation_failure = "image model configuration unavailable"
-        if self.client is not None and source_urls:
-            try:
-                candidate_urls, model = self.client.generate_image_candidates(
-                    plan.main_prompt,
-                    source_urls[:1],
-                    size="1600*1600",
-                    negative_prompt=_MAIN_NEGATIVE_PROMPT,
-                    count=3,
-                )
-                generated_url = self._select_main_candidate(
-                    facts, source_urls[:3], candidate_urls
-                )
-                self._download_and_normalize(
-                    generated_url,
-                    destination,
-                    downloads_dir,
-                    canvas=(1600, 1600),
-                    white_background=True,
-                )
-                return (
-                    AssetResult(
-                        name="main_image.jpeg",
-                        path=str(destination),
-                        source_url=generated_url,
-                        model=model,
-                        generated=True,
-                        description="Clean square hero image",
-                    ),
-                    generated_url,
-                )
-            except (ApiError, MediaError) as exc:
-                generation_failure = str(exc)
-                self.logger.warning("主图生成失败，使用源图回退: %s", exc)
-                self.warnings.append(f"主图生成回退: {exc}")
-        fallback_url = self._fallback_image(
-            self._fallback_source_urls(facts, asset_name="main_image.jpeg"),
-            destination,
-            downloads_dir,
-            canvas=(1600, 1600),
-            white_background=True,
-        )
-        return (
-            AssetResult(
-                name="main_image.jpeg",
-                path=str(destination),
-                source_url=fallback_url,
-                model="deterministic-source-fallback",
-                generated=False,
-                fallback_reason=generation_failure,
-                description="Source-faithful square hero image",
-            ),
-            fallback_url,
-        )
-
-    def _select_main_candidate(
-        self,
-        facts: ProductFacts,
-        source_urls: list[str],
-        candidate_urls: list[str],
-    ) -> str:
-        if not candidate_urls:
-            raise ApiError("主图模型未返回候选")
-        if len(candidate_urls) == 1 or self.client is None:
-            return candidate_urls[0]
-        try:
-            review = self.client.select_best_generated_image(
-                json.dumps(facts.compact_dict(), ensure_ascii=False),
-                source_urls,
-                candidate_urls,
-            )
-        except ApiError as exc:
-            self.logger.warning("主图候选自动选优不可用，拒绝未经语义验收的候选: %s", exc)
-            self.warnings.append(f"主图候选自动选优不可用: {exc}")
-            raise ApiError("主图候选无法完成语义验收") from exc
-
-        candidates = review.get("candidates")
-        selected = review.get("selected_index")
-        if isinstance(candidates, list):
-            usable_indices = {
-                item.get("index")
-                for item in candidates
-                if isinstance(item, dict)
-                and isinstance(item.get("index"), int)
-                and 0 <= item["index"] < len(candidate_urls)
-                and item.get("usable") is True
-                and item.get("identity_consistent") is True
-                and item.get("construction_consistent") is True
-                and item.get("correct_color") is True
-                and item.get("single_product") is True
-                and item.get("product_complete") is True
-                and item.get("clean_neutral_background") is True
-                and item.get("has_person") is not True
-                and item.get("has_unrelated_props") is not True
-                and item.get("unwanted_text") is not True
-                and item.get("major_artifacts") is not True
-            }
-        else:
-            usable_indices = set()
-        if isinstance(selected, int) and selected in usable_indices:
-            if 0 <= selected < len(candidate_urls):
-                self.logger.info(
-                    "主图候选自动选优: 选择 %d/%d", selected + 1, len(candidate_urls)
-                )
-                return candidate_urls[selected]
-        if usable_indices:
-            fallback_index = min(usable_indices)
-            return candidate_urls[fallback_index]
-        raise ApiError("主图候选均未通过商品身份与结构一致性质检")
-
-    def _build_detail_image(
-        self,
-        index: int,
-        facts: ProductFacts,
-        plan: CreativePlan,
-        main_reference_url: str,
-        work_dir: Path,
-        downloads_dir: Path,
-    ) -> AssetResult:
-        destination = work_dir / f"detail_image_{index}.jpeg"
-        if index == 5 and facts.size_chart_rows:
-            create_size_chart_image(facts.size_chart_rows, destination)
-            return AssetResult(
-                name=destination.name,
-                path=str(destination),
-                model="deterministic-size-chart",
-                generated=False,
-                fallback_reason="source size chart transcribed and deterministically rendered",
-                description="Verified seller garment measurements and weight guidance",
-            )
-        source_urls = _unique(
-            [main_reference_url]
-            + facts.product_image_urls
-            + facts.sku_image_urls
-            + facts.description_image_urls
-        )
-        source_urls = self._fallback_source_urls(
-            facts, asset_name=f"detail_image_{index}.jpeg"
-        )
-        reference_selection = self._detail_reference_selection(
-            index, facts, main_reference_url
-        )
-        generation_failure = "image model configuration or safe reference unavailable"
-        if self.client is not None and reference_selection:
-            try:
-                candidate_count = 2 if index in {4, 5} else 1
-                candidate_urls, model = self.client.generate_image_candidates(
-                    plan.detail_prompts[index - 1],
-                    reference_selection[:3],
-                    size="1200*1500",
-                    negative_prompt=_IMAGE_NEGATIVE_PROMPT,
-                    count=candidate_count,
-                )
-                generated_url = self._select_detail_candidate(
-                    index,
-                    facts,
-                    reference_selection[:3],
-                    candidate_urls,
-                    plan.detail_prompts[index - 1],
-                )
-                self._download_and_normalize(
-                    generated_url,
-                    destination,
-                    downloads_dir,
-                    canvas=(1200, 1500),
-                    white_background=False,
-                )
-                return AssetResult(
-                    name=destination.name,
-                    path=str(destination),
-                    source_url=generated_url,
-                    model=model,
-                    generated=True,
-                    description=(
-                        f"Detail storyboard slot {index}: "
-                        f"{plan.detail_prompts[index - 1][:240]}"
-                    ),
-                )
-            except (ApiError, MediaError) as exc:
-                generation_failure = str(exc)
-                self.logger.warning("详情图 %d 生成失败，使用源图回退: %s", index, exc)
-                self.warnings.append(f"详情图 {index} 生成回退: {exc}")
-
-        rotated_sources = source_urls[index - 1 :] + source_urls[: index - 1]
-        fallback_url = self._fallback_image(
-            rotated_sources,
-            destination,
-            downloads_dir,
-            canvas=(1200, 1500),
-            white_background=False,
-        )
-        return AssetResult(
-            name=destination.name,
-            path=str(destination),
-            source_url=fallback_url,
-            model="deterministic-source-fallback",
-            generated=False,
-            fallback_reason=generation_failure,
-            description=f"Source-faithful detail image {index}",
-        )
-
-    def _select_detail_candidate(
-        self,
-        index: int,
-        facts: ProductFacts,
-        source_urls: list[str],
-        candidate_urls: list[str],
-        purpose: str,
-    ) -> str:
-        if not candidate_urls:
-            raise ApiError(f"详情图 {index} 模型未返回候选")
-        if len(candidate_urls) == 1 or self.client is None:
-            return candidate_urls[0]
-        review = self.client.select_best_detail_image(
-            json.dumps(facts.compact_dict(), ensure_ascii=False),
-            source_urls,
-            candidate_urls,
-            asset_name=f"detail_image_{index}.jpeg",
-            purpose=purpose,
-        )
-        candidates = review.get("candidates")
-        selected = review.get("selected_index")
-        usable: set[int] = set()
-        if isinstance(candidates, list):
-            for item in candidates:
-                if not isinstance(item, dict) or not isinstance(item.get("index"), int):
-                    continue
-                candidate_index = item["index"]
-                if not 0 <= candidate_index < len(candidate_urls):
-                    continue
-                if (
-                    item.get("usable") is True
-                    and item.get("identity_consistent") is not False
-                    and item.get("construction_consistent") is not False
-                    and item.get("color_consistent") is not False
-                    and item.get("pattern_consistent") is not False
-                    and item.get("slot_match") is True
-                    and item.get("anatomy_natural") is not False
-                    and item.get("unwanted_text") is not True
-                    and item.get("prohibited_visual") is not True
-                    and item.get("major_artifacts") is not True
-                    and str(item.get("product_coverage") or "").lower() != "low"
-                ):
-                    usable.add(candidate_index)
-        if isinstance(selected, int) and selected in usable:
-            return candidate_urls[selected]
-        if usable:
-            return candidate_urls[min(usable)]
-        raise ApiError(f"详情图 {index} 候选均未通过语义质检")
-
-    def _detail_reference_selection(
-        self, index: int, facts: ProductFacts, main_reference_url: str
-    ) -> list[str]:
-        product = facts.product_image_urls
-        sku = facts.sku_image_urls
-        description = facts.description_image_urls
-        if index == 4 and sku:
-            inspected_variants = [
-                url for url in sku if url in self._source_image_observations
-            ]
-            variant_references = inspected_variants or _even_sample(sku, 3)
-            return self._source_urls_for_use(
-                _unique(_even_sample(variant_references, 3) + product[:1]),
-                use="reference",
-                preferred_roles=("variant", "front", "hero"),
-            )[:3]
-        role_preferences = {
-            1: ("front", "hero", "lifestyle"),
-            2: ("detail", "front", "side"),
-            3: ("detail", "side", "back"),
-            4: ("variant", "front", "hero"),
-            5: ("lifestyle", "front", "hero"),
-        }
-        # Search the whole inspected source set for the role needed by each slot.
-        # Description images are valuable for close-ups and lifestyle composition,
-        # but the safety rank below excludes charts, promotional overlays and marks.
-        candidate_pool = _unique(
-            [main_reference_url] + product + description + _even_sample(sku, 3)
-        )
-        ranked = self._source_urls_for_use(
-            candidate_pool,
-            use="reference",
-            preferred_roles=role_preferences.get(index, ()),
-        )
-        excluded_roles = {"size_chart", "packaging", "unknown"}
-        role_safe = [
-            url
-            for url in ranked
-            if self._source_image_observations.get(url, {}).get("role")
-            not in excluded_roles
-        ]
-        return (role_safe or ranked)[:3]
-
-    def _build_video(
-        self,
-        facts: ProductFacts,
-        plan: CreativePlan,
-        first_frame_url: str,
-        main_image_path: Path,
-        work_dir: Path,
-        downloads_dir: Path,
-        allow_generation: bool,
-    ) -> AssetResult:
-        destination = work_dir / "product_video.mp4"
-        generation_failure = "video model configuration or safe first frame unavailable"
-        if self.client is not None and allow_generation:
-            try:
-                video_url, model = self.client.generate_video(
-                    plan.video_prompt,
-                    first_frame_url,
-                    negative_prompt=_VIDEO_NEGATIVE_PROMPT,
-                )
-                raw_video = self._next_raw_path(downloads_dir, ".mp4")
-                self.downloader.download(
-                    video_url, raw_video, max_bytes=199 * 1024 * 1024, timeout=300
-                )
-                if os.environ.get("AGENT_KEEP_VIDEO_AUDIO", "").strip() == "1":
-                    shutil.copyfile(raw_video, destination)
-                    inspect_video(destination)
-                else:
-                    strip_video_audio(raw_video, destination)
-                return AssetResult(
-                    name=destination.name,
-                    path=str(destination),
-                    source_url=video_url,
-                    model=model,
-                    generated=True,
-                    description="Short source-guided product video",
-                )
-            except (ApiError, MediaError, OSError) as exc:
-                generation_failure = str(exc)
-                self.logger.warning("视频模型失败，创建确定性视频回退: %s", exc)
-                self.warnings.append(f"视频生成回退: {exc}")
-        elif self.client is not None:
-            self.warnings.append("首帧源图触发知识产权或视觉风险，跳过衍生视频生成")
-        create_slideshow_video(main_image_path, destination, duration=8)
-        return AssetResult(
-            name=destination.name,
-            path=str(destination),
-            model="ffmpeg-slideshow-fallback",
-            generated=False,
-            fallback_reason=generation_failure,
-            description="Playable H.264 product presentation fallback",
-        )
-
-    def _review_generated_assets(
-        self,
-        facts: ProductFacts,
-        assets: list[AssetResult],
-        work_dir: Path,
-        downloads_dir: Path,
-    ) -> None:
-        self._replace_near_duplicate_details(facts, assets, downloads_dir)
-        image_assets = [
-            asset
-            for asset in assets
-            if asset.name.endswith(".jpeg") and asset.generated
-        ]
-        main_was_rejected = False
-        if self.client is not None and image_assets and self.deadline - time.monotonic() > 3 * 60:
-            source_review_urls = _unique(
-                facts.product_image_urls[:3]
-                + _even_sample(facts.sku_image_urls, 1)
-                + _even_sample(facts.description_image_urls, 1)
-            )[:5]
-            source_review_urls = self._source_urls_for_use(
-                source_review_urls, use="reference"
-            )[:5]
-            try:
-                review = self.client.review_generated_images(
-                    json.dumps(facts.compact_dict(), ensure_ascii=False),
-                    source_review_urls,
-                    [asset.source_url for asset in image_assets],
-                    [
-                        {"name": asset.name, "purpose": asset.description}
-                        for asset in image_assets
-                    ],
-                )
-            except ApiError as exc:
-                self.logger.warning(
-                    "生成图片语义质检失败，保留已通过物理校验的图片: %s", exc
-                )
-                self.warnings.append(f"生成图片语义质检不可用: {exc}")
-            else:
-                main_was_rejected = self._apply_image_review(
-                    facts, image_assets, review, downloads_dir
-                )
-        elif self.client is not None and image_assets:
-            self.warnings.append("剩余时间不足，跳过生成图片语义质检")
-
-        if main_was_rejected:
-            video_asset = next(
-                (asset for asset in assets if asset.name == "product_video.mp4"), None
-            )
-            if video_asset and video_asset.generated:
-                replaced = self._fallback_video(
-                    video_asset,
-                    work_dir / "main_image.jpeg",
-                    "main image semantic QA rejection invalidated generated video",
-                )
-                if replaced:
-                    self.warnings.append("主图语义质检回退后，视频同步回退为源图展示")
-
-        self._replace_near_duplicate_details(
-            facts, assets, downloads_dir, include_fallback=True
-        )
-        self._install_size_chart_detail(facts, assets, work_dir)
-        if self.client is not None:
-            self._review_generated_video(facts, assets, work_dir)
-        self._enhance_fallback_video(assets, work_dir)
-
-    def _install_size_chart_detail(
-        self, facts: ProductFacts, assets: list[AssetResult], work_dir: Path
-    ) -> None:
-        if not facts.size_chart_rows:
-            return
-        asset = next(
-            (item for item in assets if item.name == "detail_image_5.jpeg"), None
-        )
-        if asset is None:
-            return
-        destination = work_dir / "detail_image_5.jpeg"
-        try:
-            create_size_chart_image(facts.size_chart_rows, destination)
-        except MediaError as exc:
-            self.logger.warning("本地化尺码表生成失败，保留原详情图: %s", exc)
-            self.warnings.append(f"尺码表详情图生成失败: {exc}")
-            return
-        asset.path = str(destination)
-        asset.source_url = ""
-        asset.model = "deterministic-size-chart"
-        asset.generated = False
-        asset.fallback_reason = "source size chart transcribed and deterministically rendered"
-        asset.description = "Verified seller garment measurements and weight guidance"
-
-    def _enhance_fallback_video(
-        self, assets: list[AssetResult], work_dir: Path
-    ) -> None:
-        video_asset = next(
-            (asset for asset in assets if asset.name == "product_video.mp4"), None
-        )
-        if not video_asset or video_asset.generated:
-            return
-        image_paths = [work_dir / "main_image.jpeg"] + [
-            work_dir / f"detail_image_{index}.jpeg" for index in range(1, 6)
-        ]
-        candidate = work_dir / ".product_video_catalog.mp4"
-        try:
-            create_catalog_video(image_paths, candidate, duration=8)
-            os.replace(candidate, Path(video_asset.path))
-        except (MediaError, OSError) as exc:
-            candidate.unlink(missing_ok=True)
-            self.logger.warning("多镜头视频回退不可用，保留稳定单图视频: %s", exc)
-            self.warnings.append(f"多镜头视频回退不可用: {exc}")
-            return
-        video_asset.model = "ffmpeg-catalog-fallback"
-        video_asset.fallback_reason = (
-            (video_asset.fallback_reason + "; ") if video_asset.fallback_reason else ""
-        ) + "rebuilt from the final validated image set"
-        video_asset.description = (
-            "Eight-second multi-shot catalog video assembled from the final validated images"
-        )
-
-    def _apply_image_review(
-        self,
-        facts: ProductFacts,
-        image_assets: list[AssetResult],
-        review: dict[str, Any],
-        downloads_dir: Path,
-    ) -> bool:
-        reviews = review.get("assets")
-        if not isinstance(reviews, list):
-            self.warnings.append("生成图片语义质检返回结构无效，保留物理校验结果")
-            return False
-        main_was_rejected = False
-        for item in reviews:
-            if not isinstance(item, dict) or not isinstance(item.get("index"), int):
-                continue
-            index = item["index"]
-            if not 0 <= index < len(image_assets):
-                continue
-            asset = image_assets[index]
-            rejected = (
-                item.get("usable") is not True
-                or item.get("identity_consistent") is not True
-                or item.get("construction_consistent") is not True
-                or item.get("color_consistent") is not True
-                or item.get("pattern_consistent") is not True
-                or item.get("slot_match") is not True
-                or item.get("unwanted_text") is not False
-                or item.get("prohibited_visual") is not False
-                or item.get("major_artifacts") is not False
-                or (
-                    item.get("unexpected_collage") is True
-                    and asset.name != "detail_image_4.jpeg"
-                )
-                or str(item.get("product_coverage") or "").lower()
-                not in {"high", "medium"}
-            )
-            if not rejected:
-                continue
-            destination = Path(asset.path)
-            is_main = asset.name == "main_image.jpeg"
-            try:
-                fallback_url = self._fallback_image(
-                    self._source_urls_for_use(
-                        self._fallback_source_urls(facts, asset_name=asset.name),
-                        use="fallback",
-                    ),
-                    destination,
-                    downloads_dir,
-                    canvas=(1600, 1600) if is_main else (1200, 1500),
-                    white_background=is_main,
-                )
-            except PipelineError as exc:
-                self.logger.warning(
-                    "语义质检拒绝 %s，但源图回退失败: %s", asset.name, exc
-                )
-                continue
-            asset.source_url = fallback_url
-            asset.model = "deterministic-source-fallback"
-            asset.generated = False
-            asset.fallback_reason = (
-                f"semantic QA rejected generated image: {item.get('reason', '')}"
-            )
-            self.warnings.append(f"{asset.name} 因语义质检回退到源图")
-            if is_main:
-                main_was_rejected = True
-        return main_was_rejected
-
-    def _replace_near_duplicate_details(
-        self,
-        facts: ProductFacts,
-        assets: list[AssetResult],
-        downloads_dir: Path,
-        *,
-        include_fallback: bool = False,
-    ) -> None:
-        seen: list[tuple[str, int]] = []
-        main_asset = next(
-            (asset for asset in assets if asset.name == "main_image.jpeg"), None
-        )
-        if main_asset is not None:
-            try:
-                main_quality = inspect_image_quality(Path(main_asset.path))
-            except MediaError:
-                main_quality = None
-            if main_quality is not None:
-                seen.append((main_asset.name, main_quality.difference_hash))
-        for asset in assets:
-            if not asset.name.startswith("detail_image_") or (
-                not include_fallback and not asset.generated
-            ):
-                continue
-            try:
-                quality = inspect_image_quality(Path(asset.path))
-            except MediaError as exc:
-                self.logger.warning("详情图质量信号读取失败 %s: %s", asset.name, exc)
-                continue
-            if quality is None:
-                return
-            duplicate_of = next(
-                (
-                    name
-                    for name, difference_hash in seen
-                    if hash_distance(quality.difference_hash, difference_hash) <= 2
-                ),
-                "",
-            )
-            if not duplicate_of:
-                seen.append((asset.name, quality.difference_hash))
-                continue
-            try:
-                fallback_url = self._fallback_image(
-                    self._source_urls_for_use(
-                        self._fallback_source_urls(facts, asset_name=asset.name),
-                        use="fallback",
-                    ),
-                    Path(asset.path),
-                    downloads_dir,
-                    canvas=(1200, 1500),
-                    white_background=False,
-                    avoid_hashes=[difference_hash for _, difference_hash in seen],
-                )
-            except PipelineError as exc:
-                self.logger.warning("重复详情图回退失败 %s: %s", asset.name, exc)
-                warning = f"{asset.name} 与 {duplicate_of} 近重复，未找到不同的安全源图"
-                if warning not in self.warnings:
-                    self.warnings.append(warning)
-                continue
-            asset.source_url = fallback_url
-            asset.model = "deterministic-source-fallback"
-            asset.generated = False
-            asset.fallback_reason = f"near-duplicate of {duplicate_of}"
-            self.warnings.append(f"{asset.name} 与 {duplicate_of} 近重复，已回退到源图")
-            try:
-                replacement_quality = inspect_image_quality(Path(asset.path))
-            except MediaError:
-                replacement_quality = None
-            if replacement_quality is not None:
-                seen.append((asset.name, replacement_quality.difference_hash))
-
-    def _fallback_sources_for_asset(
-        self, facts: ProductFacts, asset_name: str
-    ) -> list[str]:
-        source_urls = _unique(
-            facts.product_image_urls
-            + facts.sku_image_urls
-            + facts.description_image_urls
-        )
-        if not source_urls or not asset_name.startswith("detail_image_"):
-            return source_urls
-        try:
-            index = int(asset_name.removeprefix("detail_image_").split(".", 1)[0])
-        except ValueError:
-            return source_urls
-        offset = (index - 1) % len(source_urls)
-        return source_urls[offset:] + source_urls[:offset]
-
-    def _review_generated_video(
-        self, facts: ProductFacts, assets: list[AssetResult], work_dir: Path
-    ) -> None:
-        video_asset = next(
-            (asset for asset in assets if asset.name == "product_video.mp4"), None
-        )
-        if not video_asset or not video_asset.generated or not video_asset.source_url:
-            return
-        if self.deadline - time.monotonic() <= 2 * 60:
-            replaced = self._fallback_video(
-                video_asset,
-                work_dir / "main_image.jpeg",
-                "insufficient time for generated-video semantic QA",
-            )
-            if replaced:
-                self.warnings.append("剩余时间不足，生成视频已安全回退")
-            return
-        source_review_urls = _unique(
-            facts.product_image_urls[:3] + _even_sample(facts.sku_image_urls, 1)
-        )[:4]
-        source_review_urls = self._source_urls_for_use(
-            source_review_urls, use="reference"
-        )[:4]
-        try:
-            review = self.client.review_generated_video(
-                json.dumps(facts.compact_dict(), ensure_ascii=False),
-                source_review_urls,
-                video_asset.source_url,
-            )
-        except ApiError as exc:
-            self.logger.warning("生成视频语义质检失败，执行安全回退: %s", exc)
-            replaced = self._fallback_video(
-                video_asset,
-                work_dir / "main_image.jpeg",
-                f"generated-video semantic QA unavailable: {exc}",
-            )
-            if replaced:
-                self.warnings.append("生成视频语义质检不可用，已安全回退")
-            return
-        rejected = (
-            review.get("usable") is not True
-            or review.get("identity_consistent") is not True
-            or review.get("construction_consistent") is not True
-            or review.get("color_and_pattern_consistent") is not True
-            or review.get("motion_stable") is not True
-            or review.get("unwanted_text") is not False
-            or review.get("prohibited_visual") is not False
-            or review.get("major_artifacts") is not False
-        )
-        if not rejected:
-            return
-        replaced = self._fallback_video(
-            video_asset,
-            work_dir / "main_image.jpeg",
-            f"semantic QA rejected generated video: {review.get('reason', '')}",
-        )
-        if replaced:
-            self.warnings.append("product_video.mp4 因语义质检回退到稳定主图视频")
-
-    def _fallback_video(
-        self, video_asset: AssetResult, main_image_path: Path, reason: str
-    ) -> bool:
-        video_path = Path(video_asset.path)
-        try:
-            create_slideshow_video(main_image_path, video_path, duration=8)
-        except MediaError as exc:
-            self.logger.warning("无法重建视频回退: %s", exc)
-            return False
-        video_asset.source_url = ""
-        video_asset.model = "ffmpeg-slideshow-fallback"
-        video_asset.generated = False
-        video_asset.fallback_reason = reason
-        return True
-
-    def _write_strategy_document(
-        self,
-        state: RunState,
-        localization_sources: dict[str, str],
-        plan_model: str,
-        work_dir: Path,
-    ) -> None:
-        facts, taxonomy = state.facts, state.taxonomy
-        generated_count = sum(1 for asset in state.assets if asset.generated)
-        fallback_assets = [asset for asset in state.assets if not asset.generated]
-        model_summary = (
-            self.client.model_summary
-            if self.client
-            else {"mode": "deterministic fallback"}
-        )
-        schema_id = taxonomy.attribute_schema_category_id or taxonomy.category.category_id
-        schema_note = (
-            f"叶子类目缺少独立属性元数据，属性映射使用同一平台快照中的上级/通用 schema {schema_id}；"
-            f"上架叶子类目仍保持 {taxonomy.category.category_id}。"
-            if schema_id != taxonomy.category.category_id
-            else f"属性映射使用叶子类目 schema {schema_id}。"
-        )
-        failed_calls = [
-            item for item in state.api_calls if str(item.get("status") or "") != "ok"
-        ]
-
-        def brief(value: str) -> str:
-            cleaned = re.sub(r"https?://\S+", "[url]", value.replace("\n", " "))
-            return cleaned[:260]
-
-        lines = [
-            "# 商品本地化素材生成策略说明",
-            "",
-            "## 1. 本次商品与目标",
-            "",
-            f"- 商品 ID：{facts.offer_id}",
-            f"- 数据来源：{facts.platform}",
-            f"- 源商品 URL：{facts.source_url}",
-            "- 交付目标：英文、韩文、巴西葡萄牙文文案，1 张主图、5 张详情图、1 个商品视频。",
-            "",
-            "## 2. 事实一致性策略",
-            "",
-            "Agent 首先把商品 JSON 归一化为事实账本。标题、属性、SKU、图片 URL、商品 ID 和来源均保留证据位置；"
-            "只有源 JSON、源图片直接观察或确定性单位换算得到的信息可以进入文案和素材提示词。"
-            "所有模型文案均经过结构、数值、事实和平台内容规则的确定性复核。",
-            "三份文案均并列保留面向买家的本地化显示值与源数据原值；平台类目 ID、属性 ID/Value ID、"
-            "SKU ID/Spec ID 及 JSON Pointer 证据位置可直接机器解析。每个 SKU 分解项另以规范化表格逐条展示"
-            "源属性 ID、源值与字段级证据位置，翻译不会覆盖标准答案字段。",
-            "",
-            f"本次共读取 {len(facts.attributes)} 条商品属性、{len(facts.skus)} 个 SKU、"
-            f"{len(facts.all_image_urls())} 个不重复源图片 URL。",
-            f"从源详情图核验并结构化 {len(facts.size_chart_rows)} 行服装尺码数据。",
-            "",
-            "## 3. AliExpress 类目与属性策略",
-            "",
-            f"- 叶子类目 ID：{taxonomy.category.category_id}",
-            f"- 叶子类目名称：{taxonomy.category.name}",
-            f"- 类目路径：{taxonomy.category.path}",
-            f"- 决策方式：{taxonomy.category.method}",
-            f"- 置信度：{taxonomy.category.confidence:.2f}",
-            f"- 命中的平台商品/销售属性数：{len(taxonomy.attributes)}",
-            "",
-            "类目采用“源类目同义词精确映射 → 性别/年龄/品类规则过滤 → 本地叶子节点排序”的确定性优先流程，"
-            "父级属性元数据不进入可选类目集合。属性值只从对应类目允许的枚举中映射；多季节值按平台多选枚举逐项"
-            "展开，缺失的必填值会明确保留为空。",
-            schema_note,
-            "",
-            "## 4. 本地化策略",
-            "",
-            "- 英文按 en-US 电商语气编写，涉及体重时同时给出 lb。",
-            "- 英文中的厘米规格同时给出确定性英寸换算；韩文与巴西葡萄牙文保留当地常用公制。",
-            "- 韩文按 ko-KR 自然购物语气编写，避免机械直译和未经证实的韩国尺码映射。",
-            "- 葡萄牙文按 pt-BR 编写，避免欧洲葡语表达和未经证实的 P/M/G 映射。",
-            "- 三份文案共享同一个不可变商品 ID、URL、叶子类目、属性和完整 SKU 表。",
-            "- 卖家提供的体重范围只按完全匹配的尺码标签写入对应 SKU，并同时展示 kg/lb，不推导地区尺码。",
-            "- 可辨识的源尺码表先由视觉模型转录，再按SKU尺码代码、来源图角色和数值范围进行确定性校验；"
-            "英文显示 cm/in 与 kg/lb，韩文和巴西葡萄牙文保留 cm/kg。",
-            f"- 文案生成来源：{json.dumps(localization_sources, ensure_ascii=False)}",
-            "",
-            "## 5. 图片与视频生成策略",
-            "",
-            "- 视觉主题：中性背景、商品优先、跨市场一致的电商摄影。",
-            f"- 创意计划来源：{plan_model}",
-            f"- 模型配置：{json.dumps(model_summary, ensure_ascii=False)}",
-            "- 主图采用方形浅色棚拍构图；优先生成三个候选，再按身份、结构、颜色、完整度、干净背景、单品覆盖和瑕疵自动选优。",
-            "- 主图回退源图须优先满足无人物、无关道具、单一完整商品和干净中性背景；没有合格源图时明确记录质量降级。",
-            "- 五张详情图优先覆盖整体展示、领口/门襟、袖口/垂感、真实变体和使用情境；若源详情图存在可核验尺码表，"
-            "第5张改为确定性重绘的干净尺码图。",
-            "- 高风险的变体图与穿着场景各生成两个候选，并按商品身份、颜色、图案、结构、人体与分镜匹配自动选优。",
-            "- 视频以最终主图或其源 URL 为首帧，按上装、下装、连衣裙或童装使用不同结构保护镜头；默认移除未审核音轨。",
-            f"- 本次模型直接生成并通过校验的素材数：{generated_count}。",
-            "",
-            "## 6. 合规与质检",
-            "",
-            "生成提示词和最终文案均通过平台内容规则门禁。图片下载后统一解码为 RGB JPEG，并校验尺寸、"
-            "文件大小、空白图和近重复图；模型生成图还会与"
-            "可信源图共同输入视觉质检，检查商品身份与具体结构、分镜覆盖、意外文字、水印和重大瑕疵。视频除容器和"
-            "200MB 上限外，还须完成全视频流解码，并通过源图对照的时序语义质检。"
-            "所有输出在写入最终目录前进行一次完整交付质检，写入后再次复核。",
-            "源图检查区分商品本身的固有设计与背景营销元素；不适合发布的视觉内容不会进入生成参考或优先回退素材。"
-            "视频语义质检缺失、超时或字段不完整时按失败处理。",
-            "主图与全部详情图共同执行感知哈希去重；详情图等比保留商品主体时使用低对比度模糊延展背景，"
-            "避免大块纯色填边。回退视频只使用感知上不同的最终图片，每个镜头被显式裁成有限时长后再拼接。",
-            "",
-            "## 7. 降级与稳定性",
-            "",
-            "API 请求对限流和暂时性错误执行指数退避；图片优先走同步多模态生成，视频异步任务保存 task_id 并轮询。"
-            "图片模型失败或语义质检不通过时，回退到经规格归一化的商品源图；视频模型失败时，"
-            "使用最终质检后的主图与详情图生成多镜头 H.264 商品展示视频。所有回退都优先保证商品事实一致性和文件可用性。",
-            f"- 本次 API 调用记录数：{len(state.api_calls)}；每次调用均记录模型、耗时、状态及调用后的剩余时间。",
-            f"- 失败或降级 API 调用数：{len(failed_calls)}。",
-        ]
-        lines.extend(["", "本次实际媒体结果：", ""])
-        lines.extend(
-            f"- {asset.name}：{asset.model}；{asset.description or '未提供说明'}。"
-            for asset in state.assets
-        )
-        if fallback_assets:
-            lines.extend(["", "本次发生的素材回退：", ""])
-            lines.extend(
-                f"- {asset.name}：{asset.model}；原因：{brief(asset.fallback_reason or '模型产物不可用')}。"
-                for asset in fallback_assets
-            )
-        if failed_calls:
-            lines.extend(["", "API 失败摘要：", ""])
-            lines.extend(
-                f"- {item.get('operation', 'unknown')}/{item.get('model', 'unknown')}："
-                f"{brief(str(item.get('error') or item.get('status') or 'error'))}"
-                for item in failed_calls[:12]
-            )
-        if state.warnings:
-            lines.extend(
-                [
-                    "",
-                    "运行质检记录：",
-                    "",
-                    f"- 共记录 {len(state.warnings)} 项内部质检事件。",
-                ]
-            )
-            lines.extend(f"- {brief(item)}" for item in state.warnings[:16])
-        lines.append("")
-        (work_dir / "strategy_document.md").write_text(
-            "\n".join(lines), encoding="utf-8"
-        )
-
-    def _commit_delivery(self, work_dir: Path) -> None:
-        for filename in sorted(EXPECTED_FILES):
-            source = work_dir / filename
-            destination = self.output_dir / filename
-            os.replace(source, destination)
-
-
-def _unique(values: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if value and value not in seen:
-            seen.add(value)
-            result.append(value)
-    return result
-
-
-def _even_sample(values: list[str], count: int) -> list[str]:
-    if len(values) <= count:
-        return list(values)
-    if count <= 1:
-        return [values[0]]
-    indices = [round(index * (len(values) - 1) / (count - 1)) for index in range(count)]
-    return [values[index] for index in indices]

@@ -1,4 +1,4 @@
-"""Bounded creative planning for the fixed delivery contract."""
+"""Creative-plan validation and emergency fallback for the agent orchestrator."""
 
 from __future__ import annotations
 
@@ -12,106 +12,186 @@ from .models import CreativePlan, ProductFacts, TaxonomyResult
 
 _PRESERVATION = (
     "Preserve the exact product identity, silhouette, construction, pattern, trims and visible color from the "
-    "reference images. Do not add or remove pockets, buttons, prints, logos, fasteners, sleeves or accessories. "
+    "reference images. Do not add, remove or alter any visible product component, construction detail, fastening, "
+    "surface design or included accessory. "
     "Do not invent text, measurements, materials, certifications or brand marks. No watermark."
 )
 
-_MAIN_PRESENTATION = (
-    "Show exactly one physical product in exactly one verified colorway. The complete product must be visible, "
-    "including collar or waistband, both sleeves or legs, cuffs and hem. Use a product-only studio presentation "
-    "such as a clean flat lay, hanger, or invisible mannequin; no person, mannequin body, colorway lineup, duplicate "
-    "garment, inset, split screen, montage or collage."
-)
 
-_BASE_DETAIL_SLOT_DIRECTIVES = (
-    "This is detail slot 1: show a complete front three-quarter product presentation on a hanger or invisible form "
-    "with the uncluttered, practical editorial styling familiar to US marketplace shoppers. Use a warm neutral wall "
-    "and soft daylight; it must be visibly different from the square white-background hero.",
-    "This is detail slot 2: make a tight but readable upper-garment close-up centered on the verified collar, "
-    "front opening and visible fastening construction. Use restrained Korean commerce styling: pale neutral tones, "
-    "precise spacing and soft diffused light. Do not add Hangul or show an isolated generic fabric swatch.",
-    "This is detail slot 3: make a distinct close-up of the verified sleeve, cuff, hem and natural drape while "
-    "keeping enough of the product visible to identify it. Use warm natural daylight and a subtle contemporary "
-    "Brazilian marketplace mood without flags, landmarks, stereotypes or written Portuguese.",
-    "This is detail slot 4: create a clean catalog lineup using only color variants visibly present in the supplied "
-    "references. Show two or three complete products with identical construction and no labels or swatches.",
-    "This is detail slot 5: show one adult wearer in a restrained everyday styling context, with the product fully "
-    "visible and unobstructed from collar through hem. Use culturally neutral, inclusive styling that reads naturally "
-    "across the US, South Korea and Brazil. Keep anatomy natural and do not add accessories to the product.",
-)
+def _is_children_product(facts: ProductFacts, taxonomy: TaxonomyResult) -> bool:
+    """Use category meaning, not benchmark category IDs, for the wearer safety rule."""
 
-
-def _product_family(taxonomy: TaxonomyResult) -> str:
-    category_id = taxonomy.category.category_id
-    if category_id in {"30341", "30335", "39153"}:
-        return "bottom"
-    if category_id in {"30843", "29553"}:
-        return "children"
-    if category_id == "39107":
-        return "dress"
-    return "top"
-
-
-def _detail_slot_directives(taxonomy: TaxonomyResult) -> tuple[str, ...]:
-    family = _product_family(taxonomy)
-    category_id = taxonomy.category.category_id
-    wearer = (
-        "one adult man"
-        if category_id in {"30341", "30335", "30408", "30471"}
-        else "one adult woman"
+    category_text = " ".join(
+        (
+            facts.source_category_name,
+            taxonomy.category.name,
+            taxonomy.category.path,
+        )
+    ).casefold()
+    return any(
+        marker in category_text
+        for marker in ("child", "kid", "boy", "girl", "baby", "infant", "童", "婴")
     )
-    slot_1 = _BASE_DETAIL_SLOT_DIRECTIVES[0]
-    slot_4 = _BASE_DETAIL_SLOT_DIRECTIVES[3]
-    if family == "bottom":
-        return (
-            slot_1,
-            "This is detail slot 2: make a tight but readable close-up centered on the verified waistband, "
-            "front closure and pocket construction. Use restrained Korean commerce styling with pale neutral tones, "
-            "precise spacing and diffused light. Do not invent a fly, drawstring, belt loop or pocket.",
-            "This is detail slot 3: make a distinct close-up of the verified leg shape, side seam and hem, "
-            "while keeping enough of the product visible to identify it. Use warm natural daylight and a subtle "
-            "contemporary Brazilian marketplace mood without flags, landmarks, stereotypes or written text.",
-            slot_4,
-            f"This is detail slot 5: show {wearer} in a restrained everyday styling context, with the waistband, "
-            "both legs and hem visible and unobstructed. Use inclusive cross-market styling appropriate to the US, "
-            "South Korea and Brazil. Keep anatomy, body proportions and garment length natural; do not reshape the body.",
+
+
+def _source_supports_wearer(vision: dict[str, Any] | None) -> bool:
+    images = vision.get("source_images") if isinstance(vision, dict) else None
+    return bool(
+        isinstance(images, list)
+        and any(isinstance(item, dict) and item.get("has_person") is True for item in images)
+    )
+
+
+def _verified_variants(
+    facts: ProductFacts | None, vision: dict[str, Any] | None
+) -> bool:
+    """Require seller options and pixel evidence before asking for a variant lineup."""
+
+    seller_colors = {
+        item.value.strip().casefold()
+        for item in (facts.attributes if facts is not None else [])
+        if "颜色" in item.name or "color" in item.name.casefold()
+        if item.value.strip()
+    }
+    if len(seller_colors) < 2 or not isinstance(vision, dict):
+        return False
+    observed = {
+        str(value).strip().casefold()
+        for value in vision.get("visible_colors", [])
+        if str(value).strip()
+    }
+    images = vision.get("source_images")
+    if isinstance(images, list):
+        observed.update(
+            str(item.get("dominant_color") or "").strip().casefold()
+            for item in images
+            if isinstance(item, dict)
+            and item.get("role") in {"variant", "hero", "front", "back", "side"}
+            and str(item.get("dominant_color") or "").strip()
         )
-    if family == "children":
-        return (
-            slot_1,
-            _BASE_DETAIL_SLOT_DIRECTIVES[1],
-            _BASE_DETAIL_SLOT_DIRECTIVES[2],
-            slot_4,
-            "This is detail slot 5: create a product-only, age-appropriate outfit flat lay. Keep the item complete "
-            "and unobstructed, use only neutral unbranded props with inclusive cross-market styling, and do not depict "
-            "a child or adult wearer.",
+    return len(observed) >= 2
+
+
+def _observed_feature_context(vision: dict[str, Any] | None) -> str:
+    """Expose only concise visual evidence; never manufacture category-specific parts."""
+
+    if not isinstance(vision, dict):
+        return ""
+    features: list[str] = []
+    for key in ("visible_design_features", "preservation_constraints"):
+        values = vision.get(key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            clean = " ".join(str(value).split())[:180]
+            if clean and clean not in features:
+                features.append(clean)
+            if len(features) >= 8:
+                break
+    return "; ".join(features)
+
+
+def _main_presentation(
+    facts: ProductFacts, taxonomy: TaxonomyResult, vision: dict[str, Any] | None
+) -> str:
+    common = (
+        "Show one sellable product in one verified variant as the single dominant subject. The complete product "
+        "must be visible from its highest to lowest product edge, with every source-visible section unobstructed. "
+        "No unsupported variant lineup, duplicate product, inset, split screen, montage or collage. "
+    )
+    if _is_children_product(facts, taxonomy):
+        return common + (
+            "Use a clean product-only studio presentation on an appropriate neutral support or surface; do not "
+            "add a child, adult, hands, toys or character props."
         )
-    if family == "dress":
-        return (
-            slot_1,
-            "This is detail slot 2: make a tight but readable close-up centered on the verified neckline, bodice "
-            "and closure construction. Use restrained Korean commerce styling with pale neutral tones, precise spacing "
-            "and diffused light. Do not invent buttons, a zipper, belt or trim.",
-            "This is detail slot 3: show the verified waist transition, skirt drape and hem while keeping enough "
-            "of the dress visible to identify its silhouette and length. Use warm natural daylight and a subtle "
-            "contemporary Brazilian marketplace mood without flags, landmarks, stereotypes or written text.",
-            slot_4,
-            _BASE_DETAIL_SLOT_DIRECTIVES[4].replace("one adult wearer", wearer),
+    if _source_supports_wearer(vision):
+        return common + (
+            "Prefer a product-only presentation on an appropriate neutral support or surface. A single naturally "
+            "proportioned, fully clothed adult user is optional because a trusted source already shows a person; keep the product "
+            "unobstructed and the background clean."
         )
+    return common + (
+        "Use a product-only presentation on an appropriate neutral support or surface; do not introduce a person that is absent "
+        "from the inspected source references."
+    )
+
+
+def _detail_slot_specs(
+    taxonomy: TaxonomyResult,
+    facts: ProductFacts | None = None,
+    vision: dict[str, Any] | None = None,
+) -> tuple[tuple[str, str], ...]:
+    evidence = _observed_feature_context(vision)
+    evidence_clause = (
+        f" Inspected source evidence includes: {evidence}."
+        if evidence
+        else " Use only construction and surface details directly visible in the inspected references."
+    )
+    variants = _verified_variants(facts, vision)
+    # The taxonomy value is intentionally not used to choose construction details.  It is
+    # still consulted only for the safety-sensitive wearer decision below.
+    children = bool(facts and _is_children_product(facts, taxonomy))
+    wearer_supported = _source_supports_wearer(vision) and not children
+    slot_4_role = "verified_variants" if variants else "verified_alternate_view"
+    slot_4 = (
+        "This is detail slot 4: create a clean catalog comparison using only distinct variants directly visible in "
+        "the inspected references. Keep construction identical and do not add labels or swatches."
+        if variants
+        else "This is detail slot 4: show a source-supported alternate viewpoint or a third, non-redundant visible "
+        "detail. Do not assume a back view, color variant, print continuation or hidden construction."
+    )
+    context_role = "verified_use_context" if wearer_supported else "product_only_context"
+    context = (
+        "This is detail slot 5: show one naturally proportioned, fully clothed adult in the kind of restrained use "
+        "context already supported by a trusted source. Keep the complete product unobstructed and do not alter fit."
+        if wearer_supported
+        else "This is detail slot 5: create a product-only practical context using an appropriate clean surface, stand "
+        "or support. Do not introduce a person, body, hand or accessory absent from trusted references."
+    )
     return (
-        *_BASE_DETAIL_SLOT_DIRECTIVES[:4],
-        _BASE_DETAIL_SLOT_DIRECTIVES[4].replace("one adult wearer", wearer),
+        (
+            "complete_product",
+            "This is detail slot 1: show the complete product from a clearly different viewing angle than the "
+            "square hero, with every source-visible section readable and unobstructed.",
+        ),
+        (
+            "primary_verified_detail",
+            "This is detail slot 2: make a tight but readable close-up of the most category-defining construction or "
+            "surface feature that is directly visible in the inspected references. Do not name or add an unseen part."
+            + evidence_clause,
+        ),
+        (
+            "secondary_verified_detail",
+            "This is detail slot 3: show a different source-visible construction, edge, geometry, texture or surface-design "
+            "feature while retaining enough product context for identification. It must not repeat slot 2."
+            + evidence_clause,
+        ),
+        (slot_4_role, slot_4),
+        (context_role, context),
     )
 
 
-def _video_guard(taxonomy: TaxonomyResult) -> str:
-    family = _product_family(taxonomy)
-    focus = {
-        "bottom": "Keep the waistband, closure, pockets, both legs and hem stable and fully visible.",
-        "children": "Use a product-only presentation; do not add a child, adult, hands, toys or character graphics.",
-        "dress": "Keep the neckline, bodice, waist transition, skirt silhouette and hem stable.",
-        "top": "Keep the collar or neckline, front opening, pockets, both sleeves, cuffs and hem stable.",
-    }[family]
+def _detail_slot_directives(
+    taxonomy: TaxonomyResult,
+    facts: ProductFacts | None = None,
+    vision: dict[str, Any] | None = None,
+) -> tuple[str, ...]:
+    return tuple(
+        directive for _, directive in _detail_slot_specs(taxonomy, facts, vision)
+    )
+
+
+def _video_guard(
+    facts: ProductFacts, taxonomy: TaxonomyResult, vision: dict[str, Any] | None
+) -> str:
+    evidence = _observed_feature_context(vision)
+    focus = (
+        "Use a product-only presentation; do not add a child, adult, hands, toys or character graphics."
+        if _is_children_product(facts, taxonomy)
+        else "Keep every source-visible product section, edge and construction detail stable and unobstructed."
+    )
+    if evidence:
+        focus += f" Preserve these inspected visual anchors: {evidence}."
     return (
         "Use one continuous slow 10-to-15-degree camera arc with a subtle push-in; no scene cuts. "
         + focus
@@ -120,57 +200,66 @@ def _video_guard(taxonomy: TaxonomyResult) -> str:
     )
 
 
-_VISUAL_ATTRIBUTE_MARKERS = (
-    "产品类别",
-    "类别",
-    "款式",
-    "图案",
-    "版型",
-    "领型",
-    "袖长",
-    "袖型",
-    "衣长",
-    "门襟",
-    "裤型",
-    "裤长",
-    "腰型",
-    "裙型",
-    "裙长",
-    "颜色",
-)
+def _planning_vision_context(vision: dict[str, Any]) -> dict[str, Any]:
+    """Keep full-scan evidence useful without sending every per-image flag to planning."""
 
-
-def _visual_fact_summary(facts: ProductFacts) -> str:
-    """Keep visual prompts focused on appearance rather than invisible claims."""
-
-    selected: list[str] = []
-    for item in facts.attributes:
-        if any(marker in item.name for marker in _VISUAL_ATTRIBUTE_MARKERS):
-            fact = f"{item.name}: {item.value}"
-            if fact not in selected:
-                selected.append(fact)
-        if len(selected) == 12:
-            break
-    return ", ".join(selected)
+    compact = {
+        key: vision.get(key)
+        for key in (
+            "product_type",
+            "visible_colors",
+            "visible_design_features",
+            "image_quality_notes",
+            "prohibited_or_risky_visuals",
+            "preservation_constraints",
+        )
+        if vision.get(key)
+    }
+    images = vision.get("source_images")
+    if isinstance(images, list):
+        roles: dict[str, int] = {}
+        for item in images:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "unknown")
+            roles[role] = roles.get(role, 0) + 1
+        compact["scan_summary"] = {
+            "total_images": len(images),
+            "inspected_images": sum(
+                isinstance(item, dict) and item.get("inspection_complete") is True
+                for item in images
+            ),
+            "roles": roles,
+            "wearer_reference_present": _source_supports_wearer(vision),
+            "observed_tables": len(vision.get("tables") or []),
+        }
+    return compact
 
 
 def fallback_creative_plan(
-    facts: ProductFacts, taxonomy: TaxonomyResult
+    facts: ProductFacts,
+    taxonomy: TaxonomyResult,
+    vision: dict[str, Any] | None = None,
 ) -> CreativePlan:
-    verified = _visual_fact_summary(facts)
     identity = f"Product type: {facts.source_category_name}."
-    if verified:
-        identity += f" Verified visible source attributes: {verified}."
+    observed = _observed_feature_context(vision)
+    if observed:
+        identity += f" Inspected visible source evidence: {observed}."
     identity += " When text facts and reference pixels appear to conflict, preserve the reference product pixels."
-    slot_directives = _detail_slot_directives(taxonomy)
+    slot_specs = _detail_slot_specs(taxonomy, facts, vision)
+    slot_directives = tuple(item[1] for item in slot_specs)
     return CreativePlan(
-        visual_theme="Clean international marketplace editorial with neutral, culturally inclusive styling",
+        visual_theme=(
+            "Campaign Style Lock: restrained styling coordinated with every seller-verified product variant; realistic "
+            "material and surface rendering with role-appropriate variation in background, lighting and framing; coherence comes "
+            "from product identity rather than identical treatment; no typography, invented logos, or style drift"
+        ),
         main_prompt=(
             f"Create a square premium e-commerce hero image using the reference product. {identity} "
             "Use a clean white-to-very-light-gray studio background, soft realistic shadow, even lighting, "
-            "accurate color, centered composition, and generous margins. Product occupies about 80 percent of frame. "
+            "accurate color, centered composition, and safe margins with the product visually dominant. "
             "No promotional text, badges, borders, collage or extra props. "
-            + _MAIN_PRESENTATION
+            + _main_presentation(facts, taxonomy, vision)
             + " "
             + _PRESERVATION
         ),
@@ -183,7 +272,7 @@ def fallback_creative_plan(
                 + _PRESERVATION
             ),
             (
-                f"Create a vertical 4:5 detail-focused commerce image showing visible construction and design details. "
+                f"Create a vertical 4:5 detail-focused commerce image showing source-visible construction and design details. "
                 f"{identity} Use realistic close-up photography while keeping the full product identity consistent. "
                 + slot_directives[1]
                 + " "
@@ -197,8 +286,8 @@ def fallback_creative_plan(
                 + _PRESERVATION
             ),
             (
-                f"Create a vertical 4:5 product-variant presentation based only on colors and variants visible in the "
-                f"reference images. {identity} Arrange the variants in a clean, consistent catalog composition without text. "
+                f"Create a vertical 4:5 evidence-led catalog photograph for its assigned commercial job. {identity} "
+                "Use one clean, consistent full-frame composition without text, labels, swatches or invented variants. "
                 + slot_directives[3]
                 + " "
                 + _PRESERVATION
@@ -213,42 +302,237 @@ def fallback_creative_plan(
         ],
         video_prompt=(
             "An 8-second premium e-commerce product video based on the first frame. Clean neutral commercial lighting. "
-            + _video_guard(taxonomy)
+            + _video_guard(facts, taxonomy, vision)
         ),
         market_angles={
             "en": "clear specifications and versatile styling",
             "ko": "accurate options and restrained marketplace presentation",
             "pt": "clear variation guidance and practical styling",
         },
+        detail_roles=[item[0] for item in slot_specs],
+        main_candidate_count=3,
+        detail_candidate_counts=[2] * 5,
+        main_reference_roles=["hero", "front", "variant", "detail"],
+        detail_reference_roles=[
+            ["front", "hero", "lifestyle"],
+            ["detail", "front", "side"],
+            ["detail", "side", "back"],
+            ["variant", "front", "hero"],
+            ["lifestyle", "front", "hero"],
+        ],
     )
 
 
-def _valid_plan_payload(payload: dict[str, Any]) -> bool:
-    required = {
-        "visual_theme",
-        "main_prompt",
-        "detail_prompts",
-        "video_prompt",
-        "market_angles",
-    }
-    if not required.issubset(payload):
-        return False
-    if (
-        not isinstance(payload.get("detail_prompts"), list)
-        or len(payload["detail_prompts"]) != 5
+def _candidate_count(value: Any, default: int) -> int:
+    """Candidate counts are a resource boundary, not a creative policy."""
+
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(parsed, 4))
+
+
+def _role_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(
+        dict.fromkeys(
+            clean
+            for item in value[:8]
+            if (clean := " ".join(str(item).split())[:80])
+        )
+    )
+
+
+def _index_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    result: list[int] = []
+    for item in value[:8]:
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            continue
+        if item not in result:
+            result.append(item)
+    return result
+
+
+def _normalize_creative_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Accept the native orchestrator shape and the legacy flat JSON shape."""
+
+    main = payload.get("main")
+    details = payload.get("details")
+    video = payload.get("video")
+    if isinstance(main, dict) and isinstance(details, list) and isinstance(video, dict):
+        if len(details) != 5 or not all(isinstance(item, dict) for item in details):
+            return None
+        normalized = {
+            "visual_theme": payload.get("visual_theme"),
+            "main_prompt": main.get("prompt"),
+            "main_candidate_count": main.get("candidate_count"),
+            "main_reference_roles": main.get("reference_roles"),
+            "main_reference_indexes": main.get("reference_indexes"),
+            "detail_prompts": [item.get("prompt") for item in details],
+            "detail_roles": [item.get("role") for item in details],
+            "detail_candidate_counts": [item.get("candidate_count") for item in details],
+            "detail_reference_roles": [item.get("reference_roles") for item in details],
+            "detail_reference_indexes": [item.get("reference_indexes") for item in details],
+            "video_prompt": video.get("prompt"),
+            "market_angles": payload.get("market_angles"),
+        }
+    else:
+        normalized = dict(payload)
+
+    prompts = normalized.get("detail_prompts")
+    roles = normalized.get("detail_roles")
+    market_angles = normalized.get("market_angles")
+    if not isinstance(prompts, list) or len(prompts) != 5:
+        return None
+    if not all(isinstance(item, str) and 40 <= len(item.strip()) <= 5000 for item in prompts):
+        return None
+    if roles is not None and (
+        not isinstance(roles, list)
+        or len(roles) != 5
+        or not all(isinstance(item, str) and item.strip() for item in roles)
     ):
-        return False
+        return None
+    if not isinstance(market_angles, dict):
+        return None
     if not all(
-        isinstance(item, str) and 80 <= len(item) <= 5000
-        for item in payload["detail_prompts"]
-    ):
-        return False
-    if not isinstance(payload.get("market_angles"), dict):
-        return False
-    return all(
-        isinstance(payload.get(key), str) and payload[key].strip()
+        isinstance(normalized.get(key), str) and normalized[key].strip()
         for key in ("visual_theme", "main_prompt", "video_prompt")
+    ):
+        return None
+    return normalized
+
+
+def validate_creative_plan_payload(
+    payload: dict[str, Any],
+    *,
+    available_reference_indexes: set[int] | None = None,
+    require_reference_indexes: bool = False,
+) -> tuple[CreativePlan | None, str]:
+    """Validate and materialize the exact plan accepted by the orchestrator.
+
+    Returning a correction message lets a native tool loop expose rejection as
+    an observation instead of silently swapping in a different plan afterward.
+    """
+
+    normalized = _normalize_creative_payload(payload)
+    if normalized is None:
+        return None, (
+            "creative_plan schema is invalid: provide a non-empty visual_theme, main/video prompts, "
+            "exactly five detailed prompts and roles, and en/ko/pt market angles"
+        )
+    if not 40 <= len(normalized["main_prompt"].strip()) <= 5000:
+        return None, "creative_plan.main.prompt must contain 40 to 5000 characters"
+    if not 40 <= len(normalized["video_prompt"].strip()) <= 5000:
+        return None, "creative_plan.video.prompt must contain 40 to 5000 characters"
+    market_angles = normalized["market_angles"]
+    if not all(
+        isinstance(market_angles.get(key), str) and market_angles[key].strip()
+        for key in ("en", "ko", "pt")
+    ):
+        return None, "creative_plan.market_angles must contain non-empty en, ko and pt strings"
+    main_count = normalized.get("main_candidate_count")
+    if main_count is not None and (
+        isinstance(main_count, bool)
+        or not isinstance(main_count, int)
+        or not 1 <= main_count <= 4
+    ):
+        return None, "creative_plan.main.candidate_count must be an integer from 1 to 4"
+    detail_counts = normalized.get("detail_candidate_counts")
+    if detail_counts is not None and (
+        not isinstance(detail_counts, list)
+        or len(detail_counts) != 5
+        or any(
+            isinstance(item, bool) or not isinstance(item, int) or not 1 <= item <= 4
+            for item in detail_counts
+        )
+    ):
+        return None, "every creative_plan.details[].candidate_count must be an integer from 1 to 4"
+    prompt_rows = [
+        ("main", normalized["main_prompt"]),
+        ("video", normalized["video_prompt"]),
+        *[
+            (f"detail_{index}", prompt)
+            for index, prompt in enumerate(normalized["detail_prompts"], start=1)
+        ],
+    ]
+    rejected = {
+        name: visual_prompt_violations(prompt)
+        for name, prompt in prompt_rows
+        if visual_prompt_violations(prompt)
+    }
+    if rejected:
+        return None, (
+            "creative_plan contains forbidden visual-prompt terms; rewrite the affected prompts without "
+            f"requesting or naming them: {json.dumps(rejected, ensure_ascii=False)}"
+        )
+    theme = normalized["visual_theme"].strip()
+    roles = normalized.get("detail_roles") or [f"detail_{index}" for index in range(1, 6)]
+    counts = normalized.get("detail_candidate_counts")
+    counts = counts if isinstance(counts, list) and len(counts) == 5 else [2] * 5
+    reference_roles = normalized.get("detail_reference_roles")
+    reference_roles = (
+        reference_roles
+        if isinstance(reference_roles, list) and len(reference_roles) == 5
+        else [[] for _ in range(5)]
     )
+    main_reference_indexes = _index_list(normalized.get("main_reference_indexes"))
+    detail_reference_indexes = normalized.get("detail_reference_indexes")
+    detail_reference_indexes = (
+        [_index_list(item) for item in detail_reference_indexes]
+        if isinstance(detail_reference_indexes, list)
+        and len(detail_reference_indexes) == 5
+        else [[] for _ in range(5)]
+    )
+    requested_indexes = set(main_reference_indexes)
+    for item in detail_reference_indexes:
+        requested_indexes.update(item)
+    if require_reference_indexes and (
+        not main_reference_indexes
+        or any(not item for item in detail_reference_indexes)
+    ):
+        return None, (
+            "creative_plan must bind the main job and every detail job to at least one "
+            "inspected safe source image index"
+        )
+    if available_reference_indexes is not None:
+        unknown = sorted(requested_indexes - available_reference_indexes)
+        if unknown:
+            return None, f"creative_plan references unavailable source image indexes: {unknown}"
+    return CreativePlan(
+        visual_theme=theme,
+        main_prompt=normalized["main_prompt"].strip() + " " + _PRESERVATION,
+        detail_prompts=[
+            item.strip()
+            + " Campaign styling: "
+            + theme
+            + " Keep one coherent full-frame composition for the assigned job. "
+            + _PRESERVATION
+            for item in normalized["detail_prompts"]
+        ],
+        video_prompt=(
+            normalized["video_prompt"].strip()
+            + " Preserve exact reference-product identity, construction, pattern and visible color in every frame."
+            " Do not add text, claims, marks, accessories, people or product components absent from trusted evidence."
+        ),
+        market_angles={
+            key: str(value).strip()[:1000]
+            for key, value in normalized["market_angles"].items()
+            if key in {"en", "ko", "pt"} and str(value).strip()
+        },
+        detail_roles=[" ".join(str(item).split())[:100] for item in roles],
+        main_candidate_count=_candidate_count(normalized.get("main_candidate_count"), 3),
+        detail_candidate_counts=[_candidate_count(item, 2) for item in counts],
+        main_reference_roles=_role_list(normalized.get("main_reference_roles")),
+        detail_reference_roles=[_role_list(item) for item in reference_roles],
+        main_reference_indexes=main_reference_indexes,
+        detail_reference_indexes=detail_reference_indexes,
+    ), ""
 
 
 def create_creative_plan(
@@ -256,30 +540,55 @@ def create_creative_plan(
     taxonomy: TaxonomyResult,
     vision: dict[str, Any],
     client: QwenClient | None,
+    *,
+    agent_guidance: dict[str, Any] | None = None,
+    skill_instructions: str = "",
 ) -> tuple[CreativePlan, str]:
-    fallback = fallback_creative_plan(facts, taxonomy)
+    fallback = fallback_creative_plan(facts, taxonomy, vision)
+    orchestrated = (
+        agent_guidance.get("creative_plan")
+        if isinstance(agent_guidance, dict)
+        else None
+    )
+    if isinstance(orchestrated, dict):
+        plan, _ = validate_creative_plan_payload(orchestrated)
+        if plan is not None:
+            return plan, "agent-orchestrator"
     if client is None:
         return fallback, "deterministic-fallback"
 
     system = (
-        "You are an expert cross-border fashion e-commerce creative director. Return JSON only. "
+        "You are an expert cross-border marketplace creative director. Return JSON only. "
         "Your plan must prioritize product identity preservation, factual accuracy, AliExpress-ready composition, "
         "cultural neutrality, and a coherent visual set. Generated images must contain no written text."
+        + ("\n\n" + skill_instructions if skill_instructions else "")
     )
     prompt = f"""
-Plan exactly one main image, five detail images and one short product video.
+Plan exactly one main image, five complementary detail images and one short product video.
 Return JSON with exactly these keys:
 - visual_theme: string
 - main_prompt: detailed English image-edit prompt
 - detail_prompts: array of exactly five detailed English image-edit prompts
+- detail_roles: array of exactly five concise machine-readable commercial jobs
+- main_candidate_count: integer from 1 to 4
+- detail_candidate_counts: array of five integers from 1 to 4
+- main_reference_roles: source-image roles to prioritize
+- detail_reference_roles: array of five source-image role arrays
+- main_reference_indexes: inspected safe source-image indexes to use as evidence
+- detail_reference_indexes: array of five inspected safe source-image index arrays
 - video_prompt: detailed English image-to-video prompt for 8 seconds
 - market_angles: object with en, ko, pt strings
 
 Hard constraints for every image prompt:
 {_PRESERVATION}
 
-Main image: square, clean near-white studio background, centered, no text. {_MAIN_PRESENTATION}
-Details: vertical 4:5; cover overall view, construction/detail, verified features, variants, and practical context.
+Main image: square, clean near-white studio background, centered, no text. {_main_presentation(facts, taxonomy, vision)}
+The visual_theme must define a restrained campaign direction with explicit product-identity no-drift
+rules. It may accommodate every seller-verified product color. Palette, background, lighting, framing
+and product coverage may vary by commercial role and target-market context; do not impose one global
+color count, background system or coverage percentage.
+Details: vertical 4:5. Choose the five commercial jobs and their order from the verified evidence.
+Make the set useful and non-redundant. Never name a component merely because it is common for the category.
 Do not request measurements, care instructions, material performance, certification, price, discount or brand claims.
 
 Verified facts:
@@ -289,42 +598,16 @@ Resolved category:
 {json.dumps({"id": taxonomy.category.category_id, "name": taxonomy.category.name, "path": taxonomy.category.path}, ensure_ascii=False)}
 
 Conservative source-image observations:
-{json.dumps(vision, ensure_ascii=False)}
+{json.dumps(_planning_vision_context(vision), ensure_ascii=False)}
+
+Bounded manager guidance:
+{json.dumps(agent_guidance or {}, ensure_ascii=False)}
 """.strip()
     try:
         payload = client.chat_json(system, prompt)
     except ApiError:
         return fallback, "deterministic-fallback"
-    if not _valid_plan_payload(payload):
+    plan, _ = validate_creative_plan_payload(payload)
+    if plan is None:
         return fallback, "invalid-model-plan"
-    all_prompts = [
-        payload["main_prompt"],
-        payload["video_prompt"],
-        *payload["detail_prompts"],
-    ]
-    if any(visual_prompt_violations(prompt) for prompt in all_prompts):
-        return fallback, "content-compliance-guard"
-    slot_directives = _detail_slot_directives(taxonomy)
-    plan = CreativePlan(
-        visual_theme=payload["visual_theme"].strip(),
-        main_prompt=(
-            payload["main_prompt"].strip()
-            + " "
-            + _MAIN_PRESENTATION
-            + " "
-            + _PRESERVATION
-        ),
-        detail_prompts=[
-            item.strip()
-            + " "
-            + slot_directives[index]
-            + " "
-            + _PRESERVATION
-            for index, item in enumerate(payload["detail_prompts"])
-        ],
-        video_prompt=payload["video_prompt"].strip() + " " + _video_guard(taxonomy),
-        market_angles={
-            key: str(value) for key, value in payload["market_angles"].items()
-        },
-    )
     return plan, client.config.chat_model

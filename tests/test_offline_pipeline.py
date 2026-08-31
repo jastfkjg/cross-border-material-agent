@@ -88,6 +88,35 @@ class OfflinePipelineTests(unittest.TestCase):
                 self.assertGreater(
                     (output_dir / "product_video.mp4").stat().st_size, 1000
                 )
+                strategy = (output_dir / "strategy_document.md").read_text(
+                    encoding="utf-8"
+                )
+                for expected in (
+                    "事实一致性与源数据冲突处理",
+                    "三个目标市场的本地化策略",
+                    "六图视觉叙事与视频职责",
+                    "事实一致、合规与素材质检",
+                    "可直接上架的交付保障",
+                    "美国英语（en-US）",
+                    "韩国市场（ko-KR）",
+                    "巴西葡萄牙语（pt-BR）",
+                    "main_image.jpeg｜转化入口",
+                    "product_video.mp4｜动态总览",
+                    "Agent 的整体流程是",
+                ):
+                    self.assertIn(expected, strategy)
+                for internal_log_section in (
+                    "Claim Ledger",
+                    "模型配置：",
+                    "全局评估轨迹",
+                    "定向修复轨迹",
+                    "API 失败摘要",
+                    "运行质检记录",
+                    "单模型证据惩罚分",
+                    "本次共读取",
+                    "个原始单元格",
+                ):
+                    self.assertNotIn(internal_log_section, strategy)
             finally:
                 server.shutdown()
                 server.server_close()

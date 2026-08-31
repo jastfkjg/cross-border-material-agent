@@ -10,8 +10,25 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from crossborder_agent.api import ApiConfig, ApiError, HttpJsonClient, QwenClient
-from crossborder_agent.media import MediaError, normalize_image
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
+from crossborder_agent.api import (
+    ApiConfig,
+    ApiError,
+    HttpJsonClient,
+    QwenClient,
+    _failure_category,
+)
+from crossborder_agent.media import (
+    MediaError,
+    create_catalog_video,
+    inspect_image_quality,
+    inspect_video,
+    normalize_image,
+)
 
 
 class _FaultHandler(BaseHTTPRequestHandler):
@@ -99,6 +116,33 @@ class ResilienceTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 400)
         self.assertFalse(raised.exception.retryable)
 
+    def test_tool_serving_invalid_parameter_is_not_misclassified_as_model(self) -> None:
+        message = (
+            '{"error":{"code":"invalid_parameter_error",'
+            '"message":"An error occurred in model serving: Invalid request parameters",'
+            '"type":"invalid_request_error"}}'
+        )
+        self.assertEqual(_failure_category(400, message), "invalid_request")
+
+    def test_provider_model_not_exist_message_disables_missing_capability(self) -> None:
+        message = '{"code":"InvalidParameter","message":"Model not exist."}'
+        self.assertEqual(_failure_category(404, message), "model_configuration")
+
+    def test_video_configuration_failure_disables_capability_for_repairs(self) -> None:
+        config = ApiConfig(
+            api_key="test",
+            dashscope_base_url=self.base + "/",
+            openai_base_url=self.base + "/",
+            video_model="missing-video-model",
+        )
+        client = QwenClient(config, self.logger, time.monotonic() + 300)
+
+        with self.assertRaises(ApiError) as raised:
+            client.generate_video("product motion", "https://example.test/frame.jpeg")
+
+        self.assertEqual(raised.exception.category, "model_configuration")
+        self.assertFalse(client.operation_available("video"))
+
     def test_malformed_json_response_is_retried(self) -> None:
         self.handler.counters["/bad-json"] = 0
         with mock.patch("crossborder_agent.api.time.sleep", return_value=None):
@@ -108,6 +152,150 @@ class ResilienceTests(unittest.TestCase):
         self.assertTrue(response["recovered"])
         self.assertEqual(self.handler.counters["/bad-json"], 2)
 
+    def test_chat_json_retries_malformed_model_content(self) -> None:
+        config = ApiConfig(
+            api_key="test",
+            dashscope_base_url=self.base + "/dash",
+            openai_base_url=self.base + "/openai",
+        )
+        client = QwenClient(config, self.logger, time.monotonic() + 300)
+        with mock.patch.object(
+            client,
+            "_chat_response",
+            side_effect=["not-json", '{"recovered": true}'],
+        ) as response:
+            payload = client.chat_json("system", "prompt")
+        self.assertTrue(payload["recovered"])
+        self.assertEqual(response.call_count, 2)
+
+    def test_chat_json_with_trace_does_not_require_tool_metadata(self) -> None:
+        config = ApiConfig(
+            api_key="test",
+            dashscope_base_url=self.base + "/dash",
+            openai_base_url=self.base + "/openai",
+        )
+        trace = mock.Mock()
+        client = QwenClient(
+            config, self.logger, time.monotonic() + 300, trace=trace
+        )
+        with mock.patch.object(client, "_chat_response", return_value='{"ok": true}'):
+            payload = client.chat_json("system", "prompt")
+        self.assertTrue(payload["ok"])
+
+    def test_chat_tool_step_sends_native_tools_and_preserves_messages(self) -> None:
+        config = ApiConfig(
+            api_key="test",
+            dashscope_base_url=self.base + "/dash",
+            openai_base_url=self.base + "/openai",
+        )
+        client = QwenClient(config, self.logger, time.monotonic() + 300)
+        assistant = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "search_categories",
+                        "arguments": '{"query":"工装"}',
+                    },
+                }
+            ],
+        }
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_categories",
+                    "description": "search",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        prior_messages = [{"role": "user", "content": "product evidence"}]
+
+        with mock.patch.object(
+            client, "_chat_tool_response", return_value=assistant
+        ) as response:
+            result = client.chat_tool_step("system", prior_messages, tools)
+
+        self.assertEqual(result, assistant)
+        body = response.call_args.args[0]
+        self.assertEqual(body["messages"][1:], prior_messages)
+        self.assertEqual(body["tools"], tools)
+        self.assertEqual(body["tool_choice"], "required")
+        self.assertFalse(body["parallel_tool_calls"])
+
+    def test_chat_tool_step_traces_request_shape_without_content(self) -> None:
+        config = ApiConfig(
+            api_key="test",
+            dashscope_base_url=self.base + "/dash",
+            openai_base_url=self.base + "/openai",
+        )
+        trace = mock.Mock()
+        client = QwenClient(
+            config, self.logger, time.monotonic() + 300, trace=trace
+        )
+        assistant = {
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": "{}"},
+                }
+            ],
+        }
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "inspect",
+                    "description": "inspect",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        with mock.patch.object(client, "_chat_tool_response", return_value=assistant):
+            client.chat_tool_step("secret system content", [], tools)
+
+        shape = next(
+            call for call in trace.emit.call_args_list
+            if call.args and call.args[0] == "api.tool_request_shape"
+        )
+        self.assertGreater(shape.kwargs["request_bytes"], 0)
+        self.assertGreater(shape.kwargs["tool_schema_bytes"], 0)
+        self.assertEqual(shape.kwargs["tool_count"], 1)
+        self.assertNotIn("secret system content", repr(shape))
+
+    def test_review_model_uses_its_own_fallback_chain(self) -> None:
+        config = ApiConfig(
+            api_key="test",
+            dashscope_base_url=self.base + "/dash",
+            openai_base_url=self.base + "/openai",
+            chat_model="producer",
+            chat_fallback_model="producer-fallback",
+            review_model="reviewer",
+            review_fallback_model="reviewer-fallback",
+        )
+        client = QwenClient(config, self.logger, time.monotonic() + 300)
+        called_models: list[str] = []
+
+        def response(body):
+            called_models.append(body["model"])
+            if len(called_models) == 1:
+                raise ApiError("reviewer busy", retryable=True, category="queue")
+            return '{"ok": true}'
+
+        with mock.patch.object(client, "_chat_response", side_effect=response):
+            payload = client.chat_json(
+                "system", "prompt", model=config.review_model
+            )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(called_models, ["reviewer", "reviewer-fallback"])
+
+    @unittest.skipIf(Image is None, "Pillow is required")
     def test_corrupt_image_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agent-corrupt-") as temporary:
             root = Path(temporary)
@@ -115,6 +303,54 @@ class ResilienceTests(unittest.TestCase):
             source.write_bytes(b"this is not an image")
             with self.assertRaises(MediaError):
                 normalize_image(source, root / "out.jpeg", canvas=(800, 800))
+
+    @unittest.skipIf(Image is None, "Pillow is required")
+    def test_focus_crop_is_bounded_and_visually_distinct(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agent-focus-crop-") as temporary:
+            root = Path(temporary)
+            source = root / "source.png"
+            image = Image.new("RGB", (900, 1200), (245, 245, 245))
+            for y in range(image.height):
+                color = (30, 80 + y // 10, 220 - y // 8)
+                for x in range(image.width):
+                    if x < image.width // 2:
+                        image.putpixel((x, y), color)
+            image.save(source)
+
+            full = root / "full.jpeg"
+            upper = root / "upper.jpeg"
+            normalize_image(source, full, canvas=(600, 750))
+            normalize_image(source, upper, canvas=(600, 750), focus_crop="upper")
+
+            with Image.open(upper) as rendered:
+                self.assertEqual(rendered.size, (600, 750))
+            full_quality = inspect_image_quality(full)
+            upper_quality = inspect_image_quality(upper)
+            self.assertIsNotNone(full_quality)
+            self.assertIsNotNone(upper_quality)
+            self.assertGreater(
+                (full_quality.difference_hash ^ upper_quality.difference_hash).bit_count(),
+                0,
+            )
+
+    @unittest.skipIf(Image is None, "Pillow is required")
+    def test_catalog_video_with_distinct_stills_decodes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agent-catalog-video-") as temporary:
+            root = Path(temporary)
+            images = []
+            for index, color in enumerate(((190, 80, 60), (50, 120, 205))):
+                path = root / f"source-{index}.png"
+                image = Image.new("RGB", (900, 1200), color)
+                for offset in range(80, 820, 120):
+                    for y in range(150 + index * 20, 1050, 160):
+                        image.paste((245, 235, 210), (offset, y, offset + 55, y + 90))
+                image.save(path)
+                images.append(path)
+            destination = root / "catalog.mp4"
+            create_catalog_video(images, destination, duration=3)
+            result = inspect_video(destination)
+            self.assertTrue(result["decoded"])
+            self.assertGreater(result["size_bytes"], 1000)
 
     def test_failed_async_task_is_terminal(self) -> None:
         config = ApiConfig(

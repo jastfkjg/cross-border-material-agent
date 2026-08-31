@@ -102,6 +102,58 @@ class _ModelServiceHandler(BaseHTTPRequestHandler):
     def _chat(self, body: dict) -> None:
         system = str(body["messages"][0]["content"])
         user_content = body["messages"][1]["content"]
+        raw_tools = body.get("tools")
+        if isinstance(raw_tools, list) and raw_tools:
+            tool_names = [
+                str(item.get("function", {}).get("name") or "")
+                for item in raw_tools
+                if isinstance(item, dict)
+            ]
+            prior_tool_names = [
+                str(item.get("name") or "")
+                for item in body["messages"]
+                if isinstance(item, dict) and item.get("role") == "tool"
+            ]
+            if "finish_delivery" in tool_names:
+                if "review_delivery" in prior_tool_names:
+                    name = "finish_delivery"
+                    arguments = {"reason": "Current adjudicated review is ready."}
+                else:
+                    name = "review_delivery"
+                    arguments = {}
+            elif "read" in tool_names:
+                name = "read"
+                arguments = {
+                    "path": "workspace/index.json",
+                    "offset": 10 * prior_tool_names.count("read"),
+                    "limit": 10,
+                }
+            else:
+                name = tool_names[0]
+                arguments = {}
+            self._json(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "id": f"test-call-{len(prior_tool_names) + 1}",
+                                        "type": "function",
+                                        "function": {
+                                            "name": name,
+                                            "arguments": json.dumps(arguments),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            )
+            return
         if "creative director" in system:
             long_prompt = (
                 "Create a source-faithful premium e-commerce product composition with neutral lighting, "
@@ -170,7 +222,12 @@ class _ModelServiceHandler(BaseHTTPRequestHandler):
                         "construction_consistent": True,
                         "correct_color": True,
                         "single_product": True,
+                        "product_complete": True,
+                        "clean_neutral_background": True,
+                        "has_person": False,
+                        "has_unrelated_props": False,
                         "unwanted_text": False,
+                        "unwanted_brand_or_logo": False,
                         "major_artifacts": False,
                         "unexpected_collage": False,
                         "product_coverage": "high",
@@ -207,6 +264,27 @@ class _ModelServiceHandler(BaseHTTPRequestHandler):
                 "unwanted_text": False,
                 "major_artifacts": False,
                 "reason": "ok",
+            }
+        elif "multimodal evidence reconciler" in system:
+            payload = {
+                "seller_title_decision": "publish",
+                "attribute_decisions": [],
+                "canonical_visual_claims": [],
+                "conflicts": [],
+            }
+        elif "independent multimodal defect finder" in system:
+            payload = {
+                "summary": "One advisory presentation issue remains.",
+                "findings": [
+                    {
+                        "dimension": "A6",
+                        "criterion": "presentation-variety",
+                        "severity": "minor",
+                        "target": "detail_image_3.jpeg",
+                        "evidence": "The detail role is visually close to another retained slot.",
+                        "expected": "Prefer a more distinct commercial role when a better candidate exists.",
+                    }
+                ],
             }
         else:
             if "ko-KR" in system:

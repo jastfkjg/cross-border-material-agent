@@ -1,5 +1,5 @@
 {
-  "version": "2026-08-v4",
+  "version": "2026-08-v5",
   "scope": "Generated listing copy, generated visual prompts, source-reference selection and delivery QA",
   "policy_layers": {
     "platform_explicit": [
@@ -8,7 +8,7 @@
       "AliExpress or affiliated trademarks and marketing material may not be used without authorization."
     ],
     "conservative_runtime_guard": [
-      "Reject or avoid source images with contact details, QR codes, watermarks, price or discount badges, review graphics, certification seals, platform marks, or suspected third-party branding.",
+      "Reject source references with contact details, QR codes, watermarks, price or discount badges, review graphics, certification seals, platform marks, or sensitive/prohibited content. Treat ordinary third-party styling marks as cleanup-required reference signals, never as permission to reproduce them in final assets.",
       "Do not generate unsupported claims, endorsements, ratings, prices, promotions, certifications, body transformations, or new brand marks.",
       "Treat visible text or logos as review signals even when they are not independently sufficient to establish infringement."
     ]
@@ -114,7 +114,7 @@
   "generated_text_regex": [
     "(?i)(?:https?://|www\\.)\\S+",
     "(?i)\\b[\\w.+-]+@[\\w.-]+\\.[a-z]{2,}\\b",
-    "(?i)(?:whats?app|wechat|telegram|line|kakao(?:talk)?|instagram|facebook|tiktok)\\s*[:@]?\\s*[\\w+.-]+",
+    "(?i)\\b(?:whats?app|wechat|telegram|line|kakao(?:talk)?|instagram|facebook|tiktok)\\b\\s*[:@]\\s*[\\w+.-]+",
     "(?i)(?:call|text|contact|message|dm)\\s+(?:us|me|seller)\\s*(?:at|on|:)\\s*[^\\n,;]+",
     "(?i)(?:us\\$|r\\$|krw|usd|brl|₩|\\$)\\s*\\d+(?:[.,]\\d+)?",
     "(?i)\\b(?:rated|rating|reviews?|orders?|sold)\\s*[:：]?\\s*\\d+(?:[.,]\\d+)?\\b",
@@ -145,7 +145,6 @@
     "has_review_graphic",
     "has_certification_seal",
     "has_platform_mark",
-    "has_third_party_brand",
     "has_before_after",
     "adult_or_sensitive_visual",
     "has_hate_or_extremism",
@@ -157,6 +156,7 @@
     "has_overlay_text",
     "has_intrinsic_product_text",
     "has_logo",
+    "has_third_party_brand",
     "product_obscured",
     "low_sharpness",
     "has_person",
@@ -172,6 +172,7 @@
     "side",
     "detail",
     "variant",
+    "data_table",
     "size_chart",
     "lifestyle",
     "packaging",
@@ -180,6 +181,6 @@
   "notes": [
     "This local ruleset distinguishes cited platform requirements from conservative runtime controls and is not a substitute for legal review.",
     "Canonical source data is preserved even when it contains terms that may not be suitable as generated marketing claims.",
-    "A visible logo is a review signal; the agent treats suspected third-party or platform branding as a hard rejection signal."
+    "A visible logo is a review signal. Third-party styling marks make a source unsuitable for direct listing fallback but may still be used as an identity reference when the final output gate confirms their removal. Platform marks remain hard rejection signals."
   ]
 }

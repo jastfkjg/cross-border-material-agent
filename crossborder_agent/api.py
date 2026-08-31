@@ -16,6 +16,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
+from .debug_trace import DebugTrace
+
 
 class ApiError(RuntimeError):
     """A retryable or terminal model service failure."""
@@ -26,10 +28,74 @@ class ApiError(RuntimeError):
         *,
         status_code: int | None = None,
         retryable: bool | None = None,
+        category: str = "unknown",
     ):
         super().__init__(message)
         self.status_code = status_code
         self.retryable = retryable
+        self.category = category
+
+
+def _failure_category(status_code: int | None, message: str) -> str:
+    """Classify provider failures so upper layers can choose a useful recovery."""
+
+    lowered = message.casefold()
+    if status_code == 429 or any(
+        token in lowered
+        for token in ("rate limit", "ratelimit", "throttl", "quota exceeded")
+    ):
+        return "rate_limit"
+    if status_code in {409, 425} or any(
+        token in lowered
+        for token in ("queue", "queued", "capacity", "overloaded", "busy")
+    ):
+        return "queue"
+    if status_code == 408 or any(
+        token in lowered for token in ("timeout", "timed out", "deadline exceeded")
+    ):
+        return "timeout"
+    if status_code in {500, 502, 503, 504}:
+        return "server"
+    if status_code in {401, 403}:
+        return "authorization"
+    # Provider tool-serving errors often include the generic phrase "model
+    # serving".  Treat explicit invalid-request codes as request failures
+    # before looking for model-configuration wording, otherwise the same
+    # malformed tool transcript is pointlessly replayed to a fallback model.
+    if status_code == 400 and any(
+        token in lowered
+        for token in (
+            "invalid_parameter_error",
+            "invalid_request_error",
+            "invalid parameter",
+            "invalid request parameters",
+        )
+    ):
+        return "invalid_request"
+    if status_code == 404 and any(
+        token in lowered
+        for token in (
+            "not found",
+            "not exist",
+            "does not exist",
+            "unsupported",
+            "model_not_found",
+        )
+    ):
+        return "model_configuration"
+    if status_code == 400 and any(
+        token in lowered
+        for token in (
+            "model_not_found",
+            "model not found",
+            "model does not exist",
+            "unsupported model",
+        )
+    ):
+        return "model_configuration"
+    if status_code is not None and 400 <= status_code < 500:
+        return "invalid_request"
+    return "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,9 +105,14 @@ class ApiConfig:
     openai_base_url: str
     chat_model: str = "qwen3.8-max"
     chat_fallback_model: str = "qwen3.7-plus"
+    review_model: str = "qwen3.8-max"
+    review_fallback_model: str = "qwen3.7-plus"
+    visual_review_model: str = ""
+    visual_review_fallback_model: str = ""
     image_model: str = "wan2.7-image-pro"
     image_fallback_model: str = "qwen-image-3.0-pro"
     video_model: str = "wan2.7-i2v-2026-04-25"
+    evaluation_models: tuple[str, ...] = ("qwen3.8-max", "qwen3.7-plus")
 
     @classmethod
     def from_environment(cls) -> "ApiConfig | None":
@@ -50,6 +121,16 @@ class ApiConfig:
         openai = os.environ.get("OPENAI_BASE_URL", "").strip()
         if not api_key or not dashscope or not openai:
             return None
+        configured_evaluators = [
+            item.strip()
+            for item in os.environ.get(
+                "AGENT_EVALUATION_MODELS", "qwen3.8-max,qwen3.7-plus"
+            ).split(",")
+            if item.strip()
+        ]
+        evaluation_models = tuple(dict.fromkeys(configured_evaluators))[:3]
+        if len(evaluation_models) < 2:
+            evaluation_models = ("qwen3.8-max", "qwen3.7-plus")
         return cls(
             api_key=api_key,
             dashscope_base_url=dashscope,
@@ -58,11 +139,24 @@ class ApiConfig:
             chat_fallback_model=os.environ.get(
                 "AGENT_CHAT_FALLBACK_MODEL", "qwen3.7-plus"
             ),
+            review_model=os.environ.get("AGENT_REVIEW_MODEL", "qwen3.8-max"),
+            review_fallback_model=os.environ.get(
+                "AGENT_REVIEW_FALLBACK_MODEL", "qwen3.7-plus"
+            ),
+            visual_review_model=os.environ.get(
+                "AGENT_VISUAL_REVIEW_MODEL",
+                os.environ.get("AGENT_REVIEW_MODEL", "qwen3.8-max"),
+            ),
+            visual_review_fallback_model=os.environ.get(
+                "AGENT_VISUAL_REVIEW_FALLBACK_MODEL",
+                os.environ.get("AGENT_REVIEW_FALLBACK_MODEL", "qwen3.7-plus"),
+            ),
             image_model=os.environ.get("AGENT_IMAGE_MODEL", "wan2.7-image-pro"),
             image_fallback_model=os.environ.get(
                 "AGENT_IMAGE_FALLBACK_MODEL", "qwen-image-3.0-pro"
             ),
             video_model=os.environ.get("AGENT_VIDEO_MODEL", "wan2.7-i2v-2026-04-25"),
+            evaluation_models=evaluation_models,
         )
 
 
@@ -102,9 +196,15 @@ def _collect_urls(value: Any, *, preferred_keys: tuple[str, ...] = ()) -> list[s
 
 
 class HttpJsonClient:
-    def __init__(self, logger: logging.Logger, deadline: float):
+    def __init__(
+        self,
+        logger: logging.Logger,
+        deadline: float,
+        trace: DebugTrace | None = None,
+    ):
         self.logger = logger
         self.deadline = deadline
+        self.trace = trace
         self.ssl_context = ssl.create_default_context()
 
     def _remaining(self, maximum: float) -> float:
@@ -135,6 +235,15 @@ class HttpJsonClient:
         request_headers = {"Content-Type": "application/json", **(headers or {})}
         last_error = ""
         for attempt in range(attempts):
+            if self.trace:
+                self.trace.emit(
+                    "http.request.attempt",
+                    method=method,
+                    url=url,
+                    attempt=attempt + 1,
+                    max_attempts=attempts,
+                    remaining_seconds=round(self.remaining_seconds, 1),
+                )
             request = Request(url, data=payload, headers=request_headers, method=method)
             try:
                 with urlopen(
@@ -143,21 +252,62 @@ class HttpJsonClient:
                     data = response.read()
                 parsed = json.loads(data.decode("utf-8"))
                 if not isinstance(parsed, dict):
-                    raise ApiError("API 返回值不是 JSON 对象")
+                    raise ApiError(
+                        "API 返回值不是 JSON 对象",
+                        retryable=True,
+                        category="response_format",
+                    )
+                if self.trace:
+                    self.trace.emit(
+                        "http.request.success",
+                        method=method,
+                        url=url,
+                        attempt=attempt + 1,
+                    )
                 return parsed
             except HTTPError as exc:
                 detail = exc.read(8192).decode("utf-8", errors="replace")
                 last_error = f"HTTP {exc.code}: {detail}"
                 retryable = exc.code in {408, 409, 425, 429, 500, 502, 503, 504}
+                if self.trace:
+                    self.trace.emit(
+                        "http.request.failure",
+                        method=method,
+                        url=url,
+                        attempt=attempt + 1,
+                        status_code=exc.code,
+                        retryable=retryable,
+                        category=_failure_category(exc.code, last_error),
+                        error=last_error,
+                    )
                 if not retryable or attempt + 1 >= attempts:
                     raise ApiError(
-                        last_error, status_code=exc.code, retryable=retryable
+                        last_error,
+                        status_code=exc.code,
+                        retryable=retryable,
+                        category=_failure_category(exc.code, last_error),
                     ) from exc
                 retry_after = exc.headers.get("Retry-After", "")
                 try:
-                    delay = float(retry_after)
+                    delay = min(30.0, max(0.0, float(retry_after)))
                 except ValueError:
                     delay = min(18.0, (2**attempt) + random.random() * 1.5)
+            except ApiError as exc:
+                last_error = str(exc)
+                if self.trace:
+                    self.trace.emit(
+                        "http.request.failure",
+                        method=method,
+                        url=url,
+                        attempt=attempt + 1,
+                        status_code=exc.status_code,
+                        retryable=exc.retryable,
+                        category=exc.category,
+                        error=last_error,
+                    )
+                if exc.retryable is not True or attempt + 1 >= attempts:
+                    raise
+                delay = min(8.0, (2**attempt) + random.random())
             except (
                 URLError,
                 TimeoutError,
@@ -166,14 +316,44 @@ class HttpJsonClient:
                 UnicodeError,
             ) as exc:
                 last_error = str(exc)
+                category = (
+                    "response_format"
+                    if isinstance(exc, (json.JSONDecodeError, UnicodeError))
+                    else "timeout"
+                    if isinstance(exc, TimeoutError)
+                    else "network"
+                )
+                if self.trace:
+                    self.trace.emit(
+                        "http.request.failure",
+                        method=method,
+                        url=url,
+                        attempt=attempt + 1,
+                        retryable=True,
+                        category=category,
+                        error=last_error,
+                    )
                 if attempt + 1 >= attempts:
-                    raise ApiError(last_error) from exc
+                    raise ApiError(
+                        last_error, retryable=True, category=category
+                    ) from exc
                 delay = min(18.0, (2**attempt) + random.random() * 1.5)
+            if self.trace:
+                self.trace.emit(
+                    "http.request.retry_scheduled",
+                    method=method,
+                    url=url,
+                    attempt=attempt + 1,
+                    delay_seconds=round(delay, 3),
+                    error=last_error,
+                )
             self.logger.warning(
                 "API 请求失败，%.1f 秒后重试: %s", delay, last_error[:500]
             )
             time.sleep(min(delay, self._remaining(delay)))
-        raise ApiError(last_error or "API 请求失败")
+        raise ApiError(
+            last_error or "API 请求失败", retryable=True, category="unknown"
+        )
 
     def download(
         self, url: str, path: Path, *, max_bytes: int, timeout: float = 180
@@ -227,15 +407,24 @@ class HttpJsonClient:
 class QwenClient:
     """Explicit model adapters; no model-built-in tools are used."""
 
-    def __init__(self, config: ApiConfig, logger: logging.Logger, deadline: float):
+    def __init__(
+        self,
+        config: ApiConfig,
+        logger: logging.Logger,
+        deadline: float,
+        trace: DebugTrace | None = None,
+    ):
         self.config = config
         self.logger = logger
-        self.http = HttpJsonClient(logger, deadline)
+        self.trace = trace
+        self.http = HttpJsonClient(logger, deadline, trace)
         self._chat_slots = threading.BoundedSemaphore(3)
         self._image_slots = threading.BoundedSemaphore(2)
         self._video_slots = threading.BoundedSemaphore(1)
         self._metrics: list[dict[str, Any]] = []
         self._metrics_lock = threading.Lock()
+        self._disabled_models: set[str] = set()
+        self._disabled_models_lock = threading.Lock()
 
     @property
     def metrics(self) -> list[dict[str, Any]]:
@@ -262,15 +451,58 @@ class QwenClient:
             item["error"] = error[:300]
         with self._metrics_lock:
             self._metrics.append(item)
+        if self.trace:
+            self.trace.emit("api.operation", **item)
 
     @property
-    def model_summary(self) -> dict[str, str]:
+    def model_summary(self) -> dict[str, Any]:
         return {
             "chat": self.config.chat_model,
+            "review": self.config.review_model,
+            "review_fallback": self.config.review_fallback_model,
+            "visual_review": self.visual_review_model,
+            "visual_review_fallback": self.visual_review_fallback_model,
             "image": self.config.image_model,
             "image_fallback": self.config.image_fallback_model,
             "video": self.config.video_model,
+            "evaluation_models": list(self.evaluation_models),
         }
+
+    @property
+    def evaluation_models(self) -> tuple[str, ...]:
+        configured = tuple(
+            dict.fromkeys(
+                model.strip()
+                for model in self.config.evaluation_models
+                if model.strip()
+            )
+        )[:3]
+        if len(configured) >= 2:
+            return configured
+        fallback = tuple(
+            dict.fromkeys(
+                model
+                for model in (
+                    self.config.review_model,
+                    self.config.review_fallback_model,
+                    "qwen3.8-max",
+                    "qwen3.7-plus",
+                )
+                if model
+            )
+        )
+        return fallback[: max(2, min(3, len(fallback)))]
+
+    @property
+    def visual_review_model(self) -> str:
+        return self.config.visual_review_model or self.config.review_model
+
+    @property
+    def visual_review_fallback_model(self) -> str:
+        return (
+            self.config.visual_review_fallback_model
+            or self.config.review_fallback_model
+        )
 
     def _chat_response(self, body: dict[str, Any]) -> str:
         started = time.monotonic()
@@ -302,7 +534,9 @@ class QwenClient:
             content = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ApiError(
-                f"Chat API 返回结构异常: {json.dumps(response, ensure_ascii=False)[:1000]}"
+                f"Chat API 返回结构异常: {json.dumps(response, ensure_ascii=False)[:1000]}",
+                retryable=True,
+                category="response_format",
             ) from exc
         if isinstance(content, list):
             text_parts = [
@@ -310,6 +544,50 @@ class QwenClient:
             ]
             return "".join(text_parts).strip()
         return str(content).strip()
+
+    def _chat_tool_response(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Return one native assistant message, including function tool calls."""
+
+        started = time.monotonic()
+        selected_model = str(body.get("model") or "")
+        endpoint = _endpoint(self.config.openai_base_url, "chat/completions")
+        try:
+            response = self.http.request_json(
+                endpoint,
+                headers={"Authorization": f"Bearer {self.config.api_key}"},
+                body=body,
+                timeout=180,
+            )
+        except ApiError as exc:
+            self._record_metric(
+                operation="chat_tool_step",
+                model=selected_model,
+                started=started,
+                status="error",
+                error=str(exc),
+            )
+            raise
+        self._record_metric(
+            operation="chat_tool_step",
+            model=selected_model,
+            started=started,
+            status="ok",
+        )
+        try:
+            message = response["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ApiError(
+                f"Chat tool API 返回结构异常: {json.dumps(response, ensure_ascii=False)[:1000]}",
+                retryable=True,
+                category="response_format",
+            ) from exc
+        if not isinstance(message, dict):
+            raise ApiError(
+                "Chat tool API message 不是对象",
+                retryable=True,
+                category="response_format",
+            )
+        return message
 
     def chat_json(
         self,
@@ -319,6 +597,7 @@ class QwenClient:
         images: Iterable[str] = (),
         videos: Iterable[str] = (),
         model: str = "",
+        fallback_model: str = "",
     ) -> dict[str, Any]:
         user_content: list[dict[str, Any]] = []
         for url in images:
@@ -350,29 +629,175 @@ class QwenClient:
             "temperature": 0.0,
             "enable_thinking": False,
         }
+        models = [selected_model]
+        selected_fallback = fallback_model
+        if not selected_fallback:
+            selected_fallback = (
+                self.config.review_fallback_model
+                if selected_model == self.config.review_model
+                else self.config.chat_fallback_model
+            )
+        if selected_fallback not in models:
+            models.append(selected_fallback)
+        last_error: ApiError | None = None
         with self._chat_slots:
-            try:
-                text = self._chat_response(body)
-            except ApiError:
-                if selected_model == self.config.chat_fallback_model:
-                    raise
-                body["model"] = self.config.chat_fallback_model
-                text = self._chat_response(body)
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ApiError(f"模型未返回合法 JSON: {text[:1000]}") from exc
-        if not isinstance(parsed, dict):
-            raise ApiError("模型 JSON 顶层不是对象")
-        return parsed
+            for candidate_model in models:
+                body["model"] = candidate_model
+                # Invalid JSON is a judge-output failure, not evidence that the
+                # reviewed artifact is bad. Retry structure once before changing judge.
+                for format_attempt in range(2):
+                    try:
+                        text = self._chat_response(body)
+                    except ApiError as exc:
+                        last_error = exc
+                        if exc.category in {"authorization", "invalid_request"}:
+                            raise
+                        break
+                    try:
+                        parsed = json.loads(text)
+                    except json.JSONDecodeError:
+                        last_error = ApiError(
+                            f"模型未返回合法 JSON: {text[:1000]}",
+                            retryable=True,
+                            category="response_format",
+                        )
+                        if format_attempt == 0 and self.http.remaining_seconds > 90:
+                            self.logger.warning(
+                                "模型 %s 返回非法 JSON，重试一次结构化评审",
+                                candidate_model,
+                            )
+                            continue
+                        break
+                    if not isinstance(parsed, dict):
+                        last_error = ApiError(
+                            "模型 JSON 顶层不是对象",
+                            retryable=True,
+                            category="response_format",
+                        )
+                        if format_attempt == 0 and self.http.remaining_seconds > 90:
+                            continue
+                        break
+                    return parsed
+                if candidate_model != models[-1] and self.http.remaining_seconds > 60:
+                    self.logger.warning(
+                        "模型 %s 的结构化调用失败，切换评审回退模型: %s",
+                        candidate_model,
+                        last_error,
+                    )
+        raise last_error or ApiError("结构化模型调用失败")
+
+    def chat_tool_step(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        model: str = "",
+        fallback_model: str = "",
+    ) -> dict[str, Any]:
+        """Run one OpenAI-compatible assistant tool-call turn.
+
+        The caller owns the action/observation loop and appends the returned
+        assistant message plus ``role=tool`` results before invoking this again.
+        """
+
+        selected_model = model or self.config.chat_model
+        body = {
+            "model": selected_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                *messages,
+            ],
+            "tools": tools,
+            # Agent protocols in this project use validated terminal tools rather
+            # than free-text completion. Required tool choice keeps every turn
+            # observable and machine-checkable.
+            "tool_choice": "required",
+            # The current OpenAI-compatible endpoint rejects the next request
+            # when one assistant turn with multiple distinct tool_call_id values
+            # is replayed.  Keep the protocol sequential; individual inspection
+            # tools are cheap and the agent can request another one next turn.
+            "parallel_tool_calls": False,
+            "temperature": 0.0,
+            "enable_thinking": False,
+        }
+        if self.trace is not None:
+            encoded_body = json.dumps(
+                body,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            encoded_tools = json.dumps(
+                tools,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            self.trace.emit(
+                "api.tool_request_shape",
+                model=selected_model,
+                request_bytes=len(encoded_body),
+                tool_schema_bytes=len(encoded_tools),
+                tool_count=len(tools),
+                message_count=len(body["messages"]),
+                role_sequence=[
+                    str(item.get("role") or "unknown")
+                    for item in body["messages"]
+                    if isinstance(item, dict)
+                ],
+                parallel_tool_calls=body["parallel_tool_calls"],
+            )
+        models = [selected_model]
+        selected_fallback = fallback_model or self.config.chat_fallback_model
+        if selected_fallback and selected_fallback not in models:
+            models.append(selected_fallback)
+        last_error: ApiError | None = None
+        with self._chat_slots:
+            for candidate_model in models:
+                body["model"] = candidate_model
+                try:
+                    message = self._chat_tool_response(body)
+                except ApiError as exc:
+                    last_error = exc
+                    if exc.category in {"authorization", "invalid_request"}:
+                        raise
+                    if candidate_model != models[-1] and self.http.remaining_seconds > 60:
+                        self.logger.warning(
+                            "模型 %s 的工具调用失败，切换回退模型: %s",
+                            candidate_model,
+                            exc,
+                        )
+                    continue
+                tool_calls = message.get("tool_calls")
+                if not isinstance(tool_calls, list) or not tool_calls:
+                    last_error = ApiError(
+                        "模型未调用任何可用工具",
+                        retryable=True,
+                        category="response_format",
+                    )
+                    continue
+                return message
+        raise last_error or ApiError("模型工具调用失败")
 
     def analyze_product_images(
-        self, facts_json: str, image_urls: list[str]
+        self,
+        facts_json: str,
+        image_urls: list[str],
+        *,
+        skill_instructions: str = "",
     ) -> dict[str, Any]:
+        if not image_urls:
+            raise ValueError("source-image analysis requires at least one image")
+        if len(image_urls) > 12:
+            raise ValueError(
+                "source-image analysis accepts at most 12 images per call; batch in the pipeline"
+            )
         system = (
             "You are a conservative e-commerce visual inspector. Return JSON only. "
-            "Never infer fabric composition, performance, measurements, brand authorization, or care instructions "
+            "Never infer material composition, performance, measurements, brand authorization, or care instructions "
             "from appearance. Separate direct observations from uncertain impressions."
+            + ("\n\n" + skill_instructions if skill_instructions else "")
         )
         prompt = f"""
 Inspect the supplied source product images and the verified source facts below.
@@ -384,16 +809,29 @@ Return a JSON object with keys:
 - image_quality_notes: string[]
 - prohibited_or_risky_visuals: string[]
 - preservation_constraints: string[]
-- size_chart_rows: an array containing only rows directly readable from supplied size-chart images. Each object must contain:
-  - size_label: exact size code such as S, M, XL or 2XL
-  - bust_cm: numeric string in centimeters, or empty string when not shown
-  - length_cm: numeric string in centimeters, or empty string when not shown
-  - weight_guidance: exact visible seller guidance including its unit, or empty string
-  - source_image_index: zero-based index of the supplied image containing the row
-- images: an array of exactly {len(image_urls[:12])} objects, one for every supplied image in input order.
+- tables: an array containing every clearly legible, commercially useful two-dimensional table in the supplied images.
+  Do not assume a product category or a fixed set of columns. Each table must contain:
+  - table_id: batch-local identifier
+  - source_image_index: zero-based index of the supplied image containing the table
+  - cells: an array of exact visible cells. Every cell contains row (integer), column (integer), text (exact
+    source text), confidence (0 to 1), and optional row_span/column_span. Do not translate, normalize, infer,
+    merge, or invent cell text.
+  - presentation: your evidence-grounded decision about whether and how this table should become one of the five
+    detail images. It contains:
+    - decision: one of render, preserve_source, omit, request_verification
+    - priority: integer 0 to 100 relative to other observed tables
+    - target_detail_index: integer 1 to 5 when decision is render, otherwise 0
+    - display_locale: one of en, ko, pt
+    - titles: object containing concise en, ko and pt titles
+    - columns: array of selected source columns, each with source_column and labels containing en, ko and pt
+      (select at most 10 columns for one detail image)
+    - included_rows: exact source row indexes to display (select at most 24 rows for one detail image)
+    - notes: object containing en, ko and pt arrays of concise source-supported notes
+    - reason: concise decision rationale
+- images: an array of exactly {len(image_urls)} objects, one for every supplied image in input order.
   Every object must contain:
   - index: zero-based integer
-  - role: one of hero, front, back, side, detail, variant, size_chart, lifestyle, packaging, unknown
+  - role: one of hero, front, back, side, detail, variant, data_table, size_chart, lifestyle, packaging, unknown
   - dominant_color: concise observed color or empty string
   - product_coverage: one of high, medium, low, unknown
   - sharpness: one of high, medium, low, unknown
@@ -425,18 +863,31 @@ Return a JSON object with keys:
   - risk_reasons: string[]
 
 Read all visible text as carefully as possible. A product's own sewn label or print still counts as
-has_text and has_intrinsic_product_text, but not has_overlay_text. Marketing captions around the garment
+has_text and has_intrinsic_product_text, but not has_overlay_text. Marketing captions around the product
 count as has_overlay_text. Contact details, QR codes, marketplace marks, watermarks, price/discount badges,
-review graphics and suspected third-party branding make safe_for_generation_reference false.
-For size_chart_rows, transcribe only complete, clearly legible rows. Do not estimate obscured digits, convert
-units, rename size codes, or infer measurements from the garment. Return an empty array when no table is legible.
+review graphics, certification seals and sensitive/prohibited content make safe_for_generation_reference false.
+A person, ordinary prop, background text or suspected third-party styling mark makes the source unsuitable
+for direct listing, but it may remain a generation reference when the product is clear and the final generated
+asset removes those elements.
+For tables, preserve the complete observed grid without category-specific assumptions. A shirt, trousers, shoes,
+electronics specification sheet, comparison grid, or any unseen table shape uses the same cell protocol. Do not
+estimate obscured characters, derive values, rename source labels inside cells, or invent expected columns. The
+presentation may translate headers and decide what is useful, but every selected row and column must reference the
+observed grid. Use request_verification when cell evidence is insufficient. Return an empty array when no table is
+legible or commercially useful.
 For a marketplace hero, a person, unrelated prop, multiple products, incomplete product or lifestyle
 background makes the source unsuitable even when it remains usable as a detail reference.
 
 Verified source facts:
 {facts_json}
 """.strip()
-        return self.chat_json(system, prompt, images=image_urls[:12])
+        return self.chat_json(
+            system,
+            prompt,
+            images=image_urls,
+            model=self.visual_review_model,
+            fallback_model=self.visual_review_fallback_model,
+        )
 
     def review_generated_images(
         self,
@@ -456,11 +907,12 @@ The first {len(source_image_urls)} supplied images are trusted source references
 against the source references and verified facts. Do not reject a faithful crop or a changed neutral
 background; reject changes to the product itself.
 
-Return JSON with key assets, an array of exactly {len(generated_image_urls)} objects. Each object must contain:
+Return JSON with these top-level keys:
+- assets: an array of exactly {len(generated_image_urls)} objects. Each object must contain:
 - index: zero-based integer
 - usable: boolean
 - identity_consistent: boolean
-- construction_consistent: boolean (check visible collar, sleeves, pockets, buttons/fasteners, hem and pattern)
+- construction_consistent: boolean (compare every component, edge, fastening, trim, silhouette proportion and surface design actually visible in the sources)
 - color_consistent: boolean
 - pattern_consistent: boolean
 - slot_match: boolean (whether this asset fulfills its intended storyboard purpose)
@@ -469,7 +921,30 @@ Return JSON with key assets, an array of exactly {len(generated_image_urls)} obj
 - major_artifacts: boolean
 - unexpected_collage: boolean (true for montage, grid, split-screen or repeated panels; detail slot 4 may intentionally show a clean variant lineup)
 - product_coverage: one of high, medium, low
+- actual_role: one of hero, complete_product, construction_detail, surface_detail,
+  alternate_view, variant_comparison, wearer_context, product_only_context, source_data_table, other
+- description_confidence: one of high, medium, low
+- observed_features: array of concise English phrases describing only details directly visible in this asset
+- media_descriptions: object with exactly en, ko and pt keys. Each value must be a concise, native
+  factual caption of what this final asset actually shows. Never describe the planned slot when the
+  visible result differs; never invent a closure, pocket, body part, seam, material property or variant.
 - reason: concise string
+- set_usable: boolean; false only for a hard defect or a materially redundant/unfinished set
+- usable_count: integer from 0 to {len(generated_image_urls)}
+- distinct_commercial_roles: integer from 0 to {len(generated_image_urls)}
+- coherent: boolean (consistent product identity and campaign style without making all slots alike)
+- near_duplicate_pairs: array of two-index arrays, for example [[1,2]]
+- missing_roles: array of intended purposes that are absent or materially under-delivered
+- repair_targets: array of generated indices whose replacement would most improve the set
+- summary: concise set-level diagnosis
+
+Judge the six assets as one commercial collection after judging each image. Penalize repeated camera
+angles, repeated crops, repeated backgrounds or two slots that communicate the same shopper value even
+when each image is individually usable. Do not call faithful consistency a duplicate when framing and
+commercial purpose are clearly distinct. A deterministic source-data table may be visually different by design.
+For close-up roles, require a real, recognizable area of the product rather than a detached rectangular
+texture swatch or synthesized sample. Mark slot_match false when the assigned feature is too small, the crop
+is arbitrary, excessive blank space weakens the presentation, or the image adds no clear buyer decision.
 
 Verified facts:
 {facts_json}
@@ -481,6 +956,8 @@ Expected asset purposes in generated-image order:
             system,
             prompt,
             images=[*source_image_urls, *generated_image_urls],
+            model=self.visual_review_model,
+            fallback_model=self.visual_review_fallback_model,
         )
 
     def select_best_generated_image(
@@ -503,10 +980,17 @@ Return JSON with:
 - candidates: exactly {len(candidate_urls)} objects, each containing index, usable,
   identity_consistent, construction_consistent, correct_color, single_product,
   product_complete, clean_neutral_background, has_person, has_unrelated_props,
-  unwanted_text, major_artifacts, product_coverage (high/medium/low), score (0-100), and reason.
+  anatomy_natural, unwanted_text, unwanted_brand_or_logo, major_artifacts, product_coverage
+  (high/medium/low), score (0-100), and reason.
 
-Explicitly inspect visible product type, silhouette, collar/neckline, sleeve or leg length,
-pockets, button/fastener count where visible, hem, pattern and any product logo.
+Explicitly inspect product type, complete silhouette, every source-visible component and edge,
+fastening or trim count where visible, surface design and any product logo. Do not assume a component
+merely because it is common for the resolved category.
+Reject any candidate that reproduces a background/styling brand, character, store text or logo
+that is not intrinsic to the sellable product.
+Prefer a product-only hero. A person or hand is acceptable only when a trusted source already shows that
+kind of use context, the product remains complete and unobstructed, anatomy is natural, and the clean
+near-white hero composition is preserved. Never invent an unsupported person or use scenario.
 
 Verified facts:
 {facts_json}
@@ -515,6 +999,8 @@ Verified facts:
             system,
             prompt,
             images=[*source_image_urls, *candidate_urls],
+            model=self.visual_review_model,
+            fallback_model=self.visual_review_fallback_model,
         )
 
     def select_best_detail_image(
@@ -542,11 +1028,29 @@ Return JSON with:
 - selected_index: zero-based candidate index, or -1 if every candidate is unusable
 - candidates: exactly {len(candidate_urls)} objects, each containing index, usable,
   identity_consistent, construction_consistent, color_consistent, pattern_consistent,
-  slot_match, anatomy_natural, unwanted_text, prohibited_visual, major_artifacts,
+  slot_match, critical_structure_unambiguous, anatomy_natural, single_composition,
+  unexpected_collage, unwanted_text,
+  unwanted_brand_or_logo, prohibited_visual, major_artifacts,
   product_coverage (high/medium/low), score (0-100), and reason.
 
 For a variant lineup, every shown variant must be visibly supported by a source reference.
-For a wearer scene, reject malformed hands, limbs, faces, garment fit or body proportions.
+Evaluate critical_structure_unambiguous as a quality signal relative to the intended storyboard
+purpose, not as an automatic rejection. A close-up does not need to show the complete product: it must
+clearly show its assigned local feature plus enough identity anchors to connect it to the verified
+product. Reject only when the crop causes actual product-identity drift or fails the assigned slot.
+Do not accept a detached rectangular swatch, synthesized sample, or floating fragment as a product close-up
+unless the sellable product itself is a swatch/sample. Mark slot_match false when the assigned feature is too
+small, pattern placement or density drifts from the source, the crop is arbitrary, or excessive unused space
+makes the image commercially weak.
+Full-view, variant and person-context slots should keep every source-visible category-defining section recognizable.
+For a variant lineup, each item must remain unambiguously the same product; a folded, occluded or cropped
+source-visible component must not make the candidate appear to have different construction.
+For a person-context scene, reject malformed hands, limbs, faces, product interaction or body proportions.
+Every non-variant detail must use one coherent full-frame composition. Mark unexpected_collage true
+for a montage, grid, split screen, inset, repeated panel, or a hybrid close-up/full-product layout.
+The variant slot may show several complete verified variants in one physical catalog composition, but
+must not use dividers, inset panels, duplicated views, or unrelated close-ups.
+Reject copied background/styling brands, characters, store text or logos unrelated to the product.
 
 Verified facts:
 {facts_json}
@@ -555,6 +1059,73 @@ Verified facts:
             system,
             prompt,
             images=[*source_image_urls, *candidate_urls],
+            model=self.visual_review_model,
+            fallback_model=self.visual_review_fallback_model,
+        )
+
+    def select_best_detail_set(
+        self,
+        facts_json: str,
+        source_image_urls: list[str],
+        fixed_hero_url: str,
+        candidate_urls: list[str],
+        candidate_jobs: list[dict[str, Any]],
+        current_selection: dict[str, int],
+        *,
+        editorial_context: str = "",
+    ) -> dict[str, Any]:
+        """Choose one candidate per detail slot as a coherent commercial set."""
+
+        system = (
+            "You are a strict e-commerce image-set editor. Return JSON only. "
+            "Select a globally coherent and commercially diverse detail set while preserving exact product identity. "
+            "A locally high-scoring image must lose when it duplicates another selected image's shopper purpose."
+        )
+        prompt = f"""
+The first {len(source_image_urls)} images are trusted source references. The next image is the already
+accepted hero. The following {len(candidate_urls)} images form a candidate pool for the orchestrator-assigned detail jobs. Candidate indices
+below are zero-based within that candidate pool, not within the full visual input list.
+
+Compare the proposed combination with current_selection. Return JSON with exactly these keys:
+- candidates: exactly {len(candidate_urls)} objects containing candidate_index, slot, usable,
+  identity_consistent, construction_consistent, color_consistent, pattern_consistent, slot_match,
+  single_composition, unwanted_text, unwanted_brand_or_logo, prohibited_visual, major_artifacts,
+  actual_role, score (0-100), and reason
+- selections: one object per represented slot containing slot and candidate_index
+- current_set_score: number from 0 to 100
+- selected_set_score: number from 0 to 100
+- selection_improves_current_set: boolean
+- distinct_commercial_roles: integer
+- near_duplicate_selected_pairs: array of two-slot arrays
+- missing_roles: array of strings
+- summary: concise string
+
+Each slot must select only a candidate generated for that same slot. Optimize the combination jointly:
+cover distinct shopper decisions across the hero plus five details; avoid repeated full-product views, repeated crops, repeated person-context
+scenes and semantically duplicated backgrounds. Never trade product identity, construction, color,
+pattern, anatomy, compliance or the assigned slot purpose for visual variety. Mark
+selection_improves_current_set true only if the chosen combination is materially better than the
+current combination and every changed candidate has no hard defect.
+
+Verified facts:
+{facts_json}
+
+Candidate jobs:
+{json.dumps(candidate_jobs, ensure_ascii=False)}
+
+Current selection by slot:
+{json.dumps(current_selection, ensure_ascii=False)}
+
+Top-level editorial context (may be empty; investigate it against the images and
+local-review evidence rather than treating it as proof):
+{json.dumps(editorial_context[:3000], ensure_ascii=False)}
+""".strip()
+        return self.chat_json(
+            system,
+            prompt,
+            images=[*source_image_urls, fixed_hero_url, *candidate_urls],
+            model=self.visual_review_model,
+            fallback_model=self.visual_review_fallback_model,
         )
 
     def review_generated_video(
@@ -562,14 +1133,29 @@ Verified facts:
         facts_json: str,
         source_image_urls: list[str],
         video_url: str,
+        *,
+        current_video_url: str = "",
     ) -> dict[str, Any]:
         system = (
             "You are a strict e-commerce product-video quality gate. Return JSON only. "
             "Compare the generated video with the trusted source product images. Reject identity drift, "
-            "changed color or construction, morphing, duplicated limbs or garments, unreadable or unwanted "
+            "changed color or construction, morphing, duplicated limbs or products, unreadable or unwanted "
             "text, watermarks, violent camera motion, severe flicker, and frames where the product is obscured."
         )
-        prompt = f"""
+        if current_video_url:
+            prompt = f"""
+The supplied images are trusted source references. Video 0 is the current accepted asset and video 1
+is a proposed repair. Review both completely. Return JSON with selected_index and exactly two candidates.
+Each candidate must contain index, usable, identity_consistent, construction_consistent,
+color_and_pattern_consistent, motion_stable, unwanted_text, prohibited_visual, major_artifacts,
+score (0-100), and reason. Select video 1 only when it is at least 6 points better and has no hard defect.
+
+Verified facts:
+{facts_json}
+""".strip()
+            videos = [current_video_url, video_url]
+        else:
+            prompt = f"""
 The supplied images are trusted source references. The supplied video is a generated listing asset.
 Review the entire video and return a JSON object with exactly these keys:
 - usable: boolean
@@ -580,16 +1166,20 @@ Review the entire video and return a JSON object with exactly these keys:
 - unwanted_text: boolean
 - prohibited_visual: boolean
 - major_artifacts: boolean
+- score: number from 0 to 100
 - reason: concise string
 
 Verified facts:
 {facts_json}
 """.strip()
+            videos = [video_url]
         return self.chat_json(
             system,
             prompt,
             images=source_image_urls,
-            videos=[video_url],
+            videos=videos,
+            model=self.visual_review_model,
+            fallback_model=self.visual_review_fallback_model,
         )
 
     def generate_image(
@@ -621,23 +1211,34 @@ Verified facts:
         errors: list[str] = []
         requested = max(1, min(4, int(count)))
         with self._image_slots:
-            try:
-                return self._generate_sync_images(
-                    self.config.image_model,
-                    prompt,
-                    reference_urls,
-                    size=size,
-                    negative_prompt=negative_prompt,
-                    count=requested,
-                ), self.config.image_model
-            except ApiError as exc:
-                errors.append(f"{self.config.image_model}: {exc}")
-                self.logger.warning("主图像模型失败，切换回退模型: %s", exc)
+            if not self._model_disabled(self.config.image_model):
+                try:
+                    return self._generate_images_with_strategy(
+                        self.config.image_model,
+                        prompt,
+                        reference_urls,
+                        size=size,
+                        negative_prompt=negative_prompt,
+                        count=requested,
+                    ), self.config.image_model
+                except ApiError as exc:
+                    errors.append(f"{self.config.image_model}: {exc}")
+                    self._disable_model_on_configuration_error(
+                        self.config.image_model, exc
+                    )
+                    self.logger.warning("主图像模型失败，切换回退模型: %s", exc)
+            else:
+                errors.append(f"{self.config.image_model}: 本轮已因配置错误熔断")
             if self.http.remaining_seconds < 300:
                 errors.append("剩余时间不足 300 秒，跳过慢速图像回退模型")
                 raise ApiError("; ".join(errors), retryable=False)
+            if self._model_disabled(self.config.image_fallback_model):
+                errors.append(
+                    f"{self.config.image_fallback_model}: 本轮已因配置错误熔断"
+                )
+                raise ApiError("; ".join(errors), retryable=False)
             try:
-                return self._generate_sync_images(
+                return self._generate_images_with_strategy(
                     self.config.image_fallback_model,
                     prompt,
                     reference_urls,
@@ -647,7 +1248,94 @@ Verified facts:
                 ), self.config.image_fallback_model
             except ApiError as exc:
                 errors.append(f"{self.config.image_fallback_model}: {exc}")
+                self._disable_model_on_configuration_error(
+                    self.config.image_fallback_model, exc
+                )
         raise ApiError("; ".join(errors))
+
+    def _model_disabled(self, model: str) -> bool:
+        with self._disabled_models_lock:
+            return model in self._disabled_models
+
+    def model_available(self, model: str) -> bool:
+        """Expose the run-local model circuit breaker to bounded tool planning."""
+
+        return bool(model and not self._model_disabled(model))
+
+    def operation_available(self, operation: str) -> bool:
+        if operation == "image":
+            return any(
+                self.model_available(model)
+                for model in (
+                    self.config.image_model,
+                    self.config.image_fallback_model,
+                )
+            )
+        if operation == "video":
+            return self.model_available(self.config.video_model)
+        if operation in {"chat", "review"}:
+            return True
+        return False
+
+    def _disable_model_on_configuration_error(
+        self, model: str, error: ApiError
+    ) -> None:
+        if error.category not in {"authorization", "model_configuration"}:
+            return
+        with self._disabled_models_lock:
+            self._disabled_models.add(model)
+        self.logger.error(
+            "模型 %s 因不可恢复的 %s 错误在本轮熔断",
+            model,
+            error.category,
+        )
+
+    def _generate_images_with_strategy(
+        self,
+        model: str,
+        prompt: str,
+        reference_urls: list[str],
+        *,
+        size: str,
+        negative_prompt: str,
+        count: int,
+    ) -> list[str]:
+        last_error: ApiError | None = None
+        for submission_attempt in range(2):
+            try:
+                return self._generate_sync_images(
+                    model,
+                    prompt,
+                    reference_urls,
+                    size=size,
+                    negative_prompt=negative_prompt,
+                    count=count,
+                )
+            except ApiError as exc:
+                last_error = exc
+                transient = exc.retryable is True or exc.category in {
+                    "rate_limit",
+                    "queue",
+                    "timeout",
+                    "server",
+                    "network",
+                    "response_format",
+                }
+                if (
+                    not transient
+                    or submission_attempt > 0
+                    or self.http.remaining_seconds < 480
+                ):
+                    raise
+                delay = 4.0 if exc.category in {"rate_limit", "queue"} else 2.0
+                self.logger.warning(
+                    "图像模型 %s 在底层重试后仍遇到 %s，%.1f 秒后重新提交一次",
+                    model,
+                    exc.category,
+                    delay,
+                )
+                time.sleep(min(delay, self.http._remaining(delay)))
+        raise last_error or ApiError("图像生成失败")
 
     def _generate_sync_images(
         self,
@@ -707,13 +1395,21 @@ Verified facts:
         urls = _collect_urls(response, preferred_keys=("image", "url"))
         if not urls:
             raise ApiError(
-                f"图像响应没有 URL: {json.dumps(response, ensure_ascii=False)[:1000]}"
+                f"图像响应没有 URL: {json.dumps(response, ensure_ascii=False)[:1000]}",
+                retryable=True,
+                category="response_format",
             )
         return urls[:count]
 
     def generate_video(
         self, prompt: str, first_frame_url: str, *, negative_prompt: str = ""
     ) -> tuple[str, str]:
+        if not self.model_available(self.config.video_model):
+            raise ApiError(
+                f"video model {self.config.video_model} is disabled for this run",
+                retryable=False,
+                category="model_configuration",
+            )
         body = {
             "model": self.config.video_model,
             "input": {
@@ -731,31 +1427,61 @@ Verified facts:
             body["input"]["negative_prompt"] = negative_prompt
         started = time.monotonic()
         with self._video_slots:
-            try:
-                response = self.http.request_json(
-                    _endpoint(
-                        self.config.dashscope_base_url,
-                        "services/aigc/video-generation/video-synthesis",
-                    ),
-                    headers={
-                        "Authorization": f"Bearer {self.config.api_key}",
-                        "X-DashScope-Async": "enable",
-                    },
-                    body=body,
-                    timeout=180,
-                )
-                url = self._poll_task_for_url(
-                    response, preferred_keys=("video", "url"), timeout_seconds=720
-                )
-            except ApiError as exc:
-                self._record_metric(
-                    operation="video",
-                    model=self.config.video_model,
-                    started=started,
-                    status="error",
-                    error=str(exc),
-                )
-                raise
+            last_error: ApiError | None = None
+            for submission_attempt in range(2):
+                try:
+                    response = self.http.request_json(
+                        _endpoint(
+                            self.config.dashscope_base_url,
+                            "services/aigc/video-generation/video-synthesis",
+                        ),
+                        headers={
+                            "Authorization": f"Bearer {self.config.api_key}",
+                            "X-DashScope-Async": "enable",
+                        },
+                        body=body,
+                        timeout=180,
+                    )
+                    url = self._poll_task_for_url(
+                        response,
+                        preferred_keys=("video", "url"),
+                        timeout_seconds=720,
+                    )
+                    break
+                except ApiError as exc:
+                    last_error = exc
+                    self._disable_model_on_configuration_error(
+                        self.config.video_model, exc
+                    )
+                    transient = exc.retryable is True or exc.category in {
+                        "rate_limit",
+                        "queue",
+                        "timeout",
+                        "server",
+                        "network",
+                        "response_format",
+                    }
+                    if (
+                        not transient
+                        or submission_attempt > 0
+                        or self.http.remaining_seconds < 480
+                    ):
+                        self._record_metric(
+                            operation="video",
+                            model=self.config.video_model,
+                            started=started,
+                            status="error",
+                            error=str(exc),
+                        )
+                        raise
+                    self.logger.warning(
+                        "视频任务因 %s 失败，保留时间预算后重新提交一次: %s",
+                        exc.category,
+                        exc,
+                    )
+                    time.sleep(min(4.0, self.http._remaining(4.0)))
+            else:
+                raise last_error or ApiError("视频生成失败")
         self._record_metric(
             operation="video",
             model=self.config.video_model,
@@ -778,7 +1504,9 @@ Verified facts:
             if urls:
                 return urls[0]
             raise ApiError(
-                f"异步响应缺少 task_id: {json.dumps(initial_response, ensure_ascii=False)[:1000]}"
+                f"异步响应缺少 task_id: {json.dumps(initial_response, ensure_ascii=False)[:1000]}",
+                retryable=True,
+                category="response_format",
             )
 
         started = time.monotonic()
@@ -799,11 +1527,25 @@ Verified facts:
             if status == "SUCCEEDED":
                 urls = _collect_urls(response, preferred_keys=preferred_keys)
                 if not urls:
-                    raise ApiError("任务成功但没有返回产物 URL")
+                    raise ApiError(
+                        "任务成功但没有返回产物 URL",
+                        retryable=True,
+                        category="response_format",
+                    )
                 return urls[0]
             if status in {"FAILED", "CANCELED", "CANCELLED", "UNKNOWN"}:
                 message = output.get("message") or response.get("message") or status
-                raise ApiError(f"异步任务失败: {message}")
+                category = _failure_category(None, str(message))
+                raise ApiError(
+                    f"异步任务失败: {message}",
+                    retryable=category
+                    in {"rate_limit", "queue", "timeout", "server", "network"},
+                    category=category,
+                )
             time.sleep(min(delay, self.http._remaining(delay)))
             delay = min(15.0, delay * 1.35)
-        raise ApiError(f"异步任务轮询超时: {task_id}")
+        raise ApiError(
+            f"异步任务轮询超时: {task_id}",
+            retryable=True,
+            category="timeout",
+        )

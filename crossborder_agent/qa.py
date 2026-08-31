@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from .media import (
     inspect_video,
 )
 from .models import ProductFacts, TaxonomyResult
+from .table_evidence import presentation_view, select_render_table
 
 
 EXPECTED_FILES = {
@@ -37,6 +39,49 @@ class ValidationReport:
     warnings: list[str] = field(default_factory=list)
 
 
+_MEDIA_HEADINGS = {
+    "en": "Media guide",
+    "ko": "미디어 안내",
+    "pt": "Guia de mídia",
+}
+
+
+def _description_language_surfaces(text: str, language: str) -> tuple[str, str]:
+    """Separate locale-facing prose from the exact machine listing appendix.
+
+    Media descriptions are shopper-facing, but their exact artifact filenames
+    are protocol metadata.  Keep the complete media block in the machine
+    appendix while exposing only the captions to language-quality checks.
+    """
+
+    headings = list(re.finditer(r"(?m)^## ", text))
+    appendix_start = headings[2].start() if len(headings) >= 3 else len(text)
+    buyer_surface = text[:appendix_start]
+    machine_surface = text[appendix_start:]
+
+    media_heading = _MEDIA_HEADINGS.get(language)
+    if media_heading:
+        match = re.search(rf"(?m)^## {re.escape(media_heading)}\s*$", text)
+        if match:
+            next_heading = re.search(r"(?m)^## ", text[match.end() :])
+            media_end = (
+                match.end() + next_heading.start()
+                if next_heading
+                else len(text)
+            )
+            media_surface = text[match.start() : media_end]
+            # Generated descriptions use ``- **filename:** caption``.  The
+            # caption must be localized, while showing filenames to a copy
+            # evaluator caused machine metadata to be judged as buyer prose.
+            media_captions = re.sub(
+                r"(?m)^\s*-\s+\*\*[^*\n]+:\*\*\s*",
+                "- ",
+                media_surface,
+            )
+            buyer_surface += "\n" + media_captions
+    return buyer_surface, machine_surface
+
+
 def _validate_description(
     path: Path,
     facts: ProductFacts,
@@ -53,10 +98,8 @@ def _validate_description(
         return
     required_values = [
         facts.offer_id,
-        facts.platform,
         facts.source_url,
         taxonomy.category.category_id,
-        taxonomy.category.name,
         "main_image.jpeg",
         "detail_image_1.jpeg",
         "detail_image_2.jpeg",
@@ -68,63 +111,81 @@ def _validate_description(
     for value in required_values:
         if value and value not in text:
             report.errors.append(f"{path.name} 缺少必需内容: {value}")
-    for item in facts.attributes:
-        for value in (
-            item.attribute_id,
-            item.name,
-            item.value,
-            item.evidence_pointer,
-        ):
-            if value and value not in text:
-                report.errors.append(
-                    f"{path.name} 缺少商品属性证据: {item.attribute_id}/{item.name}"
-                )
-                break
+
+    language = path.stem.removeprefix("product_description_")
+    buyer_surface, machine_surface = _description_language_surfaces(text, language)
+    # Source URLs, identifiers and exact proper labels belong to the evidence
+    # appendix. Source script is a hard defect only when it leaks into shopper
+    # prose or media descriptions; appendix residue remains visible as a warning.
+    buyer_surface = re.sub(r"https?://[^\s)>]+", "", buyer_surface)
+    machine_surface = re.sub(r"https?://[^\s)>]+", "", machine_surface)
+    if re.search(r"[\u4e00-\u9fff]", buyer_surface):
+        report.errors.append(f"{path.name} 买家文案或媒体描述含未本地化中文")
+    if re.search(r"[\u4e00-\u9fff]", machine_surface):
+        report.warnings.append(f"{path.name} 机器附录保留了中文来源值")
+    forbidden_internal_markers = (
+        "/ret/result/result",
+        "Source evidence",
+        "Canonical source",
+        "Machine-readable source",
+        "원본 근거",
+        "기계 판독",
+        "Evidência na origem",
+        "dados canônicos",
+    )
+    for marker in forbidden_internal_markers:
+        if marker.casefold() in text.casefold():
+            report.errors.append(f"{path.name} 暴露内部证据字段: {marker}")
+
+    sections = re.split(r"(?m)^## ", text)
+    if len(sections) < 3:
+        report.errors.append(f"{path.name} 缺少商品描述或卖点章节")
+    else:
+        overview_body = sections[1].split("\n", 1)[-1].strip()
+        paragraphs = [
+            item.strip()
+            for item in re.split(r"\n\s*\n", overview_body)
+            if item.strip()
+        ]
+        minimum_overview_chars = {"en": 70, "ko": 35, "pt": 70}.get(language, 70)
+        overview_length = len(
+            re.sub(r"\s+", "", " ".join(paragraphs))
+        )
+        if overview_length < minimum_overview_chars:
+            report.warnings.append(f"{path.name} 商品描述内容偏短")
+
     for item in taxonomy.attributes:
-        for value in (
-            item.attr_id,
-            item.name,
-            item.source_value,
-            item.platform_value,
-            item.source_evidence_pointer,
-        ):
+        for value in (item.attr_id, item.value_id):
             if value and value not in text:
                 report.errors.append(
-                    f"{path.name} 缺少平台属性映射: {item.attr_id}/{item.name}"
+                    f"{path.name} 缺少平台上架属性: {item.attr_id}/{item.value_id}"
                 )
                 break
-    detailed_sku_evidence = sum(len(sku.attributes) for sku in facts.skus) <= 1500
     for sku in facts.skus:
         if sku.sku_id not in text:
             report.errors.append(f"{path.name} 缺少 SKU: {sku.sku_id}")
             continue
-        if sku.evidence_pointer not in text:
-            report.errors.append(f"{path.name} 缺少 SKU 证据: {sku.sku_id}")
+        if sku.spec_id and sku.spec_id not in text:
+            report.errors.append(f"{path.name} 缺少 Spec ID: {sku.sku_id}")
         for item in sku.attributes:
-            required_component_values = [item.value]
-            if detailed_sku_evidence:
-                required_component_values.extend(
-                    [item.attribute_id, item.evidence_pointer]
-                )
-            if any(
-                value and value not in text for value in required_component_values
-            ):
+            if item.attribute_id and item.attribute_id not in text:
                 report.errors.append(
                     f"{path.name} 缺少 SKU 分解项: {sku.sku_id}/{item.attribute_id}"
                 )
                 break
-    for item in facts.size_chart_rows:
-        for value in (
-            item.size_label,
-            item.bust_cm,
-            item.length_cm,
-            item.evidence_pointer,
-        ):
-            if value and value not in text:
-                report.errors.append(
-                    f"{path.name} 缺少详情图尺码证据: {item.size_label}/{value}"
-                )
-                break
+    table = select_render_table(facts.evidence_tables)
+    if table is not None:
+        try:
+            table_view = presentation_view(table, language)
+        except ValueError as exc:
+            report.errors.append(f"{path.name} 来源表格展示协议无效: {exc}")
+        else:
+            for row in table_view["rows"]:
+                missing = next((value for value in row if value and value not in text), "")
+                if missing:
+                    report.errors.append(
+                        f"{path.name} 缺少来源表格单元格: {table.table_id}/{missing}"
+                    )
 
 
 def validate_delivery(
@@ -194,12 +255,25 @@ def validate_delivery(
         except MediaError as exc:
             report.errors.append(str(exc))
 
+    duplicate_threshold = 10
     for left_index, (left_name, left_hash) in enumerate(image_hashes):
         for right_name, right_hash in image_hashes[left_index + 1 :]:
-            if hash_distance(left_hash, right_hash) <= 2:
+            if hash_distance(left_hash, right_hash) <= duplicate_threshold:
                 report.warnings.append(
                     f"商品图片视觉内容可能重复: {left_name}, {right_name}"
                 )
+
+    distinct_hashes: list[int] = []
+    for _, image_hash in image_hashes:
+        if all(
+            hash_distance(image_hash, seen) > duplicate_threshold
+            for seen in distinct_hashes
+        ):
+            distinct_hashes.append(image_hash)
+    if image_hashes and len(distinct_hashes) / len(image_hashes) < 0.8:
+        report.warnings.append(
+            "商品图片的感知差异率低于 A6 的 80% 可用率参考线"
+        )
 
     try:
         inspect_video(output_dir / "product_video.mp4")

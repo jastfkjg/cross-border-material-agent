@@ -33,11 +33,28 @@ def flatten_generated_text(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _phrase_present(text: str, term: str) -> bool:
+    """Match a prohibited phrase without firing on embedded substrings.
+
+    ``cures`` must not reject ``secures with a three-button front closure``;
+    a multiword phrase such as ``top rated`` still matches only its own words.
+    """
+
+    term = term.casefold()
+    for match in re.finditer(re.escape(term), text):
+        start, end = match.start(), match.end()
+        if (start == 0 or not text[start - 1].isalnum()) and (
+            end == len(text) or not text[end].isalnum()
+        ):
+            return True
+    return False
+
+
 def generated_copy_violations(language: str, payload: Any) -> list[str]:
     rules = load_rules()
     text = flatten_generated_text(payload).casefold()
     terms = rules.get("prohibited_claims", {}).get(language, [])
-    violations = [str(term) for term in terms if str(term).casefold() in text]
+    violations = [str(term) for term in terms if _phrase_present(text, str(term))]
     original_text = flatten_generated_text(payload)
     for pattern in rules.get("generated_text_regex", []):
         try:
@@ -124,17 +141,50 @@ def normalize_source_image_observations(
                 and not item.get("has_intrinsic_product_text")
             )
         )
-        hard_safe = not item["risk_reasons"]
-        model_safe = raw.get("safe_for_generation_reference")
+        hard_risk_fields = tuple(
+            str(field) for field in rules.get("source_visual_hard_risk_fields", [])
+        )
+        hard_safe = not any(item.get(field) is True for field in hard_risk_fields)
+        reference_product_clear = bool(
+            role
+            in {"hero", "front", "back", "side", "detail", "variant", "lifestyle"}
+            and not item.get("product_obscured")
+            and not item.get("low_sharpness")
+            and item["sharpness"] != "low"
+            and item["product_coverage"] != "low"
+        )
+        # Direct-listing safety and generation-reference usefulness are different.
+        # Soft scene contamination can be removed by image editing and must not
+        # starve the generator of every usable product-identity reference.
         item["safe_for_generation_reference"] = bool(
-            raw and hard_safe and model_safe is not False and not item["has_text"]
+            raw and hard_safe and reference_product_clear
+        )
+        item["reference_requires_cleanup"] = bool(
+            item["safe_for_generation_reference"]
+            and any(
+                item.get(field) is True
+                for field in (
+                    "has_text",
+                    "has_overlay_text",
+                    "has_logo",
+                    "has_third_party_brand",
+                    "has_person",
+                    "has_unrelated_props",
+                    "multiple_products",
+                )
+            )
         )
         item["safe_for_listing_fallback"] = bool(
             raw
             and hard_safe
             and not item["has_overlay_text"]
             and not item["has_logo"]
+            and not item["has_third_party_brand"]
             and not item["product_obscured"]
+            and not item["low_sharpness"]
+            and item["sharpness"] != "low"
+            and not item["has_unrelated_props"]
+            and not item["multiple_products"]
         )
         item["safe_for_main_image"] = bool(
             item["safe_for_listing_fallback"]
