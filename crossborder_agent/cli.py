@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from . import VERSION
+from .availability import create_last_resort_delivery
 from .input_loader import InputError, parse_prompt_paths
 from .logging_utils import configure_logging
 from .pipeline import Pipeline, PipelineError
@@ -74,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         "on",
     }
     logger = configure_logging(debug=debug)
+    output_dir: Path | None = None
     try:
         if args.input_dir or args.output_dir:
             if not args.input_dir or not args.output_dir:
@@ -109,16 +111,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         pipeline.run()
         return 0
-    except (InputError, PipelineError, OSError, ValueError) as exc:
-        logger.exception("Agent execution failed: %s", exc)
-        return 1
     except KeyboardInterrupt:
         logger.error("Agent was interrupted")
         return 130
-    except (
-        Exception
-    ) as exc:  # pragma: no cover - final defensive boundary for the evaluator
-        logger.exception("Unhandled exception: %s", exc)
+    except Exception as exc:  # final defensive boundary for the evaluator
+        logger.exception("Agent execution failed: %s", exc)
+        if output_dir is not None and create_last_resort_delivery(
+            output_dir,
+            logger=logger,
+            reason=f"{type(exc).__name__}: {exc}",
+        ):
+            return 0
         return 1
 
 

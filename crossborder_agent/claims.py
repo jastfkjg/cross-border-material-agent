@@ -173,11 +173,21 @@ def build_claim_ledger(
     for attribute_index, item in enumerate(facts.attributes):
         buyer_safe = buyer_safe_source_name(item.name)
         surfaces = ["machine_appendix"]
-        decision = str(
-            attribute_decisions.get(attribute_index, {}).get("decision") or "publish"
+        decision_row = attribute_decisions.get(attribute_index, {})
+        decision = str(decision_row.get("decision") or "publish")
+        surface_decisions = decision_row.get("surface_decisions")
+        surface_decisions = (
+            surface_decisions if isinstance(surface_decisions, dict) else {}
         )
-        if buyer_safe and decision == "publish":
-            surfaces = ["buyer_copy", "machine_appendix", "image_prompt"]
+        # Surface-specific model decisions prevent pixel observability from
+        # suppressing a source-grounded non-visual fact everywhere. The host
+        # translates surfaces mechanically and never infers product semantics.
+        buyer_decision = str(surface_decisions.get("buyer_copy") or decision)
+        media_decision = str(surface_decisions.get("media_generation") or decision)
+        if buyer_safe and buyer_decision == "publish":
+            surfaces.append("buyer_copy")
+        if media_decision == "publish":
+            surfaces.append("image_prompt")
         add(
             item.name,
             item.value,

@@ -22,6 +22,8 @@ from crossborder_agent.api import (
     QwenClient,
     _failure_category,
 )
+from crossborder_agent.availability import create_last_resort_delivery
+from crossborder_agent.cli import main as cli_main
 from crossborder_agent.media import (
     MediaError,
     create_catalog_video,
@@ -29,6 +31,7 @@ from crossborder_agent.media import (
     inspect_video,
     normalize_image,
 )
+from crossborder_agent.qa import EXPECTED_FILES
 
 
 class _FaultHandler(BaseHTTPRequestHandler):
@@ -54,6 +57,16 @@ class _FaultHandler(BaseHTTPRequestHandler):
             self._json({"message": "rate limited"}, 429)
         elif self.path == "/retry-json":
             self._json({"ok": True})
+        elif self.path == "/quota":
+            self._json(
+                {
+                    "error": {
+                        "code": "insufficient_quota",
+                        "message": "AllocationQuota has been exhausted",
+                    }
+                },
+                429,
+            )
         elif self.path == "/bad-json" and count == 1:
             body = b"{not-json"
             self.send_response(200)
@@ -110,6 +123,65 @@ class ResilienceTests(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertEqual(self.handler.counters["/retry-json"], 2)
 
+    def test_exhausted_quota_is_terminal_and_circuits_followup_requests(self) -> None:
+        self.handler.counters["/quota"] = 0
+        self.handler.counters["/retry-json"] = 0
+        client = self._http()
+
+        with self.assertRaises(ApiError) as first:
+            client.request_json(self.base + "/quota", method="GET", body=None)
+        with self.assertRaises(ApiError) as second:
+            client.request_json(self.base + "/retry-json", method="GET", body=None)
+
+        self.assertEqual(first.exception.category, "quota_exhausted")
+        self.assertFalse(first.exception.retryable)
+        self.assertEqual(second.exception.category, "quota_exhausted")
+        self.assertEqual(self.handler.counters["/quota"], 1)
+        self.assertEqual(self.handler.counters["/retry-json"], 0)
+        self.assertFalse(client.service_available)
+
+    @unittest.skipIf(Image is None, "Pillow is required")
+    def test_last_resort_delivery_fills_the_public_contract(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agent-last-resort-test-") as temporary:
+            output = Path(temporary) / "output"
+            created = create_last_resort_delivery(
+                output,
+                logger=self.logger,
+                reason="synthetic fatal boundary",
+            )
+
+            self.assertTrue(created)
+            self.assertEqual(
+                {path.name for path in output.iterdir() if path.is_file()},
+                EXPECTED_FILES,
+            )
+            self.assertTrue(inspect_video(output / "product_video.mp4")["decoded"])
+
+    def test_cli_returns_success_when_final_contract_recovery_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agent-cli-recovery-") as temporary:
+            root = Path(temporary)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            with mock.patch(
+                "crossborder_agent.cli.Pipeline.run",
+                side_effect=RuntimeError("synthetic unexpected failure"),
+            ), mock.patch(
+                "crossborder_agent.cli.create_last_resort_delivery",
+                return_value=True,
+            ) as recovery:
+                code = cli_main(
+                    [
+                        "--input-dir",
+                        str(input_dir),
+                        "--output-dir",
+                        str(output_dir),
+                    ]
+                )
+
+        self.assertEqual(code, 0)
+        recovery.assert_called_once()
+
     def test_non_retryable_400_preserves_status(self) -> None:
         with self.assertRaises(ApiError) as raised:
             self._http().request_json(self.base + "/bad-request", body={})
@@ -134,6 +206,7 @@ class ResilienceTests(unittest.TestCase):
             dashscope_base_url=self.base + "/",
             openai_base_url=self.base + "/",
             video_model="missing-video-model",
+            video_fallback_models=(),
         )
         client = QwenClient(config, self.logger, time.monotonic() + 300)
 
@@ -142,6 +215,73 @@ class ResilienceTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.category, "model_configuration")
         self.assertFalse(client.operation_available("video"))
+
+    def test_video_configuration_failure_moves_to_next_capability(self) -> None:
+        config = ApiConfig(
+            api_key="test",
+            dashscope_base_url=self.base + "/",
+            openai_base_url=self.base + "/",
+            video_model="missing-video-model",
+            video_fallback_models=("working-t2v",),
+        )
+        client = QwenClient(config, self.logger, time.monotonic() + 900)
+
+        def generate(model, *_args):
+            if model == "missing-video-model":
+                error = ApiError(
+                    "Model not exist",
+                    retryable=False,
+                    category="model_configuration",
+                )
+                client._disable_model_on_configuration_error(model, error)
+                raise error
+            return "https://example.test/generated.mp4"
+
+        with mock.patch.object(
+            client, "_generate_video_with_model", side_effect=generate
+        ) as called:
+            url, model = client.generate_video(
+                "product motion", "https://example.test/frame.jpeg"
+            )
+
+        self.assertEqual(url, "https://example.test/generated.mp4")
+        self.assertEqual(model, "working-t2v")
+        self.assertEqual(called.call_count, 2)
+        self.assertTrue(client.operation_available("video"))
+
+    def test_t2v_fallback_omits_unusable_first_frame_parameter(self) -> None:
+        body = QwenClient._video_request_body(
+            "happyhorse-1.1-t2v",
+            "grounded product motion",
+            "https://example.test/frame.jpeg",
+            "no text",
+        )
+        self.assertNotIn("media", body["input"])
+        self.assertNotIn("negative_prompt", body["input"])
+        self.assertEqual(body["input"]["prompt"], "grounded product motion")
+        self.assertNotIn("prompt_extend", body["parameters"])
+        self.assertEqual(body["parameters"]["ratio"], "9:16")
+
+    def test_r2v_fallback_uses_reference_image_protocol(self) -> None:
+        body = QwenClient._video_request_body(
+            "happyhorse-1.1-r2v",
+            "slow product turntable motion",
+            "https://example.test/reference.jpeg",
+            "no text",
+        )
+
+        self.assertEqual(
+            body["input"]["media"],
+            [
+                {
+                    "type": "reference_image",
+                    "url": "https://example.test/reference.jpeg",
+                }
+            ],
+        )
+        self.assertIn("[Image 1]", body["input"]["prompt"])
+        self.assertNotIn("negative_prompt", body["input"])
+        self.assertEqual(body["parameters"]["ratio"], "9:16")
 
     def test_malformed_json_response_is_retried(self) -> None:
         self.handler.counters["/bad-json"] = 0

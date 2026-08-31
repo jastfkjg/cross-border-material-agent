@@ -40,6 +40,21 @@ def _failure_category(status_code: int | None, message: str) -> str:
     """Classify provider failures so upper layers can choose a useful recovery."""
 
     lowered = message.casefold()
+    # A provider-side allocation exhaustion is not the same failure mode as a
+    # short-lived request throttle.  Retrying it only burns the global delivery
+    # deadline and prevents deterministic/other-capability fallbacks from
+    # completing.  Match provider protocol vocabulary, not any product data.
+    if any(
+        token in lowered
+        for token in (
+            "insufficient_quota",
+            "allocationquota",
+            "quota has been exhausted",
+            "quota exhausted",
+            "account quota exceeded",
+        )
+    ):
+        return "quota_exhausted"
     if status_code == 429 or any(
         token in lowered
         for token in ("rate limit", "ratelimit", "throttl", "quota exceeded")
@@ -112,6 +127,10 @@ class ApiConfig:
     image_model: str = "wan2.7-image-pro"
     image_fallback_model: str = "qwen-image-3.0-pro"
     video_model: str = "wan2.7-i2v-2026-04-25"
+    video_fallback_models: tuple[str, ...] = (
+        "happyhorse-1.1-r2v",
+        "happyhorse-1.1-t2v",
+    )
     evaluation_models: tuple[str, ...] = ("qwen3.8-max", "qwen3.7-plus")
 
     @classmethod
@@ -131,6 +150,16 @@ class ApiConfig:
         evaluation_models = tuple(dict.fromkeys(configured_evaluators))[:3]
         if len(evaluation_models) < 2:
             evaluation_models = ("qwen3.8-max", "qwen3.7-plus")
+        configured_video_fallbacks = tuple(
+            dict.fromkeys(
+                item.strip()
+                for item in os.environ.get(
+                    "AGENT_VIDEO_FALLBACK_MODELS",
+                    "happyhorse-1.1-r2v,happyhorse-1.1-t2v",
+                ).split(",")
+                if item.strip()
+            )
+        )[:3]
         return cls(
             api_key=api_key,
             dashscope_base_url=dashscope,
@@ -156,6 +185,7 @@ class ApiConfig:
                 "AGENT_IMAGE_FALLBACK_MODEL", "qwen-image-3.0-pro"
             ),
             video_model=os.environ.get("AGENT_VIDEO_MODEL", "wan2.7-i2v-2026-04-25"),
+            video_fallback_models=configured_video_fallbacks,
             evaluation_models=evaluation_models,
         )
 
@@ -206,6 +236,33 @@ class HttpJsonClient:
         self.deadline = deadline
         self.trace = trace
         self.ssl_context = ssl.create_default_context()
+        self._terminal_failure: ApiError | None = None
+        self._terminal_failure_lock = threading.Lock()
+
+    @property
+    def service_available(self) -> bool:
+        """Whether authenticated model requests can still succeed in this run."""
+
+        with self._terminal_failure_lock:
+            return self._terminal_failure is None
+
+    def _raise_terminal_failure(self) -> None:
+        with self._terminal_failure_lock:
+            failure = self._terminal_failure
+        if failure is not None:
+            raise ApiError(
+                str(failure),
+                status_code=failure.status_code,
+                retryable=False,
+                category=failure.category,
+            )
+
+    def _remember_terminal_failure(self, failure: ApiError) -> None:
+        if failure.category not in {"quota_exhausted", "authorization"}:
+            return
+        with self._terminal_failure_lock:
+            if self._terminal_failure is None:
+                self._terminal_failure = failure
 
     def _remaining(self, maximum: float) -> float:
         remaining = self.deadline - time.monotonic()
@@ -227,6 +284,7 @@ class HttpJsonClient:
         timeout: float = 180,
         attempts: int = 4,
     ) -> dict[str, Any]:
+        self._raise_terminal_failure()
         payload = (
             None
             if body is None
@@ -268,7 +326,18 @@ class HttpJsonClient:
             except HTTPError as exc:
                 detail = exc.read(8192).decode("utf-8", errors="replace")
                 last_error = f"HTTP {exc.code}: {detail}"
-                retryable = exc.code in {408, 409, 425, 429, 500, 502, 503, 504}
+                category = _failure_category(exc.code, last_error)
+                retryable = (
+                    exc.code in {408, 409, 425, 429, 500, 502, 503, 504}
+                    and category not in {"quota_exhausted", "authorization"}
+                )
+                failure = ApiError(
+                    last_error,
+                    status_code=exc.code,
+                    retryable=retryable,
+                    category=category,
+                )
+                self._remember_terminal_failure(failure)
                 if self.trace:
                     self.trace.emit(
                         "http.request.failure",
@@ -277,16 +346,11 @@ class HttpJsonClient:
                         attempt=attempt + 1,
                         status_code=exc.code,
                         retryable=retryable,
-                        category=_failure_category(exc.code, last_error),
+                        category=category,
                         error=last_error,
                     )
                 if not retryable or attempt + 1 >= attempts:
-                    raise ApiError(
-                        last_error,
-                        status_code=exc.code,
-                        retryable=retryable,
-                        category=_failure_category(exc.code, last_error),
-                    ) from exc
+                    raise failure from exc
                 retry_after = exc.headers.get("Retry-After", "")
                 try:
                     delay = min(30.0, max(0.0, float(retry_after)))
@@ -473,6 +537,7 @@ class QwenClient:
             "image": self.config.image_model,
             "image_fallback": self.config.image_fallback_model,
             "video": self.config.video_model,
+            "video_fallbacks": list(self.config.video_fallback_models),
             "evaluation_models": list(self.evaluation_models),
         }
 
@@ -1278,6 +1343,8 @@ Verified facts:
         return bool(model and not self._model_disabled(model))
 
     def operation_available(self, operation: str) -> bool:
+        if not self.http.service_available:
+            return False
         if operation == "image":
             return any(
                 self.model_available(model)
@@ -1287,10 +1354,31 @@ Verified facts:
                 )
             )
         if operation == "video":
-            return self.model_available(self.config.video_model)
+            return any(self.model_available(model) for model in self.video_models)
         if operation in {"chat", "review"}:
             return True
         return False
+
+    @property
+    def video_models(self) -> tuple[str, ...]:
+        """Return the ordered, run-local video capability chain.
+
+        The environment controls the concrete platform models.  Deduplication is
+        deliberately mechanical: choosing which successful rendition best fits
+        the product remains a model/reviewer decision, while the host only keeps
+        a provider configuration failure from disabling all video generation.
+        """
+
+        return tuple(
+            dict.fromkeys(
+                model.strip()
+                for model in (
+                    self.config.video_model,
+                    *self.config.video_fallback_models,
+                )
+                if model.strip()
+            )
+        )
 
     def _disable_model_on_configuration_error(
         self, model: str, error: ApiError
@@ -1416,94 +1504,169 @@ Verified facts:
             )
         return urls[:count]
 
+    @staticmethod
+    def _video_request_body(
+        model: str,
+        prompt: str,
+        first_frame_url: str,
+        negative_prompt: str,
+    ) -> dict[str, Any]:
+        """Build the supported provider protocol without product-specific logic."""
+
+        happyhorse_r2v = model.endswith("-r2v")
+        happyhorse_t2v = model.endswith("-t2v")
+        input_payload: dict[str, Any] = {"prompt": prompt}
+        # Text-to-video remains a useful model-authored degraded result if all
+        # reference-conditioned models are unavailable.  Other supported video
+        # families receive the exact generated/source-grounded first frame.
+        if happyhorse_r2v:
+            # HappyHorse reference-to-video uses reference_image media and
+            # requires positional [Image N] grounding in the prompt.  It is not
+            # the same protocol as a first-frame image-to-video model.
+            input_payload["prompt"] = (
+                "[Image 1] shows the exact product reference to preserve. " + prompt
+            )
+            input_payload["media"] = [
+                {"type": "reference_image", "url": first_frame_url}
+            ]
+        elif not happyhorse_t2v:
+            input_payload["media"] = [
+                {"type": "first_frame", "url": first_frame_url}
+            ]
+        # HappyHorse documents no negative_prompt field; unsupported extras can
+        # turn a healthy fallback into an InvalidParameter response.  Wan's
+        # first-frame protocol accepts the field and keeps the safety guidance.
+        if negative_prompt and not (happyhorse_r2v or happyhorse_t2v):
+            input_payload["negative_prompt"] = negative_prompt
+        parameters: dict[str, Any] = {
+            "resolution": "720P",
+            "duration": 8,
+            "watermark": False,
+        }
+        if happyhorse_r2v or happyhorse_t2v:
+            parameters["ratio"] = "9:16"
+        return {
+            "model": model,
+            "input": input_payload,
+            "parameters": parameters,
+        }
+
+    def _generate_video_with_model(
+        self,
+        model: str,
+        prompt: str,
+        first_frame_url: str,
+        negative_prompt: str,
+    ) -> str:
+        body = self._video_request_body(
+            model, prompt, first_frame_url, negative_prompt
+        )
+        last_error: ApiError | None = None
+        for submission_attempt in range(2):
+            try:
+                response = self.http.request_json(
+                    _endpoint(
+                        self.config.dashscope_base_url,
+                        "services/aigc/video-generation/video-synthesis",
+                    ),
+                    headers={
+                        "Authorization": f"Bearer {self.config.api_key}",
+                        "X-DashScope-Async": "enable",
+                    },
+                    body=body,
+                    timeout=180,
+                )
+                return self._poll_task_for_url(
+                    response,
+                    preferred_keys=("video", "url"),
+                    timeout_seconds=720,
+                )
+            except ApiError as exc:
+                last_error = exc
+                self._disable_model_on_configuration_error(model, exc)
+                transient = exc.retryable is True or exc.category in {
+                    "rate_limit",
+                    "queue",
+                    "timeout",
+                    "server",
+                    "network",
+                    "response_format",
+                }
+                if (
+                    not transient
+                    or submission_attempt > 0
+                    or self.http.remaining_seconds < 480
+                ):
+                    raise
+                self.logger.warning(
+                    "Video model %s encountered %s; resubmitting once before trying another capability: %s",
+                    model,
+                    exc.category,
+                    exc,
+                )
+                time.sleep(min(4.0, self.http._remaining(4.0)))
+        raise last_error or ApiError(f"Video generation failed for {model}")
+
     def generate_video(
         self, prompt: str, first_frame_url: str, *, negative_prompt: str = ""
     ) -> tuple[str, str]:
-        if not self.model_available(self.config.video_model):
-            raise ApiError(
-                f"video model {self.config.video_model} is disabled for this run",
-                retryable=False,
-                category="model_configuration",
-            )
-        body = {
-            "model": self.config.video_model,
-            "input": {
-                "prompt": prompt,
-                "media": [{"type": "first_frame", "url": first_frame_url}],
-            },
-            "parameters": {
-                "resolution": "720P",
-                "duration": 8,
-                "prompt_extend": False,
-                "watermark": False,
-            },
-        }
-        if negative_prompt:
-            body["input"]["negative_prompt"] = negative_prompt
-        started = time.monotonic()
+        errors: list[str] = []
+        error_categories: list[str] = []
         with self._video_slots:
-            last_error: ApiError | None = None
-            for submission_attempt in range(2):
+            for index, model in enumerate(self.video_models):
+                if not self.model_available(model):
+                    errors.append(f"{model}: disabled after a configuration error")
+                    continue
+                # Preserve enough time to validate and commit a local playable
+                # fallback. The primary is allowed a tighter budget because it
+                # has the strongest identity conditioning.
+                reserve = 120 if index == 0 else 300
+                if self.http.remaining_seconds <= reserve:
+                    errors.append(
+                        f"{model}: skipped with only {self.http.remaining_seconds:.0f}s remaining"
+                    )
+                    continue
+                started = time.monotonic()
                 try:
-                    response = self.http.request_json(
-                        _endpoint(
-                            self.config.dashscope_base_url,
-                            "services/aigc/video-generation/video-synthesis",
-                        ),
-                        headers={
-                            "Authorization": f"Bearer {self.config.api_key}",
-                            "X-DashScope-Async": "enable",
-                        },
-                        body=body,
-                        timeout=180,
+                    url = self._generate_video_with_model(
+                        model,
+                        prompt,
+                        first_frame_url,
+                        negative_prompt,
                     )
-                    url = self._poll_task_for_url(
-                        response,
-                        preferred_keys=("video", "url"),
-                        timeout_seconds=720,
-                    )
-                    break
                 except ApiError as exc:
-                    last_error = exc
-                    self._disable_model_on_configuration_error(
-                        self.config.video_model, exc
+                    errors.append(f"{model}: {exc}")
+                    error_categories.append(exc.category)
+                    self._record_metric(
+                        operation="video",
+                        model=model,
+                        started=started,
+                        status="error",
+                        error=str(exc),
                     )
-                    transient = exc.retryable is True or exc.category in {
-                        "rate_limit",
-                        "queue",
-                        "timeout",
-                        "server",
-                        "network",
-                        "response_format",
-                    }
-                    if (
-                        not transient
-                        or submission_attempt > 0
-                        or self.http.remaining_seconds < 480
-                    ):
-                        self._record_metric(
-                            operation="video",
-                            model=self.config.video_model,
-                            started=started,
-                            status="error",
-                            error=str(exc),
-                        )
-                        raise
                     self.logger.warning(
-                        "Video task failed because of %s; resubmitting once while preserving the time budget: %s",
-                        exc.category,
+                        "Video capability %s failed; trying the next configured model: %s",
+                        model,
                         exc,
                     )
-                    time.sleep(min(4.0, self.http._remaining(4.0)))
-            else:
-                raise last_error or ApiError("Video generation failed")
-        self._record_metric(
-            operation="video",
-            model=self.config.video_model,
-            started=started,
-            status="ok",
+                    continue
+                self._record_metric(
+                    operation="video",
+                    model=model,
+                    started=started,
+                    status="ok",
+                )
+                return url, model
+        raise ApiError(
+            "All configured video capabilities failed: " + "; ".join(errors),
+            retryable=False,
+            category=(
+                "model_configuration"
+                if error_categories
+                and all(category == "model_configuration" for category in error_categories)
+                else "video_capabilities_exhausted"
+            ),
         )
-        return url, self.config.video_model
 
     def _poll_task_for_url(
         self,

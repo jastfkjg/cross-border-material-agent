@@ -41,6 +41,28 @@ class ScriptedToolClient:
 
 
 class NativeToolAgentLoopTests(unittest.TestCase):
+    def test_planner_visual_rows_exclude_heavy_source_payloads(self) -> None:
+        source = {
+            "index": 7,
+            "url": "https://example.test/very-long-source.jpeg",
+            "role": "detail",
+            "dominant_color": "blue",
+            "product_coverage": "high",
+            "sharpness": "high",
+            "inspection_complete": True,
+            "safe_for_generation_reference": True,
+            "has_text": True,
+            "risk_reasons": ["requires cleanup"],
+            "raw_provider_transcript": "x" * 100_000,
+        }
+
+        compact = BoundedDeliveryAgent._compact_source_image_detail(source)
+
+        self.assertEqual(compact["index"], 7)
+        self.assertTrue(compact["safe_reference"])
+        self.assertNotIn("url", compact)
+        self.assertNotIn("raw_provider_transcript", compact)
+
     def test_delivery_planner_tool_surface_stays_within_provider_budget(self) -> None:
         class CapturingClient:
             config = SimpleNamespace(chat_model="planner")

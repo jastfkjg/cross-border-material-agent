@@ -714,7 +714,11 @@ class ProductionPipelineMixin:
                 generated_url, model = self._generate_main_with_semantic_retry(
                     facts,
                     plan.main_prompt,
-                    generation_references=source_urls[:1],
+                    # The orchestrator-selected bundle can include complementary
+                    # front/back/detail evidence. The model adapter enforces its
+                    # own provider limit; production should not silently discard
+                    # all but the first grounded reference.
+                    generation_references=source_urls[:3],
                     review_references=source_urls[:3],
                     candidate_count=(
                         None if self.fast_mode else plan.main_candidate_count
@@ -740,7 +744,7 @@ class ProductionPipelineMixin:
                         facts,
                         plan.main_prompt
                         + "\nThe previous output URL or file failed physical validation. Produce a fresh clean asset.",
-                        generation_references=source_urls[:1],
+                        generation_references=source_urls[:3],
                         review_references=source_urls[:3],
                         candidate_count=(
                             None if self.fast_mode else plan.main_candidate_count
@@ -1685,6 +1689,8 @@ class ProductionPipelineMixin:
         # not receive that exemption and are converted into useful detail crops.
         automatic_repair_threshold = 10
         crop_sequence = ("upper", "lower", "left", "right", "center")
+        with self._detail_candidate_pool_lock:
+            reviewed_candidate_pools = copy.deepcopy(self._detail_candidate_pools)
         for asset in ordered:
             try:
                 quality = inspect_image_quality(Path(asset.path))
@@ -1708,7 +1714,86 @@ class ProductionPipelineMixin:
                 continue
             if (
                 asset.generated
-                or asset.model == "deterministic-evidence-table"
+                and asset.name.startswith("detail_image_")
+            ):
+                # If the set-level reviewer is unavailable, a detail slot may
+                # still have multiple candidates that already passed its own
+                # semantic review.  Use only that recorded hard-gate evidence
+                # and the objective perceptual-distinctness contract to recover
+                # from a duplicate; the host does not reinterpret the product or
+                # assign a new semantic role.
+                try:
+                    detail_index = int(
+                        asset.name.removeprefix("detail_image_").removesuffix(
+                            ".jpeg"
+                        )
+                    )
+                except ValueError:
+                    detail_index = 0
+                raw_pool = reviewed_candidate_pools.get(detail_index, {})
+                raw_candidates = (
+                    raw_pool.get("candidates")
+                    if isinstance(raw_pool, dict)
+                    else raw_pool
+                )
+                candidates = (
+                    [item for item in raw_candidates if isinstance(item, dict)]
+                    if isinstance(raw_candidates, list)
+                    else []
+                )
+                repaired = False
+                for candidate_record in candidates:
+                    candidate_url = str(candidate_record.get("url") or "")
+                    local_review = candidate_record.get("local_review")
+                    if (
+                        not candidate_url
+                        or candidate_url == asset.source_url
+                        or not self._recorded_detail_candidate_is_eligible(
+                            local_review
+                        )
+                    ):
+                        continue
+                    staged = work_dir / (
+                        f".{asset.name}.reviewed-{uuid.uuid4().hex}.repair.jpeg"
+                    )
+                    try:
+                        self._download_and_normalize(
+                            candidate_url,
+                            staged,
+                            downloads_dir,
+                            canvas=(1200, 1500),
+                            white_background=False,
+                        )
+                        candidate = inspect_image_quality(staged)
+                        if candidate is None or any(
+                            hash_distance(candidate.difference_hash, seen) <= 10
+                            for seen in accepted_hashes
+                        ):
+                            staged.unlink(missing_ok=True)
+                            continue
+                        os.replace(staged, Path(asset.path))
+                        accepted_hashes.append(candidate.difference_hash)
+                        asset.source_url = candidate_url
+                        asset.description += (
+                            "; locally reviewed alternative installed for set diversity"
+                        )
+                        note = (
+                            "Automatically replaced a near-duplicate generated detail "
+                            f"with a semantically pre-reviewed alternative: {asset.name}"
+                        )
+                        if note not in self.warnings:
+                            self.warnings.append(note)
+                        repaired = True
+                        break
+                    except (ApiError, MediaError, OSError):
+                        staged.unlink(missing_ok=True)
+                if repaired:
+                    continue
+                # Keep the accepted candidate when no independently reviewed,
+                # physically valid and distinct alternative exists.
+                continue
+            if (
+                asset.model == "deterministic-evidence-table"
                 or not asset.name.startswith("detail_image_")
             ):
                 continue
@@ -1753,6 +1838,32 @@ class ProductionPipelineMixin:
             if not repaired:
                 # The normal QA report retains the unresolved duplicate warning.
                 continue
+
+    @staticmethod
+    def _recorded_detail_candidate_is_eligible(review: Any) -> bool:
+        """Accept only alternatives with complete prior semantic hard-gate evidence."""
+
+        if not isinstance(review, dict):
+            return False
+        required_true = (
+            "usable",
+            "identity_consistent",
+            "construction_consistent",
+            "color_consistent",
+            "pattern_consistent",
+            "slot_match",
+            "single_composition",
+        )
+        required_not_true = (
+            "unwanted_text",
+            "unwanted_brand_or_logo",
+            "prohibited_visual",
+            "major_artifacts",
+            "unexpected_collage",
+        )
+        return all(review.get(field) is True for field in required_true) and all(
+            review.get(field) is not True for field in required_not_true
+        )
 
     def _write_strategy_document(
         self,

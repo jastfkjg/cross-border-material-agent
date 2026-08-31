@@ -7,6 +7,7 @@ import os
 import shutil
 import struct
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -733,4 +734,57 @@ def inspect_video(path: Path) -> dict[str, Any]:
     if completed.returncode != 0:
         raise MediaError(f"Video cannot be decoded completely: {completed.stderr[-1200:]}")
     result["decoded"] = True
+    # Supply objective temporal evidence for local-only fallbacks that cannot be
+    # uploaded to a reviewer model. This never claims semantic quality; it only
+    # distinguishes an unchanged frame from a presentation with visible change.
+    if Image is not None:
+        try:
+            with tempfile.TemporaryDirectory(prefix="agent-video-frames-") as temporary:
+                frame_pattern = str(Path(temporary) / "frame-%02d.png")
+                sample = subprocess.run(
+                    [
+                        ffmpeg,
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-nostdin",
+                        "-i",
+                        str(path),
+                        "-vf",
+                        "fps=1",
+                        "-frames:v",
+                        "10",
+                        frame_pattern,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                if sample.returncode == 0:
+                    hashes = [
+                        quality.difference_hash
+                        for frame in sorted(Path(temporary).glob("frame-*.png"))
+                        for quality in [inspect_image_quality(frame)]
+                        if quality is not None
+                    ]
+                    changes = [
+                        hash_distance(left, right)
+                        for left, right in zip(hashes, hashes[1:])
+                    ]
+                    result["temporal_samples"] = len(hashes)
+                    result["temporal_changed_pairs"] = sum(
+                        distance > 4 for distance in changes
+                    )
+                    result["temporal_pair_count"] = len(changes)
+                    result["temporal_change_ratio"] = (
+                        round(sum(distance > 4 for distance in changes) / len(changes), 3)
+                        if changes
+                        else 0.0
+                    )
+        except (OSError, subprocess.TimeoutExpired, MediaError):
+            # Full decode and physical validity already succeeded. Optional
+            # temporal telemetry must never turn a playable delivery into a
+            # process failure.
+            pass
     return result

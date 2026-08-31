@@ -69,6 +69,36 @@ class PromptParsingTests(unittest.TestCase):
         self.assertTrue(str(paths.output_dir).endswith("/workspace/output"))
 
 
+class CandidateRecoveryContractTests(unittest.TestCase):
+    def test_duplicate_recovery_requires_complete_prior_semantic_acceptance(self) -> None:
+        accepted = {
+            "usable": True,
+            "identity_consistent": True,
+            "construction_consistent": True,
+            "color_consistent": True,
+            "pattern_consistent": True,
+            "slot_match": True,
+            "single_composition": True,
+            "unwanted_text": False,
+            "unwanted_brand_or_logo": False,
+            "prohibited_visual": False,
+            "major_artifacts": False,
+            "unexpected_collage": False,
+        }
+
+        self.assertTrue(Pipeline._recorded_detail_candidate_is_eligible(accepted))
+        self.assertFalse(
+            Pipeline._recorded_detail_candidate_is_eligible(
+                {**accepted, "identity_consistent": False}
+            )
+        )
+        missing_evidence = dict(accepted)
+        missing_evidence.pop("slot_match")
+        self.assertFalse(
+            Pipeline._recorded_detail_candidate_is_eligible(missing_evidence)
+        )
+
+
 class ComplianceTests(unittest.TestCase):
     def test_generated_contact_and_price_are_rejected(self) -> None:
         violations = generated_copy_violations(
@@ -1532,8 +1562,8 @@ Natural localized overview.
 
         self.assertNotRegex(rendered["en"].splitlines()[0], r"[\u4e00-\u9fff]")
         self.assertIn("| Product | 100157 | Material | 1001111 | Viscose |", rendered["en"])
-        self.assertIn("Listed material", rendered["en"])
-        self.assertNotIn("| Main material | Viscose |", rendered["en"])
+        self.assertIn("| Main material | Viscose |", rendered["en"])
+        self.assertIn("| Main material content | Under 30% |", rendered["en"])
         self.assertIn(
             "One Size — 40–60 kg (88.2–132.3 lb)", rendered["en"]
         )

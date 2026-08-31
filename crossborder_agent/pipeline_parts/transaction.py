@@ -23,7 +23,7 @@ from ..media import (
     inspect_video,
     normalize_image,
 )
-from ..localization import generate_copy_payload
+from ..localization import _fallback_payload, generate_copy_payload
 from ..models import (
     AgentActionResult,
     AssetResult,
@@ -39,6 +39,98 @@ from .common import (
 
 
 class TransactionPipelineMixin:
+    def _repair_final_contract(
+        self,
+        *,
+        errors: list[str],
+        facts: ProductFacts,
+        taxonomy: TaxonomyResult,
+        creative_plan: CreativePlan,
+        state: RunState,
+        localization_payloads: dict[str, dict[str, Any]],
+        localization_sources: dict[str, str],
+        work_dir: Path,
+        downloads_dir: Path,
+        plan_model: str,
+    ) -> None:
+        """Repair objective final-contract failures before the atomic commit."""
+
+        joined = "\n".join(errors)
+        for filename in ("main_image.jpeg", *[f"detail_image_{i}.jpeg" for i in range(1, 6)]):
+            if filename in joined or (
+                filename == "main_image.jpeg" and "Main image" in joined
+            ):
+                (work_dir / filename).unlink(missing_ok=True)
+        if "video" in joined.casefold() or "product_video.mp4" in joined:
+            (work_dir / "product_video.mp4").unlink(missing_ok=True)
+
+        affected_languages = {
+            language
+            for language in ("en", "ko", "pt")
+            if f"product_description_{language}.md" in joined
+        }
+        for language in affected_languages:
+            recovery_client = (
+                self.client
+                if self.client is not None
+                and self.client.operation_available("chat")
+                and self.deadline - time.monotonic() > 150
+                else None
+            )
+            try:
+                payload, source = generate_copy_payload(
+                    language,
+                    facts,
+                    taxonomy,
+                    creative_plan,
+                    recovery_client,
+                    claim_ledger=state.claim_ledger,
+                    agent_guidance=(
+                        "Repair only the final deterministic contract failures while preserving grounded, native-market copy."
+                    ),
+                    revision_feedback=(
+                        "The previous rendered delivery failed objective validation: "
+                        + "; ".join(
+                            error for error in errors
+                            if f"product_description_{language}.md" in error
+                        )[:2500]
+                    ),
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Model-assisted final copy repair failed for %s; using the complete source-grounded availability projection: %s",
+                    language,
+                    exc,
+                )
+                payload = _fallback_payload(language, facts, taxonomy)
+                source = "contract-availability-fallback"
+            localization_payloads[language] = payload
+            localization_sources[language] = source
+
+        self._write_localized_descriptions(
+            facts,
+            taxonomy,
+            creative_plan,
+            localization_payloads,
+            state.assets,
+            work_dir,
+            state.visual_set_review,
+        )
+        if "strategy_document.md" in joined:
+            (work_dir / "strategy_document.md").unlink(missing_ok=True)
+        self._ensure_minimum_delivery(
+            facts=facts,
+            taxonomy=taxonomy,
+            creative_plan=creative_plan,
+            state=state,
+            localization_payloads=localization_payloads,
+            localization_sources=localization_sources,
+            work_dir=work_dir,
+            downloads_dir=downloads_dir,
+            plan_model=plan_model,
+            reason="final objective contract repair: " + "; ".join(errors)[:1800],
+        )
+
     @staticmethod
     def _artifact_hash(path: Path) -> str:
         if not path.is_file():

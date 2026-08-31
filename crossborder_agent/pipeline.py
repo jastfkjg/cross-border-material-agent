@@ -625,11 +625,34 @@ class Pipeline(
             for warning in report.warnings:
                 self.logger.warning("Delivery warning: %s", warning)
             if not report.valid:
-                warning = "Deterministic delivery validation still has issues: " + "; ".join(
-                    report.errors
+                self.logger.warning(
+                    "Objective delivery validation found repairable contract errors; entering final recovery: %s",
+                    "; ".join(report.errors),
                 )
-                self.warnings.append(warning)
-                self.logger.error(warning)
+                self._repair_final_contract(
+                    errors=report.errors,
+                    facts=facts,
+                    taxonomy=taxonomy,
+                    creative_plan=creative_plan,
+                    state=state,
+                    localization_payloads=localization_payloads,
+                    localization_sources=localization_sources,
+                    work_dir=work_dir,
+                    downloads_dir=downloads_dir,
+                    plan_model=plan_model,
+                )
+                report = validate_delivery(work_dir, facts, taxonomy)
+                self.trace.emit(
+                    "qa.final_contract_repair",
+                    valid=report.valid,
+                    errors=report.errors,
+                    warnings=report.warnings,
+                )
+                if not report.valid:
+                    raise PipelineError(
+                        "Final contract repair did not produce a valid snapshot: "
+                        + "; ".join(report.errors)
+                    )
 
             self.trace.emit(
                 "decision.final_snapshot",
@@ -777,6 +800,25 @@ class Pipeline(
                 finally:
                     self.client = saved_client
             recovery_report = validate_delivery(work_dir, facts, taxonomy)
+            if not recovery_report.valid:
+                self._repair_final_contract(
+                    errors=recovery_report.errors,
+                    facts=facts,
+                    taxonomy=taxonomy,
+                    creative_plan=creative_plan,
+                    state=state,
+                    localization_payloads=localization_payloads,
+                    localization_sources=localization_sources,
+                    work_dir=work_dir,
+                    downloads_dir=downloads_dir,
+                    plan_model="exception-contract-recovery",
+                )
+                recovery_report = validate_delivery(work_dir, facts, taxonomy)
+                if not recovery_report.valid:
+                    raise PipelineError(
+                        "Exception recovery could not satisfy the delivery contract: "
+                        + "; ".join(recovery_report.errors)
+                    )
             self.trace.emit(
                 "run.degraded_snapshot",
                 trigger=recovery_reason,
