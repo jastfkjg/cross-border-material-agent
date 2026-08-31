@@ -1738,6 +1738,11 @@ class ProductionPipelineMixin:
             "color_variant_grid": "已核验颜色组合",
             "hem_and_trim": "下摆与收边细节",
             "back_silhouette": "背面轮廓",
+            "neckline_closeup": "领口结构近景",
+            "pattern_texture": "图案与表面近景",
+            "sleeve_cuff": "袖口结构近景",
+            "back_view": "商品背面",
+            "hem_shape": "下摆轮廓",
             "data_table": "来源数据表",
         }
 
@@ -1770,17 +1775,6 @@ class ProductionPipelineMixin:
             for item in reconciled.get("attribute_decisions", [])
             if isinstance(item, dict)
         ]
-        decision_counts = {"publish": 0, "reject": 0, "machine_only": 0}
-        for item in decision_rows:
-            if not isinstance(item, dict):
-                continue
-            decision = str(item.get("decision") or "publish")
-            if decision in decision_counts:
-                decision_counts[decision] += 1
-        conflict_count = sum(
-            isinstance(item, dict) for item in reconciled.get("conflicts", [])
-        )
-
         market_labels = {
             "en": "美国英语（en-US）",
             "ko": "韩国市场（ko-KR）",
@@ -1809,19 +1803,67 @@ class ProductionPipelineMixin:
             )
 
         if decision_rows:
+            published: list[str] = []
+            withheld: list[str] = []
+            for row in decision_rows:
+                index = row.get("attribute_index")
+                if not isinstance(index, int) or not 0 <= index < len(facts.attributes):
+                    continue
+                source = facts.attributes[index]
+                decision = str(row.get("decision") or "publish")
+                if decision == "publish" and len(published) < 5:
+                    published.append(f"{source.name}={source.value}")
+                elif decision != "publish" and len(withheld) < 3:
+                    withheld.append(f"{source.name}={source.value}")
+            conflict_summaries = []
+            for conflict in reconciled.get("conflicts", []):
+                if not isinstance(conflict, dict) or len(conflict_summaries) >= 3:
+                    continue
+                structured = " ".join(str(conflict.get("structured_value") or "").split())
+                visual = " ".join(str(conflict.get("visual_value") or "").split())
+                if structured and visual:
+                    conflict_summaries.append(
+                        f"卖家声明“{structured}”，源图核验为“{visual}”，公开外观采用源图结果"
+                    )
             fact_decision_lines = [
-                f"本次共读取 {len(facts.attributes)} 条商品属性、{len(facts.skus)} 个 SKU、"
-                f"{len(facts.all_image_urls())} 个不重复源图片 URL；识别到 {conflict_count} 组需要裁决的事实冲突。",
-                f"属性处理结果为：{decision_counts['publish']} 项可发布、{decision_counts['reject']} 项拒绝发布、"
-                f"{decision_counts['machine_only']} 项仅保留在机器层。",
+                "可用于买家表达的主要事实："
+                + ("、".join(published) if published else "以源数据和源图共同确认的商品特征为准")
+                + "。",
+                "未直接进入买家文案的声明："
+                + ("；".join(withheld) if withheld else "无需要特别说明的冲突项")
+                + "。这些字段仍可在有来源依据的平台映射中保留，但不会驱动无依据的视觉生成。",
             ]
+            if conflict_summaries:
+                fact_decision_lines.append("本次关键冲突处理：" + "；".join(conflict_summaries) + "。")
         else:
             fact_decision_lines = [
-                f"本次共读取 {len(facts.attributes)} 条商品属性、{len(facts.skus)} 个 SKU、"
-                f"{len(facts.all_image_urls())} 个不重复源图片 URL。",
                 "本次运行未产生独立的视觉冲突裁决明细；公开事实仍只取自源数据、可直接核验的源图信息和确定性换算，"
                 "无法确认的字段不进入扩展性营销表达。",
             ]
+
+        category_method = str(taxonomy.category.method or "").casefold()
+        if "react" in category_method or "model" in category_method:
+            category_selection_note = (
+                "本次叶子类目由模型在平台快照中自主检索候选、读取关系并提交选择，代码负责验证节点存在、"
+                "确为叶子类目且映射 ID 可回查。"
+            )
+        else:
+            category_selection_note = (
+                "本次未使用模型类目探索，采用通用的本地证据排序保住可交付性；提交前仍校验类目节点和映射 ID，"
+                "但该结果的语义置信度低于模型完成的平台检索。"
+            )
+
+        model_locales = [
+            language
+            for language, source in localization_sources.items()
+            if source and "fallback" not in source and "guard" not in source
+        ]
+        localization_delivery_note = (
+            "本次三种语言均由目标语种写作模型起草，并经过独立事实审校；机器附录再由代码从平台映射确定性生成。"
+            if len(model_locales) == 3
+            else "本次至少一种语言启用了可用性保底；保底文案仍从裁决后事实生成，且保持机器附录完整，"
+            "不会用固定商品答案替代未知语义。"
+        )
 
         video_asset = next(
             (item for item in state.assets if item.name == "product_video.mp4"), None
@@ -1835,6 +1877,20 @@ class ProductionPipelineMixin:
                 "使用最终通过质检的图片组成短时目录式展示，确保视频可播放且与最终图片版本一致。"
             )
 
+        selected_table = select_render_table(facts.evidence_tables)
+        if selected_table is not None:
+            table_strategy = (
+                "源图片中的表格已通过引用、行列和展示用途校验，并按模型选择的内容进入详情与文案附录；"
+                "代码只复现被引用的原始单元格，不补造字段。"
+            )
+        elif facts.evidence_tables:
+            table_strategy = (
+                "源图片中虽识别到结构化表格，但模型未将其判定为适合本次交付的购买信息，因此不向买家承诺"
+                "不存在的尺码表或测量数据。"
+            )
+        else:
+            table_strategy = "源图片中没有可安全转写的表格，文案只使用结构化商品与 SKU 事实。"
+
         lines = [
             "# 商品本地化素材生成策略说明",
             "",
@@ -1846,9 +1902,10 @@ class ProductionPipelineMixin:
             f"- AliExpress 叶子类目：{taxonomy.category.name}（{taxonomy.category.category_id}）",
             "- 交付目标：形成可直接进入上架流程的三语文案、1 张主图、5 张职责互补的详情图和 1 个商品视频。",
             "",
-            "本次策略以“先确认商品事实，再组织市场表达，最后完成跨素材一致性验收”为主线。"
-            "视觉上保持同一商品身份和统一的商业质感；信息上把买家阅读层与平台解析层分开，"
-            "兼顾本地化体验和上架字段完整性。",
+            "Agent 的整体流程是：① 汇总商品 JSON、SKU 与源图；② 优先由模型探索平台类目并解释语义选择；"
+            "③ 将结构化声明与可见外观统一裁决；④ 从同一事实状态生成三语文案和六图视觉叙事；"
+            "⑤ 对单项素材和整组交付做一致性复核，只有更安全的候选才替换当前成品。"
+            "买家阅读层与平台解析层分别组织，因此自然表达不会破坏 ID、SKU 和枚举值的准确性。",
             "",
             "## 2. 事实一致性与源数据冲突处理",
             "",
@@ -1857,9 +1914,7 @@ class ProductionPipelineMixin:
             "而是将可见事实、仅机器保留字段和拒绝发布字段分开处理。",
             "",
             *fact_decision_lines,
-            f"从源详情图核验并结构化 {len(facts.evidence_tables)} 个表格、"
-            f"{sum(len(table.cells) for table in facts.evidence_tables)} 个原始单元格；"
-            "表格用途、展示列、展示行和详情图位置由模型根据来源证据决定，代码只验证引用并执行。",
+            table_strategy,
             "所有三语文案、图片提示和媒体说明共享同一份裁决后事实。任何数值转换只执行确定性换算，"
             "不补全材质含量、性能、认证、地区尺码或其他源数据未支持的信息。",
             "",
@@ -1873,13 +1928,15 @@ class ProductionPipelineMixin:
             "类目选择以商品类型、使用人群、形态和已核验属性为依据，并只接受平台快照中存在的叶子节点。"
             "最终提交的属性 ID、枚举 Value ID、销售属性和 SKU 组合均回查平台数据关系；证据不足的必填项保留为未决，"
             "不通过猜测补齐。",
+            category_selection_note,
             schema_note,
             "",
             "## 4. 三个目标市场的本地化策略",
             "",
             *market_lines,
             "",
-            "- 买家文案按 Feature → 可见结构优势 → 保守购买价值组织；任一步缺少事实或像素证据时停止延伸。",
+            f"- {localization_delivery_note}",
+            "- 买家文案按商品特征 → 可核验结构 → 保守购买价值组织；任一步缺少事实或像素证据时停止延伸。",
             "- 买家文案与机器附录独立构建：模型只生成标题、概述、卖点和尺码提示；代码从已核验的类目、属性、"
             "SKU 和媒体契约确定性渲染附录，保证三种语言中的商品 ID、URL、平台映射和 SKU 信息一致。",
             "",

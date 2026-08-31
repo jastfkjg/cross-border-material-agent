@@ -128,6 +128,18 @@ class TaxonomyAgentSmokeTests(unittest.TestCase):
             ),
         ]
 
+    def test_phase_catalog_exposes_structured_batch_queries(self) -> None:
+        for names in (
+            TaxonomyExplorer.CATEGORY_TOOL_NAMES,
+            TaxonomyExplorer.ATTRIBUTE_TOOL_NAMES,
+        ):
+            self.assertIn("query_taxonomy", names)
+            self.assertIn("read_taxonomy", names)
+            schemas = TaxonomyExplorer.openai_tools(names)
+            exposed = {item["function"]["name"] for item in schemas}
+            self.assertIn("query_taxonomy", exposed)
+            self.assertIn("read_taxonomy", exposed)
+
     def test_generic_tools_query_records_and_reject_ungrounded_finish(self) -> None:
         explorer = TaxonomyExplorer(self.tree, self.attributes)
         premature, rejection = explorer.finish_category(

@@ -102,6 +102,7 @@ class OfflinePipelineTests(unittest.TestCase):
                     "巴西葡萄牙语（pt-BR）",
                     "main_image.jpeg｜转化入口",
                     "product_video.mp4｜动态总览",
+                    "Agent 的整体流程是",
                 ):
                     self.assertIn(expected, strategy)
                 for internal_log_section in (
@@ -112,6 +113,8 @@ class OfflinePipelineTests(unittest.TestCase):
                     "API 失败摘要",
                     "运行质检记录",
                     "单模型证据惩罚分",
+                    "本次共读取",
+                    "个原始单元格",
                 ):
                     self.assertNotIn(internal_log_section, strategy)
             finally:

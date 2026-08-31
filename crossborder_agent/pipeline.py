@@ -722,18 +722,46 @@ class Pipeline(
                 )
             if self.client is not None:
                 state.api_calls = self.client.metrics
-            self._ensure_minimum_delivery(
-                facts=facts,
-                taxonomy=taxonomy,
-                creative_plan=creative_plan,
-                state=state,
-                localization_payloads=localization_payloads,
-                localization_sources=localization_sources,
-                work_dir=work_dir,
-                downloads_dir=downloads_dir,
-                plan_model=plan_model,
-                reason=recovery_reason,
-            )
+            try:
+                self._ensure_minimum_delivery(
+                    facts=facts,
+                    taxonomy=taxonomy,
+                    creative_plan=creative_plan,
+                    state=state,
+                    localization_payloads=localization_payloads,
+                    localization_sources=localization_sources,
+                    work_dir=work_dir,
+                    downloads_dir=downloads_dir,
+                    plan_model=plan_model,
+                    reason=recovery_reason,
+                )
+            except Exception as recovery_exc:
+                # A model-backed recovery may itself lose its service or time
+                # budget. Retry the same availability boundary without remote
+                # dependencies before allowing a valid-input run to exit.
+                self.logger.exception(
+                    "模型辅助保底异常，切换到纯本地交付保底: %s", recovery_exc
+                )
+                saved_client = self.client
+                self.client = None
+                try:
+                    self._ensure_minimum_delivery(
+                        facts=facts,
+                        taxonomy=taxonomy,
+                        creative_plan=creative_plan,
+                        state=state,
+                        localization_payloads=localization_payloads,
+                        localization_sources=localization_sources,
+                        work_dir=work_dir,
+                        downloads_dir=downloads_dir,
+                        plan_model="local-availability-recovery",
+                        reason=(
+                            f"{recovery_reason}; recovery={type(recovery_exc).__name__}: "
+                            f"{recovery_exc}"
+                        ),
+                    )
+                finally:
+                    self.client = saved_client
             recovery_report = validate_delivery(work_dir, facts, taxonomy)
             self.trace.emit(
                 "run.degraded_snapshot",

@@ -594,13 +594,29 @@ class TransactionPipelineMixin:
 
         for language in ("en", "ko", "pt"):
             if not isinstance(localization_payloads.get(language), dict):
+                # Recovery still prefers model-authored prose when the chat
+                # capability and a safe commit reserve survive. The same
+                # function owns validation and falls back deterministically if
+                # that one bounded draft fails.
+                recovery_client = (
+                    self.client
+                    if self.client is not None
+                    and self.client.operation_available("chat")
+                    and self.deadline - time.monotonic() > 90
+                    else None
+                )
                 payload, source = generate_copy_payload(
                     language,
                     facts,
                     taxonomy,
                     creative_plan,
-                    None,
+                    recovery_client,
                     claim_ledger=state.claim_ledger,
+                    agent_guidance=(
+                        "This is an availability recovery. Produce a complete, conservative draft from the supplied "
+                        "evidence; omit uncertain claims and do not mention the runtime failure."
+                    ),
+                    audit_valid_draft=False,
                 )
                 localization_payloads[language] = payload
                 localization_sources[language] = source

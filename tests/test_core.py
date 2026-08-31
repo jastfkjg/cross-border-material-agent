@@ -22,6 +22,7 @@ from crossborder_agent.input_loader import (
 from crossborder_agent.localization import (
     _fallback_payload,
     _localized_concept_is_mentioned,
+    _localized_display,
     _payload_validation_error,
     generate_copy_payload,
     render_description,
@@ -505,6 +506,36 @@ class VisualSelectionTests(unittest.TestCase):
 
         self.assertTrue(report.valid, report.errors)
         self.assertEqual(produced, EXPECTED_FILES)
+
+    def test_pipeline_retries_recovery_without_remote_dependencies(self) -> None:
+        original = Pipeline._ensure_minimum_delivery
+        attempts = 0
+
+        def flaky_recovery(pipeline, *args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 2:
+                raise RuntimeError("synthetic recovery boundary failure")
+            return original(pipeline, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory(prefix="agent-nested-recovery-") as temporary:
+            output_dir = Path(temporary) / "output"
+            with mock.patch.object(
+                Pipeline, "_ensure_minimum_delivery", new=flaky_recovery
+            ):
+                state = Pipeline(
+                    input_dir=DATA,
+                    output_dir=output_dir,
+                    product_id="5758364264251",
+                    logger=logging.getLogger("nested-recovery-test"),
+                    offline=True,
+                    run_profile="fast",
+                    timeout_seconds=240,
+                ).run()
+            report = validate_delivery(output_dir, state.facts, state.taxonomy)
+
+        self.assertGreaterEqual(attempts, 3)
+        self.assertTrue(report.valid, report.errors)
 
     def test_detail_fallback_plan_balances_distinct_views_and_detail_crops(self) -> None:
         facts = load_product_facts(
@@ -1352,6 +1383,35 @@ class FactAndTaxonomyTests(unittest.TestCase):
             set(payload["localized_terms"]),
         )
         self.assertEqual(error, "source-script-contamination-guard")
+
+    def test_copy_rejects_reference_to_an_absent_size_chart(self) -> None:
+        facts = load_product_facts(DATA / "product_info/product_5758364264251.json")
+        taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
+        payload = _fallback_payload("en", facts, taxonomy)
+        payload["fit_note"] = "Consult the provided size chart for detailed measurements."
+
+        error = _payload_validation_error(
+            "en",
+            payload,
+            facts,
+            taxonomy,
+            set(payload["media_descriptions"]),
+            set(payload["localized_terms"]),
+        )
+        self.assertEqual(error, "missing-size-chart-reference-guard")
+
+    def test_category_path_uses_translated_segments_not_lossy_whole_path(self) -> None:
+        rendered = _localized_display(
+            "en",
+            "女装/上衣/T恤",
+            {
+                "女装/上衣/T恤": "Marketplace category",
+                "女装": "Women’s clothing",
+                "上衣": "Tops",
+                "T恤": "T-shirts",
+            },
+        )
+        self.assertEqual(rendered, "Women’s clothing/Tops/T-shirts")
 
     def test_fast_copy_skips_second_model_call_when_draft_is_valid(self) -> None:
         facts = load_product_facts(DATA / "product_info/product_5758364264251.json")

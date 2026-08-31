@@ -124,6 +124,10 @@ class ResilienceTests(unittest.TestCase):
         )
         self.assertEqual(_failure_category(400, message), "invalid_request")
 
+    def test_provider_model_not_exist_message_disables_missing_capability(self) -> None:
+        message = '{"code":"InvalidParameter","message":"Model not exist."}'
+        self.assertEqual(_failure_category(404, message), "model_configuration")
+
     def test_video_configuration_failure_disables_capability_for_repairs(self) -> None:
         config = ApiConfig(
             api_key="test",

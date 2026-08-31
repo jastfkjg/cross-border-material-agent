@@ -73,7 +73,14 @@ def _failure_category(status_code: int | None, message: str) -> str:
     ):
         return "invalid_request"
     if status_code == 404 and any(
-        token in lowered for token in ("not found", "does not exist", "unsupported")
+        token in lowered
+        for token in (
+            "not found",
+            "not exist",
+            "does not exist",
+            "unsupported",
+            "model_not_found",
+        )
     ):
         return "model_configuration"
     if status_code == 400 and any(
@@ -905,7 +912,7 @@ Return JSON with these top-level keys:
 - index: zero-based integer
 - usable: boolean
 - identity_consistent: boolean
-- construction_consistent: boolean (compare every component, edge, fastening, trim and surface design actually visible in the sources)
+- construction_consistent: boolean (compare every component, edge, fastening, trim, silhouette proportion and surface design actually visible in the sources)
 - color_consistent: boolean
 - pattern_consistent: boolean
 - slot_match: boolean (whether this asset fulfills its intended storyboard purpose)
@@ -935,6 +942,9 @@ Judge the six assets as one commercial collection after judging each image. Pena
 angles, repeated crops, repeated backgrounds or two slots that communicate the same shopper value even
 when each image is individually usable. Do not call faithful consistency a duplicate when framing and
 commercial purpose are clearly distinct. A deterministic source-data table may be visually different by design.
+For close-up roles, require a real, recognizable area of the product rather than a detached rectangular
+texture swatch or synthesized sample. Mark slot_match false when the assigned feature is too small, the crop
+is arbitrary, excessive blank space weakens the presentation, or the image adds no clear buyer decision.
 
 Verified facts:
 {facts_json}
@@ -1028,6 +1038,10 @@ Evaluate critical_structure_unambiguous as a quality signal relative to the inte
 purpose, not as an automatic rejection. A close-up does not need to show the complete product: it must
 clearly show its assigned local feature plus enough identity anchors to connect it to the verified
 product. Reject only when the crop causes actual product-identity drift or fails the assigned slot.
+Do not accept a detached rectangular swatch, synthesized sample, or floating fragment as a product close-up
+unless the sellable product itself is a swatch/sample. Mark slot_match false when the assigned feature is too
+small, pattern placement or density drifts from the source, the crop is arbitrary, or excessive unused space
+makes the image commercially weak.
 Full-view, variant and person-context slots should keep every source-visible category-defining section recognizable.
 For a variant lineup, each item must remain unambiguously the same product; a folded, occluded or cropped
 source-visible component must not make the candidate appear to have different construction.

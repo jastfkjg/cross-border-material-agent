@@ -966,6 +966,13 @@ def _source_terms(facts: ProductFacts, taxonomy: TaxonomyResult) -> set[str]:
         taxonomy.category.name,
         taxonomy.category.path,
     }
+    # Render category paths segment by segment so a weak whole-path
+    # translation cannot collapse a useful hierarchy into a generic label.
+    terms.update(
+        part.strip()
+        for part in taxonomy.category.path.split("/")
+        if part.strip()
+    )
     # Include every shopper-safe source field rather than a benchmark-derived
     # apparel whitelist. Unknown product types can therefore still render their
     # real attributes in the machine appendix.
@@ -1185,10 +1192,95 @@ def _compose_copy_layers(
                 isinstance(value, str)
                 and value.strip()
                 and not re.search(r"[\u4e00-\u9fff]", value)
+                and value.strip() not in _UNTRANSLATED_VALUES
             ):
                 localized_terms[term] = value.strip()
     payload["localized_terms"] = localized_terms
     return payload
+
+
+_UNAVAILABLE_SIZE_REFERENCE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "en": (
+        "size chart",
+        "measurement chart",
+        "detailed measurements",
+        "provided measurements",
+        "specific garment measurements",
+    ),
+    "ko": ("사이즈표", "사이즈 표", "상세 치수", "실측 치수"),
+    "pt": ("tabela de medidas", "medidas detalhadas", "medidas específicas"),
+}
+
+
+def _copy_evidence_contract(facts: ProductFacts) -> dict[str, Any]:
+    """Expose which evidence a buyer-facing reference can safely target.
+
+    Source vision may contain a table that the model deliberately chose not to
+    publish. Making that delivery decision explicit prevents a copywriter from
+    promising a chart or detailed measurements that will not exist in output.
+    """
+
+    selected_table = select_render_table(facts.evidence_tables)
+    table_summary: dict[str, Any] | None = None
+    if selected_table is not None:
+        presentation = selected_table.presentation
+        table_summary = {
+            "table_id": selected_table.table_id,
+            "localized_titles": presentation.get("titles", {}),
+            "display_locale": presentation.get("display_locale", ""),
+            "notes": presentation.get("notes", []),
+        }
+    seller_size_labels = list(
+        dict.fromkeys(
+            [item.source_label for item in facts.size_conversions if item.source_label]
+            + [
+                item.value
+                for item in facts.attributes
+                if item.value
+                and re.search(r"(?:尺码|适合身高|\bsize\b)", item.name, re.I)
+            ]
+            + [
+                item.value
+                for sku in facts.skus
+                for item in sku.attributes
+                if item.value
+                and re.search(r"(?:尺码|适合身高|\bsize\b)", item.name, re.I)
+            ]
+        )
+    )
+    return {
+        "rendered_source_table_available": selected_table is not None,
+        "rendered_source_table": table_summary,
+        "seller_size_labels": seller_size_labels[:40],
+        "structured_size_guidance": [
+            {
+                "source_label": item.source_label,
+                "kilograms": item.kilograms,
+                "pounds": item.pounds,
+            }
+            for item in facts.size_conversions[:30]
+        ],
+        "reference_policy": (
+            "A selected source table will appear in the delivered description. Refer only to its supplied "
+            "localized title and exact content; do not invent missing measurements."
+            if selected_table is not None
+            else "No source table will appear in the delivered description. Do not direct shoppers to a size "
+            "chart, measurement chart, detailed measurements, or another absent table. Discuss only the listed "
+            "option labels or structured guidance above."
+        ),
+    }
+
+
+def _has_unavailable_size_reference(
+    language: str, text: str, facts: ProductFacts
+) -> bool:
+    if select_render_table(facts.evidence_tables) is not None:
+        return False
+    normalized = str(text or "").casefold()
+    return any(
+        phrase.casefold() in normalized
+        for phrase in _UNAVAILABLE_SIZE_REFERENCE_PATTERNS[language]
+    )
 
 
 def _verified_fit_note(language: str, facts: ProductFacts, fallback_note: str) -> str:
@@ -1210,6 +1302,8 @@ def _verified_fit_note(language: str, facts: ProductFacts, fallback_note: str) -
             "ko": "구매 전 판매자가 제공한 상품 사양과 옵션 표기를 확인해 주세요.",
             "pt": "Consulte as especificações e opções informadas pelo vendedor antes da compra.",
         }[language]
+    if _has_unavailable_size_reference(language, fallback_note, facts):
+        return str(_FALLBACK_CONTENT[language]["fit_note"])
     return fallback_note
 
 
@@ -1412,6 +1506,8 @@ def _payload_validation_error(
     }
     if any(phrase in natural_text.casefold() for phrase in unsupported_fit_claims[language]):
         return "unsupported-fit-guidance-guard"
+    if _has_unavailable_size_reference(language, natural_text, facts):
+        return "missing-size-chart-reference-guard"
     normalized_overview = re.sub(
         r"[^\w\uac00-\ud7a3]+", "", str(payload["overview"]).casefold()
     )
@@ -2182,6 +2278,7 @@ def generate_copy_payload(
         if claim_ledger
         else "No separate ledger supplied; use only the verified product facts below."
     )
+    evidence_contract = _copy_evidence_contract(facts)
     system = f"""
 You are a native {locale["locale"]} e-commerce copywriter and a strict factual editor.
 Write {locale["description"]}. Return JSON only.
@@ -2226,6 +2323,8 @@ or SKU matrix.
 Call source size labels "seller-listed sizes", never standard, universal or true-to-size. Source-image
 tables are rendered separately from exact cells according to the model's grounded presentation decision;
 do not infer new prose claims, missing fields, units, conversions or category semantics from table layout.
+The evidence-availability contract states whether a source table will actually appear in the delivered
+description. Never direct shoppers to a chart, table or detailed measurements that the contract says are absent.
 For en-US, use US spelling and concise marketplace phrasing. For ko-KR, use natural Korean retail
 sentence endings and Korean option terminology. For pt-BR, use Brazilian vocabulary and forms such
 as produto, tamanho, camiseta and consulte; avoid European Portuguese vocabulary.
@@ -2254,6 +2353,9 @@ Verified product facts:
 
 Resolved AliExpress category:
 {json.dumps({"id": taxonomy.category.category_id, "name": taxonomy.category.name, "path": taxonomy.category.path}, ensure_ascii=False)}
+
+Evidence-availability contract for sizing and table references:
+{json.dumps(evidence_contract, ensure_ascii=False)}
 
 Bounded manager localization priority:
 {agent_guidance or "Use the locale rules and verified facts above."}
@@ -2348,6 +2450,9 @@ Verified source facts:
 Resolved AliExpress category:
 {json.dumps({"id": taxonomy.category.category_id, "name": taxonomy.category.name, "path": taxonomy.category.path}, ensure_ascii=False)}
 
+Evidence-availability contract for sizing and table references:
+{json.dumps(evidence_contract, ensure_ascii=False)}
+
 Required top-level keys: title, overview, highlights, fit_note.
 Do not output media_descriptions or localized_terms. Output the corrected buyer-copy JSON object only.
 """.strip()
@@ -2411,6 +2516,9 @@ Candidate buyer copy:
 
 Verified source facts:
 {json.dumps(facts.compact_dict(), ensure_ascii=False)}
+
+Evidence-availability contract for sizing and table references:
+{json.dumps(evidence_contract, ensure_ascii=False)}
 """.strip()
         try:
             payload = client.chat_json(audit_system, repair_prompt)
@@ -2498,28 +2606,26 @@ def _escape_table(value: str) -> str:
 
 def _localized_display(language: str, value: str, term_map: dict[str, Any]) -> str:
     raw = str(value).strip()
+    if "/" in raw:
+        localized_parts = [
+            _localized_display(language, part.strip(), term_map)
+            for part in raw.split("/")
+            if part.strip()
+        ]
+        localized_parts = [part for part in localized_parts if part != "—"]
+        if localized_parts:
+            return "/".join(localized_parts)
+        return {
+            "en": "Marketplace category",
+            "ko": "마켓플레이스 카테고리",
+            "pt": "Categoria do marketplace",
+        }[language]
     translated = term_map.get(raw)
     if isinstance(translated, str) and translated.strip():
         rendered = translated.strip()
     else:
         rendered = _static_localize_term(language, raw)
     if rendered in _UNTRANSLATED_VALUES:
-        if "/" in raw:
-            localized_parts = [
-                _static_localize_term(language, part.strip())
-                for part in raw.split("/")
-                if part.strip()
-            ]
-            localized_parts = [
-                part for part in localized_parts if part not in _UNTRANSLATED_VALUES
-            ]
-            if localized_parts:
-                return "/".join(localized_parts)
-            return {
-                "en": "Marketplace category",
-                "ko": "마켓플레이스 카테고리",
-                "pt": "Categoria do marketplace",
-            }[language]
         return "—"
     seller_weight = _seller_weight_display(language, raw)
     if seller_weight:

@@ -565,8 +565,8 @@ class BoundedDeliveryAgent:
             "Consistent direct observations from multiple trusted source images take precedence over a conflicting "
             "seller appearance label. Structured identifiers, measurements and non-visual business facts remain "
             "structured facts unless directly disproved by valid evidence. A fact that cannot be seen in pixels is "
-            "not thereby contradicted: material composition, marketplace attributes and other non-visual facts may "
-            "remain grounded for taxonomy or machine surfaces even when they are unsuitable for visual generation."
+            "not thereby contradicted: a source-grounded non-visual fact may remain suitable for buyer copy and "
+            "taxonomy even when it must not drive visual generation. Judge truth and surface suitability separately."
         )
         prompt = f"""
 Reconcile the structured seller facts with the compact observations from all inspected source images.
@@ -588,15 +588,17 @@ Return exactly:
 
 Rules:
 - Use attribute_index exactly as supplied; never invent an index.
-- publish means the structured value is safe for buyer-facing appearance claims.
+- publish means the structured value is source-grounded and suitable for buyer copy. Direct pixel visibility is
+  not required for structured non-visual facts such as seller-declared composition, sizing labels or season.
 - reject means trusted pixels directly contradict it.
-- machine_only means evidence is ambiguous or the value is unsuitable for buyer-facing appearance claims.
+- machine_only means the value is an identifier/operational field, genuinely ambiguous, or unsuitable for shopper
+  prose for a reason other than merely being non-visual. Explain that reason.
 - When direct source pixels conflict with structured appearance text, select the pixels for canonical_value.
 - Absence is evidence only when the relevant structure is clearly visible in multiple independent source views.
 - Do not infer materials, performance, measurements, brand, care, sizing equivalence, or unseen construction.
-- Keep surface decisions distinct: visual non-observability can limit buyer copy or media generation without
-  invalidating a source-grounded marketplace mapping. Reject a structured value only for direct contradictory
-  evidence, not because the images cannot establish it.
+- Keep surface decisions distinct: visual non-observability limits media generation, but by itself does not limit
+  buyer copy or invalidate a source-grounded marketplace mapping. Reject a structured value only for direct
+  contradictory evidence, not because the images cannot establish it.
 
 Seller title:
 {json.dumps(facts.source_title, ensure_ascii=False)}

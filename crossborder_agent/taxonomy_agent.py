@@ -73,6 +73,8 @@ class TaxonomyExplorer:
     COLLECTIONS = ("categories", "schemas", "attributes", "values")
 
     CATEGORY_TOOL_NAMES = (
+        "query_taxonomy",
+        "read_taxonomy",
         "list",
         "read",
         "search",
@@ -81,6 +83,8 @@ class TaxonomyExplorer:
         "finish_category",
     )
     ATTRIBUTE_TOOL_NAMES = (
+        "query_taxonomy",
+        "read_taxonomy",
         "list",
         "read",
         "search",
@@ -1517,11 +1521,14 @@ class TaxonomyReActAgent:
             "You are the reasoning controller of a marketplace taxonomy exploration agent. "
             "You receive a bounded workspace instead of complete snapshots in context. Start with workspace/index.json. "
             "Product evidence is in evidence/product.json; normalized categories, schemas, attributes, and values are "
-            "JSONL files below taxonomy/. Use list/read/search, or a single restricted rg/jq/find/file/ffprobe command "
-            "through bash. Use write_staging only for notes. Every taxonomy record carries a stable ref. Category "
+            "JSONL files below taxonomy/. Prefer query_taxonomy for bounded batch discovery and read_taxonomy for "
+            "exact referenced records; use list/read/search or a restricted rg/jq/find/file/ffprobe command through "
+            "bash only when the structured queries cannot express the needed inspection. Use write_staging only for "
+            "notes. Every taxonomy record carries a stable ref. Category "
             "records expose parent/child/ancestor IDs and available_schema_ids; schema, attribute and value records are "
             "linked by schema_category_id, scope and attr_id. Semantic decisions are yours; host tools only retrieve "
-            "and validate. Batch searches with one regex when practical, then read only useful line ranges. Do not guess IDs or use product "
+            "and validate. Put independent collection lookups into one query_taxonomy request when practical, then "
+            "read only useful refs. Do not guess IDs or use product "
             "identifiers/benchmark memories. Adapt after empty or ambiguous results. Every turn includes a budget "
             "notice. The last two phase turns are reserved "
             "for a validated finish and one correction, so complete prerequisite inspection before that window. "
