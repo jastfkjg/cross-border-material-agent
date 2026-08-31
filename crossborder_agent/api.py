@@ -210,7 +210,7 @@ class HttpJsonClient:
     def _remaining(self, maximum: float) -> float:
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
-            raise ApiError("全局运行截止时间已到")
+            raise ApiError("The global runtime deadline has been reached")
         return max(1.0, min(maximum, remaining))
 
     @property
@@ -253,7 +253,7 @@ class HttpJsonClient:
                 parsed = json.loads(data.decode("utf-8"))
                 if not isinstance(parsed, dict):
                     raise ApiError(
-                        "API 返回值不是 JSON 对象",
+                        "API response is not a JSON object",
                         retryable=True,
                         category="response_format",
                     )
@@ -348,11 +348,13 @@ class HttpJsonClient:
                     error=last_error,
                 )
             self.logger.warning(
-                "API 请求失败，%.1f 秒后重试: %s", delay, last_error[:500]
+                "API request failed; retrying in %.1f seconds: %s",
+                delay,
+                last_error[:500],
             )
             time.sleep(min(delay, self._remaining(delay)))
         raise ApiError(
-            last_error or "API 请求失败", retryable=True, category="unknown"
+            last_error or "API request failed", retryable=True, category="unknown"
         )
 
     def download(
@@ -360,7 +362,7 @@ class HttpJsonClient:
     ) -> None:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ApiError(f"拒绝下载非法 URL: {url!r}")
+            raise ApiError(f"Refusing to download an invalid URL: {url!r}")
         last_error = ""
         for attempt in range(4):
             try:
@@ -372,7 +374,9 @@ class HttpJsonClient:
                 ) as response:
                     content_length = response.headers.get("Content-Length")
                     if content_length and int(content_length) > max_bytes:
-                        raise ApiError(f"下载文件超过限制: {content_length} bytes")
+                        raise ApiError(
+                            f"Downloaded file exceeds the limit: {content_length} bytes"
+                        )
                     path.parent.mkdir(parents=True, exist_ok=True)
                     total = 0
                     with path.open("wb") as handle:
@@ -382,7 +386,9 @@ class HttpJsonClient:
                                 break
                             total += len(block)
                             if total > max_bytes:
-                                raise ApiError(f"下载文件超过限制: {max_bytes} bytes")
+                                raise ApiError(
+                                    f"Downloaded file exceeds the limit: {max_bytes} bytes"
+                                )
                             handle.write(block)
                 return
             except (
@@ -396,10 +402,12 @@ class HttpJsonClient:
                 last_error = str(exc)
                 path.unlink(missing_ok=True)
                 if attempt == 3:
-                    raise ApiError(f"下载失败: {last_error}") from exc
+                    raise ApiError(f"Download failed: {last_error}") from exc
                 delay = min(10.0, (2**attempt) + random.random())
                 self.logger.warning(
-                    "下载失败，%.1f 秒后重试: %s", delay, last_error[:500]
+                    "Download failed; retrying in %.1f seconds: %s",
+                    delay,
+                    last_error[:500],
                 )
                 time.sleep(min(delay, self._remaining(delay)))
 
@@ -534,7 +542,7 @@ class QwenClient:
             content = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ApiError(
-                f"Chat API 返回结构异常: {json.dumps(response, ensure_ascii=False)[:1000]}",
+                f"Chat API returned an invalid structure: {json.dumps(response, ensure_ascii=False)[:1000]}",
                 retryable=True,
                 category="response_format",
             ) from exc
@@ -577,13 +585,13 @@ class QwenClient:
             message = response["choices"][0]["message"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ApiError(
-                f"Chat tool API 返回结构异常: {json.dumps(response, ensure_ascii=False)[:1000]}",
+                f"Chat tool API returned an invalid structure: {json.dumps(response, ensure_ascii=False)[:1000]}",
                 retryable=True,
                 category="response_format",
             ) from exc
         if not isinstance(message, dict):
             raise ApiError(
-                "Chat tool API message 不是对象",
+                "Chat tool API message is not an object",
                 retryable=True,
                 category="response_format",
             )
@@ -657,20 +665,20 @@ class QwenClient:
                         parsed = json.loads(text)
                     except json.JSONDecodeError:
                         last_error = ApiError(
-                            f"模型未返回合法 JSON: {text[:1000]}",
+                            f"Model did not return valid JSON: {text[:1000]}",
                             retryable=True,
                             category="response_format",
                         )
                         if format_attempt == 0 and self.http.remaining_seconds > 90:
                             self.logger.warning(
-                                "模型 %s 返回非法 JSON，重试一次结构化评审",
+                                "Model %s returned invalid JSON; retrying structured review once",
                                 candidate_model,
                             )
                             continue
                         break
                     if not isinstance(parsed, dict):
                         last_error = ApiError(
-                            "模型 JSON 顶层不是对象",
+                            "Model JSON root is not an object",
                             retryable=True,
                             category="response_format",
                         )
@@ -680,11 +688,11 @@ class QwenClient:
                     return parsed
                 if candidate_model != models[-1] and self.http.remaining_seconds > 60:
                     self.logger.warning(
-                        "模型 %s 的结构化调用失败，切换评审回退模型: %s",
+                        "Structured call to model %s failed; switching to the review fallback model: %s",
                         candidate_model,
                         last_error,
                     )
-        raise last_error or ApiError("结构化模型调用失败")
+        raise last_error or ApiError("Structured model call failed")
 
     def chat_tool_step(
         self,
@@ -764,7 +772,7 @@ class QwenClient:
                         raise
                     if candidate_model != models[-1] and self.http.remaining_seconds > 60:
                         self.logger.warning(
-                            "模型 %s 的工具调用失败，切换回退模型: %s",
+                            "Tool call to model %s failed; switching to the fallback model: %s",
                             candidate_model,
                             exc,
                         )
@@ -772,13 +780,13 @@ class QwenClient:
                 tool_calls = message.get("tool_calls")
                 if not isinstance(tool_calls, list) or not tool_calls:
                     last_error = ApiError(
-                        "模型未调用任何可用工具",
+                        "Model did not call any available tool",
                         retryable=True,
                         category="response_format",
                     )
                     continue
                 return message
-        raise last_error or ApiError("模型工具调用失败")
+        raise last_error or ApiError("Model tool call failed")
 
     def analyze_product_images(
         self,
@@ -1226,15 +1234,22 @@ Verified facts:
                     self._disable_model_on_configuration_error(
                         self.config.image_model, exc
                     )
-                    self.logger.warning("主图像模型失败，切换回退模型: %s", exc)
+                    self.logger.warning(
+                        "Primary image model failed; switching to the fallback model: %s",
+                        exc,
+                    )
             else:
-                errors.append(f"{self.config.image_model}: 本轮已因配置错误熔断")
+                errors.append(
+                    f"{self.config.image_model}: disabled for this run after a configuration error"
+                )
             if self.http.remaining_seconds < 300:
-                errors.append("剩余时间不足 300 秒，跳过慢速图像回退模型")
+                errors.append(
+                    "Fewer than 300 seconds remain; skipping the slower image fallback model"
+                )
                 raise ApiError("; ".join(errors), retryable=False)
             if self._model_disabled(self.config.image_fallback_model):
                 errors.append(
-                    f"{self.config.image_fallback_model}: 本轮已因配置错误熔断"
+                    f"{self.config.image_fallback_model}: disabled for this run after a configuration error"
                 )
                 raise ApiError("; ".join(errors), retryable=False)
             try:
@@ -1285,7 +1300,7 @@ Verified facts:
         with self._disabled_models_lock:
             self._disabled_models.add(model)
         self.logger.error(
-            "模型 %s 因不可恢复的 %s 错误在本轮熔断",
+            "Model %s was disabled for this run after a non-recoverable %s error",
             model,
             error.category,
         )
@@ -1329,13 +1344,13 @@ Verified facts:
                     raise
                 delay = 4.0 if exc.category in {"rate_limit", "queue"} else 2.0
                 self.logger.warning(
-                    "图像模型 %s 在底层重试后仍遇到 %s，%.1f 秒后重新提交一次",
+                    "Image model %s still encountered %s after transport retries; resubmitting once in %.1f seconds",
                     model,
                     exc.category,
                     delay,
                 )
                 time.sleep(min(delay, self.http._remaining(delay)))
-        raise last_error or ApiError("图像生成失败")
+        raise last_error or ApiError("Image generation failed")
 
     def _generate_sync_images(
         self,
@@ -1395,7 +1410,7 @@ Verified facts:
         urls = _collect_urls(response, preferred_keys=("image", "url"))
         if not urls:
             raise ApiError(
-                f"图像响应没有 URL: {json.dumps(response, ensure_ascii=False)[:1000]}",
+                f"Image response has no URL: {json.dumps(response, ensure_ascii=False)[:1000]}",
                 retryable=True,
                 category="response_format",
             )
@@ -1475,13 +1490,13 @@ Verified facts:
                         )
                         raise
                     self.logger.warning(
-                        "视频任务因 %s 失败，保留时间预算后重新提交一次: %s",
+                        "Video task failed because of %s; resubmitting once while preserving the time budget: %s",
                         exc.category,
                         exc,
                     )
                     time.sleep(min(4.0, self.http._remaining(4.0)))
             else:
-                raise last_error or ApiError("视频生成失败")
+                raise last_error or ApiError("Video generation failed")
         self._record_metric(
             operation="video",
             model=self.config.video_model,
@@ -1504,7 +1519,7 @@ Verified facts:
             if urls:
                 return urls[0]
             raise ApiError(
-                f"异步响应缺少 task_id: {json.dumps(initial_response, ensure_ascii=False)[:1000]}",
+                f"Asynchronous response is missing task_id: {json.dumps(initial_response, ensure_ascii=False)[:1000]}",
                 retryable=True,
                 category="response_format",
             )
@@ -1528,7 +1543,7 @@ Verified facts:
                 urls = _collect_urls(response, preferred_keys=preferred_keys)
                 if not urls:
                     raise ApiError(
-                        "任务成功但没有返回产物 URL",
+                        "Task succeeded but returned no artifact URL",
                         retryable=True,
                         category="response_format",
                     )
@@ -1537,7 +1552,7 @@ Verified facts:
                 message = output.get("message") or response.get("message") or status
                 category = _failure_category(None, str(message))
                 raise ApiError(
-                    f"异步任务失败: {message}",
+                    f"Asynchronous task failed: {message}",
                     retryable=category
                     in {"rate_limit", "queue", "timeout", "server", "network"},
                     category=category,
@@ -1545,7 +1560,7 @@ Verified facts:
             time.sleep(min(delay, self.http._remaining(delay)))
             delay = min(15.0, delay * 1.35)
         raise ApiError(
-            f"异步任务轮询超时: {task_id}",
+            f"Asynchronous task polling timed out: {task_id}",
             retryable=True,
             category="timeout",
         )

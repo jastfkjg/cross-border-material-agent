@@ -105,9 +105,9 @@ class EvidencePipelineMixin:
     def _analyze_source_images(self, facts: ProductFacts) -> dict[str, Any]:
         if self.client is None:
             self.warnings.append(
-                "显式离线模式：跳过源图片视觉理解"
+                "Explicit offline mode: source-image visual understanding was skipped"
                 if self.offline
-                else "模型配置不可用，跳过源图片视觉理解"
+                else "Model configuration is unavailable; source-image visual understanding was skipped"
             )
             return {}
         self._ensure_time(10 * 60)
@@ -175,26 +175,32 @@ class EvidencePipelineMixin:
             for item in source_images
         )
         self.logger.info(
-            "完成 %d/%d 张源图片的分批视觉理解（%d 批）",
+            "Completed batched visual understanding for %d/%d source images (%d batches)",
             inspected,
             len(urls),
             len(batches),
         )
         if errors:
-            self.logger.warning("%d 个源图扫描批次失败，其余批次继续使用", len(errors))
+            self.logger.warning(
+                "%d source-image scan batches failed; remaining batches are still usable",
+                len(errors),
+            )
             self.warnings.append(
-                f"源图片分批扫描有 {len(errors)}/{len(batches)} 批失败: "
+                f"Source-image batch scanning failed for {len(errors)}/{len(batches)} batches: "
                 + "; ".join(errors[:3])[:500]
             )
         if rejected:
-            self.logger.info("源图片风控筛出 %d 张不宜作为生成参考图", rejected)
+            self.logger.info(
+                "Source-image risk control rejected %d images as generation references",
+                rejected,
+            )
         third_party_count = sum(
             item.get("has_third_party_brand") is True for item in source_images
         )
         if third_party_count:
             self.warnings.append(
-                f"{third_party_count} 张源图疑似含第三方品牌或角色；不可直接发布，"
-                "仅可作为需清理的商品身份参考"
+                f"{third_party_count} source images may contain third-party brands or characters; "
+                "they cannot be published directly and may only serve as product-identity references that require cleanup"
             )
         global_risks = result.get("prohibited_or_risky_visuals")
         if isinstance(global_risks, list) and global_risks:
@@ -202,7 +208,9 @@ class EvidencePipelineMixin:
                 str(item).strip() for item in global_risks[:3] if str(item).strip()
             )
             if risk_summary:
-                self.warnings.append(f"源图视觉风险需人工复核: {risk_summary[:500]}")
+                self.warnings.append(
+                    f"Source-image visual risk requires manual review: {risk_summary[:500]}"
+                )
         return result
 
     def _apply_evidence_table_observations(
@@ -215,7 +223,7 @@ class EvidencePipelineMixin:
             return
         facts.evidence_tables = tables
         self.logger.info(
-            "从源图片提取并核验 %d 个通用证据表格（%d 个单元格）",
+            "Extracted and verified %d domain-neutral evidence tables (%d cells) from source images",
             len(tables),
             sum(len(table.cells) for table in tables),
         )
@@ -327,7 +335,10 @@ class EvidencePipelineMixin:
         if non_hard_risk:
             return non_hard_risk
 
-        warning = f"所有可用源图均触发视觉风险信号，{use} 阶段仅作最后兜底"
+        warning = (
+            f"Every available source image triggered visual-risk signals; "
+            f"they are used only as a last resort during the {use} stage"
+        )
         if warning not in self._source_selection_warnings:
             self._source_selection_warnings.add(warning)
             self.warnings.append(warning)
@@ -417,8 +428,7 @@ class EvidencePipelineMixin:
                 )
             if self._source_image_observations:
                 warning = (
-                    "未发现同时满足单品、完整展示、无人物道具和干净背景的源主图；"
-                    "主图进入质量降级兜底"
+                    "No source hero image simultaneously shows one complete product, no person or props, and a clean background; the hero image entered a quality-degraded fallback"
                 )
                 if warning not in self.warnings:
                     self.warnings.append(warning)

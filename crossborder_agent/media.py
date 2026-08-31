@@ -112,10 +112,10 @@ def _jpeg_dimensions(path: Path) -> tuple[int, int] | None:
 
 def inspect_image(path: Path) -> ImageInfo:
     if not path.is_file():
-        raise MediaError(f"图片不存在: {path}")
+        raise MediaError(f"Image does not exist: {path}")
     size = path.stat().st_size
     if size <= 0:
-        raise MediaError(f"图片为空: {path}")
+        raise MediaError(f"Image is empty: {path}")
     if Image is not None:
         try:
             with Image.open(path) as image:
@@ -127,14 +127,14 @@ def inspect_image(path: Path) -> ImageInfo:
                 width=width, height=height, format=image_format, size_bytes=size
             )
         except Exception as exc:
-            raise MediaError(f"图片无法解码: {path}: {exc}") from exc
+            raise MediaError(f"Image cannot be decoded: {path}: {exc}") from exc
     dimensions = _png_dimensions(path)
     if dimensions:
         return ImageInfo(dimensions[0], dimensions[1], "PNG", size)
     dimensions = _jpeg_dimensions(path)
     if dimensions:
         return ImageInfo(dimensions[0], dimensions[1], "JPEG", size)
-    raise MediaError(f"不支持的图片格式且 Pillow 不可用: {path}")
+    raise MediaError(f"Unsupported image format and Pillow is unavailable: {path}")
 
 
 def inspect_image_quality(path: Path) -> ImageQualityInfo | None:
@@ -152,7 +152,7 @@ def inspect_image_quality(path: Path) -> ImageQualityInfo | None:
             hash_sample = gray.resize((9, 8), Image.Resampling.LANCZOS)
             pixels = list(hash_sample.getdata())
     except Exception as exc:
-        raise MediaError(f"图片质量分析失败: {path}: {exc}") from exc
+        raise MediaError(f"Image-quality analysis failed: {path}: {exc}") from exc
 
     difference_hash = 0
     for row in range(8):
@@ -193,9 +193,9 @@ def normalize_image(
     if Image is None:
         info = inspect_image(source)
         if info.format not in {"JPEG", "JPG", "PNG"}:
-            raise MediaError("Pillow 不可用，无法转换源图片格式")
+            raise MediaError("Pillow is unavailable, so the source image format cannot be converted")
         if info.width < min(canvas[0], 800) or info.height < min(canvas[1], 800):
-            raise MediaError("Pillow 不可用，无法放大小尺寸源图片")
+            raise MediaError("Pillow is unavailable, so a small source image cannot be enlarged")
         shutil.copyfile(source, destination)
         return inspect_image(destination)
 
@@ -212,7 +212,7 @@ def normalize_image(
             normalized_focus = focus_crop.strip().lower()
             if normalized_focus:
                 if normalized_focus not in crop_boxes:
-                    raise MediaError(f"不支持的详情裁切区域: {focus_crop}")
+                    raise MediaError(f"Unsupported detail crop region: {focus_crop}")
                 left, top, right, bottom = crop_boxes[normalized_focus]
                 focused = image.crop(
                     (
@@ -256,10 +256,10 @@ def normalize_image(
                 quality -= 5
     except Exception as exc:
         destination.unlink(missing_ok=True)
-        raise MediaError(f"图片归一化失败: {exc}") from exc
+        raise MediaError(f"Image normalization failed: {exc}") from exc
     info = inspect_image(destination)
     if info.size_bytes > max_bytes:
-        raise MediaError(f"归一化图片仍超过 {max_bytes} 字节")
+        raise MediaError(f"Normalized image still exceeds {max_bytes} bytes")
     return info
 
 
@@ -274,7 +274,7 @@ def create_emergency_image(
     """
 
     if Image is None or ImageDraw is None:
-        raise MediaError("Pillow 不可用，无法创建最终图片保底")
+        raise MediaError("Pillow is unavailable, so the final image fallback cannot be created")
     width, height = canvas
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -312,7 +312,7 @@ def create_emergency_image(
         )
     except Exception as exc:
         destination.unlink(missing_ok=True)
-        raise MediaError(f"最终图片保底创建失败: {exc}") from exc
+        raise MediaError(f"Final image fallback creation failed: {exc}") from exc
     return inspect_image(destination)
 
 
@@ -320,7 +320,7 @@ def create_evidence_table_image(table: EvidenceTable, destination: Path) -> None
     """Render the model's grounded, domain-neutral table presentation."""
 
     if Image is None or ImageDraw is None or ImageFont is None:
-        raise MediaError("Pillow 不可用，无法生成证据表格详情图")
+        raise MediaError("Pillow is unavailable, so the evidence-table detail image cannot be generated")
     try:
         view = presentation_view(table)
     except ValueError as exc:
@@ -332,7 +332,7 @@ def create_evidence_table_image(table: EvidenceTable, destination: Path) -> None
         or not 1 <= len(rows) <= MAX_RENDER_TABLE_ROWS
     ):
         raise MediaError(
-            "模型选择的表格超出单页渲染容量: "
+            "The model-selected table exceeds single-page rendering capacity: "
             f"columns={len(headers)}/{MAX_RENDER_TABLE_COLUMNS}, "
             f"rows={len(rows)}/{MAX_RENDER_TABLE_ROWS}"
         )
@@ -396,7 +396,7 @@ def create_evidence_table_image(table: EvidenceTable, destination: Path) -> None
             bounds = draw.textbbox((0, 0), text, font=candidate)
             if bounds[2] - bounds[0] <= box_width:
                 return candidate
-        raise MediaError(f"表格文字无法在单元格中完整显示: {text[:80]}")
+        raise MediaError(f"Table text cannot fit completely in its cell: {text[:80]}")
 
     draw.rounded_rectangle((70, 70, 1130, 1430), radius=30, fill=(255, 255, 255))
     title = str(view["title"])
@@ -424,7 +424,7 @@ def create_evidence_table_image(table: EvidenceTable, destination: Path) -> None
     header_y = 285
     row_height = min(105, 860 // max(1, len(rows)))
     if row_height < 34:
-        raise MediaError("模型选择的表格行数过多，无法无损渲染")
+        raise MediaError("The model-selected table has too many rows for lossless rendering")
     for index, label in enumerate(headers):
         cell_left = boundaries[index] + 10
         cell_width = boundaries[index + 1] - boundaries[index] - 20
@@ -454,7 +454,7 @@ def create_evidence_table_image(table: EvidenceTable, destination: Path) -> None
         note_y = max(1220, y + 35)
         required_height = 42 * len(notes)
         if note_y + required_height > 1385:
-            raise MediaError("模型提供的表格注释无法在画布中完整显示")
+            raise MediaError("The model-provided table note cannot fit completely on the canvas")
         draw.line((120, note_y, 1080, note_y), fill=(221, 216, 225), width=2)
         for note_index, note in enumerate(notes):
             note_font = fit_font(note, 22, 960)
@@ -501,7 +501,7 @@ def _ffmpeg_executable() -> str:
     executable = shutil.which("ffmpeg")
     if executable:
         return executable
-    raise MediaError("找不到可用的 ffmpeg，无法生成视频回退")
+    raise MediaError("No usable ffmpeg binary was found for video fallback generation")
 
 
 def create_slideshow_video(
@@ -550,7 +550,7 @@ def create_slideshow_video(
     )
     if completed.returncode != 0:
         destination.unlink(missing_ok=True)
-        raise MediaError(f"ffmpeg 视频回退失败: {completed.stderr[-1200:]}")
+        raise MediaError(f"ffmpeg video fallback failed: {completed.stderr[-1200:]}")
     inspect_video(destination)
 
 
@@ -575,7 +575,7 @@ def create_catalog_video(
             seen_hashes.append(quality.difference_hash)
     if len(usable) < 2:
         if not usable:
-            raise MediaError("没有可用于视频回退的图片")
+            raise MediaError("No image is available for the video fallback")
         create_slideshow_video(usable[0], destination, duration=duration)
         return
 
@@ -649,10 +649,10 @@ def create_catalog_video(
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         destination.unlink(missing_ok=True)
-        raise MediaError(f"多镜头视频回退失败: {exc}") from exc
+        raise MediaError(f"Multi-shot video fallback failed: {exc}") from exc
     if completed.returncode != 0:
         destination.unlink(missing_ok=True)
-        raise MediaError(f"多镜头视频回退失败: {completed.stderr[-1200:]}")
+        raise MediaError(f"Multi-shot video fallback failed: {completed.stderr[-1200:]}")
     inspect_video(destination)
 
 
@@ -685,22 +685,22 @@ def strip_video_audio(source: Path, destination: Path) -> None:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         destination.unlink(missing_ok=True)
-        raise MediaError(f"视频静音处理失败: {exc}") from exc
+        raise MediaError(f"Video audio removal failed: {exc}") from exc
     if completed.returncode != 0:
         destination.unlink(missing_ok=True)
-        raise MediaError(f"视频静音处理失败: {completed.stderr[-1200:]}")
+        raise MediaError(f"Video audio removal failed: {completed.stderr[-1200:]}")
     inspect_video(destination)
 
 
 def inspect_video(path: Path) -> dict[str, Any]:
     if not path.is_file() or path.stat().st_size <= 0:
-        raise MediaError(f"视频不存在或为空: {path}")
+        raise MediaError(f"Video does not exist or is empty: {path}")
     if path.stat().st_size >= 200 * 1024 * 1024:
-        raise MediaError("视频达到或超过 200MB")
+        raise MediaError("Video is 200 MB or larger")
     with path.open("rb") as handle:
         header = handle.read(64)
     if b"ftyp" not in header:
-        raise MediaError("视频不是可识别的 MP4/MOV 容器")
+        raise MediaError("Video is not a recognizable MP4/MOV container")
     result: dict[str, Any] = {
         "size_bytes": path.stat().st_size,
         "container": "mp4/mov",
@@ -729,8 +729,8 @@ def inspect_video(path: Path) -> dict[str, Any]:
             command, capture_output=True, text=True, timeout=120, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise MediaError(f"视频完整解码检查失败: {exc}") from exc
+        raise MediaError(f"Full video decode check failed: {exc}") from exc
     if completed.returncode != 0:
-        raise MediaError(f"视频无法完整解码: {completed.stderr[-1200:]}")
+        raise MediaError(f"Video cannot be decoded completely: {completed.stderr[-1200:]}")
     result["decoded"] = True
     return result

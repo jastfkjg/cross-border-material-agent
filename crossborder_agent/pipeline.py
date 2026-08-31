@@ -100,7 +100,7 @@ class Pipeline(
             ]
             self.offline = True
             self.logger.warning(
-                "模型配置不完整，切换到确定性保底而不是中止: %s",
+                "Model configuration is incomplete; switching to deterministic fallback: %s",
                 ", ".join(missing),
             )
         self.client = (
@@ -127,7 +127,9 @@ class Pipeline(
     def _ensure_time(self, reserve_seconds: float = 0) -> None:
         remaining = self.deadline - time.monotonic()
         if remaining <= reserve_seconds:
-            raise PipelineError(f"剩余运行时间不足，需要保留 {reserve_seconds:.0f} 秒")
+            raise PipelineError(
+                f"Insufficient runtime remains; {reserve_seconds:.0f} seconds must be reserved"
+            )
 
     def run(self) -> RunState:
         self.trace.emit(
@@ -191,7 +193,7 @@ class Pipeline(
                 conflict_count=len(facts.reconciled_fact_ledger.get("conflicts", [])),
             )
             self.logger.info(
-                "事实证据裁决完成: models=%s conflicts=%d attribute_decisions=%d",
+                "Fact-evidence adjudication completed: models=%s conflicts=%d attribute_decisions=%d",
                 ",".join(facts.reconciled_fact_ledger.get("models", [])) or "none",
                 len(facts.reconciled_fact_ledger.get("conflicts", [])),
                 len(facts.reconciled_fact_ledger.get("attribute_decisions", [])),
@@ -235,10 +237,9 @@ class Pipeline(
                 missing_required=taxonomy.missing_required,
             )
             self.logger.info(
-                "商品 %s: 类目 %s %s (%.2f, %s)",
+                "Product %s: category_id=%s (confidence=%.2f, method=%s)",
                 facts.offer_id,
                 taxonomy.category.category_id,
-                taxonomy.category.name,
                 taxonomy.category.confidence,
                 taxonomy.category.method,
             )
@@ -280,7 +281,7 @@ class Pipeline(
                     "marketplace-materials",
                 ),
             )
-            self.logger.info("创意计划来源: %s", plan_model)
+            self.logger.info("Creative-plan source: %s", plan_model)
             self.trace.emit(
                 "creative.plan",
                 source=plan_model,
@@ -440,7 +441,9 @@ class Pipeline(
                     try:
                         detail_assets[index] = future.result()
                     except Exception as exc:
-                        raise PipelineError(f"详情图 {index} 构建失败: {exc}") from exc
+                        raise PipelineError(
+                            f"Detail-image {index} construction failed: {exc}"
+                        ) from exc
 
                 self._apply_global_detail_candidate_selection(
                     facts=facts,
@@ -477,15 +480,19 @@ class Pipeline(
                     try:
                         payload, source = future.result()
                     except Exception as exc:
-                        raise PipelineError(f"{language} 文案构建失败: {exc}") from exc
+                        raise PipelineError(
+                            f"{language} copy construction failed: {exc}"
+                        ) from exc
                     localization_sources[language] = source
                     localization_payloads[language] = payload
                 try:
                     if video_future is None:
-                        raise PipelineError("编排计划未提交视频生产步骤")
+                        raise PipelineError(
+                            "The orchestration plan did not submit a video-production step"
+                        )
                     video_result = video_future.result()
                 except Exception as exc:
-                    raise PipelineError(f"视频构建失败: {exc}") from exc
+                    raise PipelineError(f"Video construction failed: {exc}") from exc
 
             if video_result:
                 state.assets.append(video_result)
@@ -588,7 +595,7 @@ class Pipeline(
                 )
                 if final_fingerprint != state.accepted_artifact_fingerprint:
                     warning = (
-                        "交付在最终语义评审后发生变化；保留该事实并提交当前确定性可用快照"
+                        "Delivery changed after final semantic review; retaining this fact and submitting the current deterministically usable snapshot"
                     )
                     self.warnings.append(warning)
                     self.logger.warning(warning)
@@ -616,9 +623,11 @@ class Pipeline(
                 warnings=report.warnings,
             )
             for warning in report.warnings:
-                self.logger.warning("交付告警: %s", warning)
+                self.logger.warning("Delivery warning: %s", warning)
             if not report.valid:
-                warning = "交付确定性校验仍有问题: " + "; ".join(report.errors)
+                warning = "Deterministic delivery validation still has issues: " + "; ".join(
+                    report.errors
+                )
                 self.warnings.append(warning)
                 self.logger.error(warning)
 
@@ -632,7 +641,7 @@ class Pipeline(
                 dependency_state=state.dependency_state,
             )
             self.logger.info(
-                "最终决策快照: category=%s schema=%s mappings=%d canonical=%s spec=%s",
+                "Final decision snapshot: category=%s schema=%s mappings=%d canonical=%s spec=%s",
                 taxonomy.category.category_id,
                 taxonomy.attribute_schema_category_id,
                 len(taxonomy.attributes),
@@ -669,11 +678,11 @@ class Pipeline(
             )
             if not final_report.valid:
                 self.logger.error(
-                    "最终目录复核仍有问题，但已保留可评分结果: %s",
+                    "Final directory review still has issues, but a scoreable result was preserved: %s",
                     "; ".join(final_report.errors),
                 )
             self.logger.info(
-                "商品 %s 交付完成，共 %d 个文件，用时 %.1f 秒",
+                "Product %s delivery completed with %d files in %.1f seconds",
                 facts.offer_id,
                 len(EXPECTED_FILES),
                 time.monotonic() - self.started_monotonic,
@@ -686,7 +695,8 @@ class Pipeline(
                 # pre-production failure boundary.
                 raise
             self.logger.exception(
-                "主流程异常，转入最佳可用快照提交而不是退出: %s", exc
+                "The main pipeline failed; submitting the best available snapshot instead of exiting: %s",
+                exc,
             )
             recovery_reason = f"{type(exc).__name__}: {exc}"
             if taxonomy is None:
@@ -695,7 +705,10 @@ class Pipeline(
                         raise ValueError("platform taxonomy snapshot unavailable")
                     taxonomy = resolve_taxonomy(facts, category_tree, attribute_data)
                 except Exception as taxonomy_exc:
-                    self.logger.warning("平台类目保底解析失败，保留来源类目: %s", taxonomy_exc)
+                    self.logger.warning(
+                        "Marketplace taxonomy fallback failed; retaining the source category: %s",
+                        taxonomy_exc,
+                    )
                     taxonomy = TaxonomyResult(
                         category=CategoryChoice(
                             category_id=facts.source_category_id or "unresolved",
@@ -740,7 +753,8 @@ class Pipeline(
                 # budget. Retry the same availability boundary without remote
                 # dependencies before allowing a valid-input run to exit.
                 self.logger.exception(
-                    "模型辅助保底异常，切换到纯本地交付保底: %s", recovery_exc
+                    "Model-assisted fallback failed; switching to a fully local delivery fallback: %s",
+                    recovery_exc,
                 )
                 saved_client = self.client
                 self.client = None
@@ -772,7 +786,7 @@ class Pipeline(
             )
             self._commit_delivery(work_dir)
             self.logger.info(
-                "商品 %s 已提交最佳可用结果，共 %d 个文件，用时 %.1f 秒",
+                "Product %s best available result was submitted with %d files in %.1f seconds",
                 facts.offer_id,
                 len(EXPECTED_FILES),
                 time.monotonic() - self.started_monotonic,

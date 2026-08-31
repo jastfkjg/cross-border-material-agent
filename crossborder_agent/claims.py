@@ -105,8 +105,8 @@ def filter_invalid_mapping_provenance(
             kept.append(item)
             continue
         warnings.append(
-            f"属性映射来源不一致，已移除 {item.name}: "
-            f"{item.source_name}={item.source_value} ({pointer or '无证据指针'})"
+            f"Removed mapped attribute {item.attr_id}/{item.value_id or 'no-value-id'} "
+            f"because its source evidence is inconsistent ({pointer or 'no evidence pointer'})"
         )
         if item.required and item.name not in taxonomy.missing_required:
             taxonomy.missing_required.append(item.name)

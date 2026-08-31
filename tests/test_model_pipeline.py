@@ -408,7 +408,7 @@ class ModelPipelineTests(unittest.TestCase):
                 self.assertIn("main_image.jpeg", generated_names)
                 self.assertIn("product_video.mp4", generated_names)
                 self.assertTrue(
-                    any("近重复" in warning for warning in state.warnings),
+                    any("near-duplicate" in warning for warning in state.warnings),
                     state.warnings,
                 )
                 report = validate_delivery(output_dir, state.facts, state.taxonomy)

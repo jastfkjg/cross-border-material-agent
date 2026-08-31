@@ -376,7 +376,7 @@ class ResilienceTests(unittest.TestCase):
         with mock.patch.object(
             client, "_generate_sync_images", side_effect=ApiError("injected")
         ) as generate:
-            with self.assertRaisesRegex(ApiError, "跳过慢速图像回退模型"):
+            with self.assertRaisesRegex(ApiError, "skipping the slower image fallback model"):
                 client.generate_image_candidates(
                     "prompt", [], size="1024*1024", count=2
                 )

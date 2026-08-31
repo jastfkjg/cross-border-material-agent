@@ -51,7 +51,7 @@ def parse_prompt_paths(prompt: str) -> ParsedPaths:
                 seen.add(value)
 
     if not candidates:
-        raise InputError("--prompt 中没有找到绝对输入/输出路径")
+        raise InputError("No absolute input/output paths were found in --prompt")
 
     def score(item: tuple[str, int, int], role: str) -> int:
         value, start, end = item
@@ -82,7 +82,9 @@ def parse_prompt_paths(prompt: str) -> ParsedPaths:
     input_item = max(candidates, key=lambda item: score(item, "input"))
     remaining = [item for item in candidates if item[0] != input_item[0]]
     if not remaining:
-        raise InputError("--prompt 中只解析到一个路径，无法区分输入和输出目录")
+        raise InputError(
+            "Only one path was parsed from --prompt; input and output directories cannot be distinguished"
+        )
     output_item = max(remaining, key=lambda item: score(item, "output"))
 
     input_dir = Path(input_item[0]).expanduser().resolve()
@@ -92,7 +94,7 @@ def parse_prompt_paths(prompt: str) -> ParsedPaths:
     if output_dir.suffix.lower() in {".json", ".md", ".txt"}:
         output_dir = output_dir.parent
     if input_dir == output_dir:
-        raise InputError("输入目录与输出目录不能相同")
+        raise InputError("Input and output directories must be different")
     return ParsedPaths(input_dir=input_dir, output_dir=output_dir)
 
 
@@ -128,7 +130,7 @@ def discover_input_files(
     input_dir: Path, product_id: str = ""
 ) -> tuple[Path, Path, Path]:
     if not input_dir.is_dir():
-        raise InputError(f"输入目录不存在或不可读: {input_dir}")
+        raise InputError(f"Input directory does not exist or is unreadable: {input_dir}")
 
     classified: dict[str, list[Path]] = {
         "product": [],
@@ -152,11 +154,11 @@ def discover_input_files(
             if product_id in path.name or _file_offer_id(path) == product_id
         ]
     if len(products) != 1:
-        raise InputError(f"期望恰好一个商品 JSON，实际找到 {len(products)} 个")
+        raise InputError(f"Expected exactly one product JSON file; found {len(products)}")
     if not classified["categories"]:
-        raise InputError("未找到平台类目 JSON")
+        raise InputError("Marketplace category JSON was not found")
     if not classified["attributes"]:
-        raise InputError("未找到平台属性 JSON")
+        raise InputError("Marketplace attribute JSON was not found")
     return products[0], classified["categories"][0], classified["attributes"][0]
 
 
@@ -174,7 +176,7 @@ def load_json(path: Path) -> Any:
         with path.open("r", encoding="utf-8") as handle:
             return json.load(handle)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise InputError(f"无法读取 JSON {path}: {exc}") from exc
+        raise InputError(f"Cannot read JSON {path}: {exc}") from exc
 
 
 def _safe_text(value: Any) -> str:
@@ -246,7 +248,7 @@ def load_product_facts(product_path: Path) -> ProductFacts:
     raw = json.loads(raw_bytes.decode("utf-8"))
     product = _nested_product(raw)
     if product is None:
-        raise InputError(f"商品 JSON 结构不符合预期: {product_path}")
+        raise InputError(f"Product JSON has an unexpected structure: {product_path}")
 
     attributes: list[ProductAttribute] = []
     for index, item in enumerate(product.get("productAttribute") or []):
@@ -335,7 +337,7 @@ def load_product_facts(product_path: Path) -> ProductFacts:
     )
     facts.size_conversions = _size_conversions(attributes)
     if not facts.offer_id or not facts.source_title:
-        raise InputError("商品 JSON 缺少 offerId 或 subject")
+        raise InputError("Product JSON is missing offerId or subject")
     if not facts.all_image_urls():
-        raise InputError("商品 JSON 未提供任何可用图片 URL")
+        raise InputError("Product JSON provides no usable image URL")
     return facts

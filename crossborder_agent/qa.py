@@ -89,12 +89,12 @@ def _validate_description(
     report: ValidationReport,
 ) -> None:
     if path.stat().st_size >= 1024 * 1024:
-        report.errors.append(f"{path.name} 达到或超过 1MB")
+        report.errors.append(f"{path.name} is 1 MB or larger")
         return
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
-        report.errors.append(f"{path.name} 无法作为 UTF-8 文本读取: {exc}")
+        report.errors.append(f"{path.name} cannot be read as UTF-8 text: {exc}")
         return
     required_values = [
         facts.offer_id,
@@ -110,7 +110,7 @@ def _validate_description(
     ]
     for value in required_values:
         if value and value not in text:
-            report.errors.append(f"{path.name} 缺少必需内容: {value}")
+            report.errors.append(f"{path.name} is missing required content: {value}")
 
     language = path.stem.removeprefix("product_description_")
     buyer_surface, machine_surface = _description_language_surfaces(text, language)
@@ -120,9 +120,13 @@ def _validate_description(
     buyer_surface = re.sub(r"https?://[^\s)>]+", "", buyer_surface)
     machine_surface = re.sub(r"https?://[^\s)>]+", "", machine_surface)
     if re.search(r"[\u4e00-\u9fff]", buyer_surface):
-        report.errors.append(f"{path.name} 买家文案或媒体描述含未本地化中文")
+        report.errors.append(
+            f"{path.name} contains unlocalized Chinese in shopper copy or media descriptions"
+        )
     if re.search(r"[\u4e00-\u9fff]", machine_surface):
-        report.warnings.append(f"{path.name} 机器附录保留了中文来源值")
+        report.warnings.append(
+            f"{path.name} retains Chinese source values in the machine appendix"
+        )
     forbidden_internal_markers = (
         "/ret/result/result",
         "Source evidence",
@@ -135,11 +139,11 @@ def _validate_description(
     )
     for marker in forbidden_internal_markers:
         if marker.casefold() in text.casefold():
-            report.errors.append(f"{path.name} 暴露内部证据字段: {marker}")
+            report.errors.append(f"{path.name} exposes an internal evidence field: {marker}")
 
     sections = re.split(r"(?m)^## ", text)
     if len(sections) < 3:
-        report.errors.append(f"{path.name} 缺少商品描述或卖点章节")
+        report.errors.append(f"{path.name} is missing an overview or highlights section")
     else:
         overview_body = sections[1].split("\n", 1)[-1].strip()
         paragraphs = [
@@ -152,25 +156,25 @@ def _validate_description(
             re.sub(r"\s+", "", " ".join(paragraphs))
         )
         if overview_length < minimum_overview_chars:
-            report.warnings.append(f"{path.name} 商品描述内容偏短")
+            report.warnings.append(f"{path.name} has a short product overview")
 
     for item in taxonomy.attributes:
         for value in (item.attr_id, item.value_id):
             if value and value not in text:
                 report.errors.append(
-                    f"{path.name} 缺少平台上架属性: {item.attr_id}/{item.value_id}"
+                    f"{path.name} is missing a marketplace listing attribute: {item.attr_id}/{item.value_id}"
                 )
                 break
     for sku in facts.skus:
         if sku.sku_id not in text:
-            report.errors.append(f"{path.name} 缺少 SKU: {sku.sku_id}")
+            report.errors.append(f"{path.name} is missing SKU: {sku.sku_id}")
             continue
         if sku.spec_id and sku.spec_id not in text:
-            report.errors.append(f"{path.name} 缺少 Spec ID: {sku.sku_id}")
+            report.errors.append(f"{path.name} is missing a Spec ID for SKU: {sku.sku_id}")
         for item in sku.attributes:
             if item.attribute_id and item.attribute_id not in text:
                 report.errors.append(
-                    f"{path.name} 缺少 SKU 分解项: {sku.sku_id}/{item.attribute_id}"
+                    f"{path.name} is missing an SKU component: {sku.sku_id}/{item.attribute_id}"
                 )
                 break
     table = select_render_table(facts.evidence_tables)
@@ -178,13 +182,15 @@ def _validate_description(
         try:
             table_view = presentation_view(table, language)
         except ValueError as exc:
-            report.errors.append(f"{path.name} 来源表格展示协议无效: {exc}")
+            report.errors.append(
+                f"{path.name} has an invalid source-table presentation contract: {exc}"
+            )
         else:
             for row in table_view["rows"]:
                 missing = next((value for value in row if value and value not in text), "")
                 if missing:
                     report.errors.append(
-                        f"{path.name} 缺少来源表格单元格: {table.table_id}/{missing}"
+                        f"{path.name} is missing a source-table cell: {table.table_id}/{missing}"
                     )
 
 
@@ -200,9 +206,11 @@ def validate_delivery(
     missing = sorted(EXPECTED_FILES - actual_files)
     unexpected = sorted(actual_files - EXPECTED_FILES)
     if missing:
-        report.errors.append("缺少交付文件: " + ", ".join(missing))
+        report.errors.append("Missing delivery files: " + ", ".join(missing))
     if unexpected:
-        report.warnings.append("输出目录包含额外文件: " + ", ".join(unexpected))
+        report.warnings.append(
+            "The output directory contains unexpected files: " + ", ".join(unexpected)
+        )
     if missing:
         report.valid = False
         return report
@@ -216,15 +224,17 @@ def validate_delivery(
     try:
         main = inspect_image(output_dir / "main_image.jpeg")
         if main.format not in {"JPEG", "JPG", "PNG"}:
-            report.errors.append(f"主图格式不合规: {main.format}")
+            report.errors.append(f"Main-image format is not compliant: {main.format}")
         if main.width < 800 or main.height < 800:
-            report.errors.append(f"主图尺寸不足: {main.width}x{main.height}")
-        if main.size_bytes > 5 * 1024 * 1024:
-            report.errors.append("主图超过 5MB")
+            report.errors.append(
+                f"Main-image dimensions are too small: {main.width}x{main.height}"
+            )
+        if main.size_bytes >= 1024 * 1024:
+            report.errors.append("Main image is 1 MB or larger")
         main_quality = inspect_image_quality(output_dir / "main_image.jpeg")
         if main_quality is not None:
             if main_quality.luminance_stddev < 2 or main_quality.entropy < 0.8:
-                report.errors.append("主图疑似空白或信息量过低")
+                report.errors.append("Main image appears blank or contains too little information")
             image_hashes.append(("main_image.jpeg", main_quality.difference_hash))
     except MediaError as exc:
         report.errors.append(str(exc))
@@ -233,13 +243,15 @@ def validate_delivery(
         try:
             detail = inspect_image(output_dir / f"detail_image_{index}.jpeg")
             if detail.format not in {"JPEG", "JPG", "PNG"}:
-                report.errors.append(f"详情图 {index} 格式不合规: {detail.format}")
+                report.errors.append(
+                    f"Detail-image {index} format is not compliant: {detail.format}"
+                )
             if detail.width <= 260 or detail.height <= 260:
                 report.errors.append(
-                    f"详情图 {index} 尺寸不足: {detail.width}x{detail.height}"
+                    f"Detail-image {index} dimensions are too small: {detail.width}x{detail.height}"
                 )
             if detail.size_bytes > 5 * 1024 * 1024:
-                report.errors.append(f"详情图 {index} 超过 5MB")
+                report.errors.append(f"Detail image {index} exceeds 5 MB")
             detail_quality = inspect_image_quality(
                 output_dir / f"detail_image_{index}.jpeg"
             )
@@ -248,7 +260,9 @@ def validate_delivery(
                     detail_quality.luminance_stddev < 2
                     or detail_quality.entropy < 0.8
                 ):
-                    report.errors.append(f"详情图 {index} 疑似空白或信息量过低")
+                    report.errors.append(
+                        f"Detail image {index} appears blank or contains too little information"
+                    )
                 image_hashes.append(
                     (f"detail_image_{index}.jpeg", detail_quality.difference_hash)
                 )
@@ -260,7 +274,7 @@ def validate_delivery(
         for right_name, right_hash in image_hashes[left_index + 1 :]:
             if hash_distance(left_hash, right_hash) <= duplicate_threshold:
                 report.warnings.append(
-                    f"商品图片视觉内容可能重复: {left_name}, {right_name}"
+                    f"Product images may contain duplicate visual content: {left_name}, {right_name}"
                 )
 
     distinct_hashes: list[int] = []
@@ -272,7 +286,7 @@ def validate_delivery(
             distinct_hashes.append(image_hash)
     if image_hashes and len(distinct_hashes) / len(image_hashes) < 0.8:
         report.warnings.append(
-            "商品图片的感知差异率低于 A6 的 80% 可用率参考线"
+            "Perceptually distinct product images fall below the A6 80% usability reference"
         )
 
     try:
@@ -282,20 +296,22 @@ def validate_delivery(
 
     strategy = output_dir / "strategy_document.md"
     if strategy.stat().st_size >= 1024 * 1024:
-        report.errors.append("strategy_document.md 达到或超过 1MB")
+        report.errors.append("strategy_document.md is 1 MB or larger")
     try:
         strategy_text = strategy.read_text(encoding="utf-8")
         for value in (
             facts.offer_id,
             taxonomy.category.category_id,
-            "事实",
-            "本地化",
-            "质检",
+            "Fact",
+            "Localization",
+            "Quality",
         ):
             if value not in strategy_text:
-                report.errors.append(f"strategy_document.md 缺少策略信息: {value}")
+                report.errors.append(
+                    f"strategy_document.md is missing strategy information: {value}"
+                )
     except (OSError, UnicodeError) as exc:
-        report.errors.append(f"策略说明无法读取: {exc}")
+        report.errors.append(f"The strategy document cannot be read: {exc}")
 
     report.valid = not report.errors
     return report

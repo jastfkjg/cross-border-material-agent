@@ -51,7 +51,7 @@ _RUBRIC_DEFINITIONS = {
     "A2": {
         "name": "Artifact specification compliance",
         "scope": "Completeness and physical file specifications only; do not judge semantic correctness here.",
-        "judge": "Each text file must exist and be below 1 MB; hero must be jpeg/png and at least 800x800; every detail image must be jpeg/png, both dimensions above 260 px, and at most 5 MB; video must exist, be playable mp4/mov, and below 200 MB.",
+        "judge": "Each text file must exist and be below 1 MB; hero must be jpeg/png, at least 800x800, and below 1 MB; every detail image must be jpeg/png, both dimensions above 260 px, and at most 5 MB; video must exist, be playable mp4/mov, and below 200 MB.",
         "weight": 20,
     },
     "A3": {
@@ -447,12 +447,17 @@ class BoundedDeliveryAgent:
             )
             self.orchestrator_messages = result.messages
         except ApiError as exc:
-            self.logger.warning("LLM 编排规划不可用，采用保守有界策略: %s", exc)
+            self.logger.warning(
+                "LLM orchestration planning is unavailable; using a conservative bounded strategy: %s",
+                exc,
+            )
             return default
         finally:
             workspace_temp.cleanup()
         if not submitted:
-            self.logger.warning("编排器未在预算内提交有效计划，采用保守计划")
+            self.logger.warning(
+                "The orchestrator did not submit a valid plan within budget; using the conservative plan"
+            )
             return default
         return self._normalize_plan(submitted, default)
 
@@ -644,13 +649,17 @@ question to investigate, never as evidence by itself):
         normalized: dict[str, dict[str, Any]] = {}
         for model, payload, error in results:
             if payload is None:
-                self.logger.warning("事实裁决模型 %s 不可用: %s", model, error)
+                self.logger.warning(
+                    "Fact-adjudication model %s is unavailable: %s", model, error
+                )
                 continue
             parsed = self._normalize_reconciliation(payload, len(attributes))
             if parsed:
                 normalized[model] = parsed
             else:
-                self.logger.warning("事实裁决模型 %s 返回结构无效", model)
+                self.logger.warning(
+                    "Fact-adjudication model %s returned an invalid structure", model
+                )
         if not normalized:
             return {}
         return self._aggregate_reconciliations(normalized)
@@ -1122,12 +1131,14 @@ Allowed artifact target names (use only these exact names):
         evaluations: dict[str, AgentEvaluation] = {}
         for model, evaluation, error in results:
             if evaluation is None:
-                self.logger.warning("全局评估模型 %s 不可用: %s", model, error)
+                self.logger.warning(
+                    "Global evaluation model %s is unavailable: %s", model, error
+                )
             else:
                 evaluations[model] = evaluation
         if not evaluations:
             self.logger.warning(
-                "全局交付评估没有获得有效模型结果；跳过语义返修但继续交付",
+                "Global delivery evaluation produced no valid model result; skipping semantic repair and continuing delivery",
             )
             return None
         return self._adjudicate_evaluations(
@@ -1189,7 +1200,10 @@ Previous observations:
                     fallback_model=planner_fallback,
                 )
             except (ApiError, ValueError, TypeError) as exc:
-                self.logger.warning("返修规划器不可用，使用确定性目标映射: %s", exc)
+                self.logger.warning(
+                    "Repair planner is unavailable; using deterministic target mapping: %s",
+                    exc,
+                )
 
         by_defect = {str(item.get("defect_id") or ""): item for item in findings}
         actions: list[AgentAction] = []

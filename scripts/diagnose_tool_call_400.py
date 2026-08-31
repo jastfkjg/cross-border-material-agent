@@ -545,18 +545,18 @@ def _diagnose(requests: list[dict[str, Any]]) -> list[str]:
     fresh = probes.get("fresh_history")
     if fresh and fresh.get("http_status") == 200:
         conclusions.append(
-            "同一模型、工具 schema 和静态参数在清空历史后可用：故障依赖累计 transcript，而不是模型整体不可用。"
+            "The same model, tool schema, and static parameters work with fresh history; the failure depends on the accumulated transcript rather than total model unavailability."
         )
     elif fresh:
         conclusions.append(
-            "清空历史后仍失败：优先检查静态工具参数、工具 schema 或服务端模型工具能力。"
+            "The request still fails with fresh history; inspect static tool parameters, the tool schema, or server-side model tool support first."
         )
     mapping = {
-        "without_parallel_tool_calls": "移除 parallel_tool_calls 后成功，说明该兼容接口与并行工具参数/历史组合不兼容。",
-        "without_budget_messages": "移除逐轮 RUNTIME BUDGET user 消息后成功，说明交错 user 消息破坏了服务端接受的工具回放序列。",
-        "normalized_assistant_content": "将 assistant.content 从 null 规范化为空字符串后成功，说明接口不接受历史 tool-call assistant 的 null content。",
-        "without_tool_name_fields": "移除 role=tool 消息中的 name 后成功，说明接口只接受 tool_call_id/content 的严格格式。",
-        "compacted_tool_observations": "压缩 tool observation 后成功，说明请求长度或某个 observation 的大小/内容触发了内部限制。",
+        "without_parallel_tool_calls": "The request succeeded after removing parallel_tool_calls, indicating that the compatibility endpoint cannot accept this combination of parallel-tool parameters and history.",
+        "without_budget_messages": "The request succeeded after removing per-turn RUNTIME BUDGET user messages, indicating that interleaved user messages broke the server-accepted tool replay sequence.",
+        "normalized_assistant_content": "The request succeeded after normalizing assistant.content from null to an empty string, indicating that the endpoint rejects null content on historical tool-call assistant messages.",
+        "without_tool_name_fields": "The request succeeded after removing name from role=tool messages, indicating that the endpoint accepts only the strict tool_call_id/content shape.",
+        "compacted_tool_observations": "The request succeeded after compacting tool observations, indicating that request length or one observation's size/content triggered an internal limit.",
     }
     for name, text in mapping.items():
         probe = probes.get(name)
@@ -565,7 +565,7 @@ def _diagnose(requests: list[dict[str, Any]]) -> list[str]:
             break
     if probes and not any(item.get("http_status") == 200 for item in probes.values()):
         conclusions.append(
-            "所有已执行变体均失败：现有单变量未定位，较可能是 provider 的工具服务故障或 schema/arguments 内部限制。"
+            "Every executed variant failed. The current single-variable probes did not isolate the issue; a provider tool-service failure or an internal schema/arguments limit is more likely."
         )
     return conclusions
 
@@ -712,7 +712,7 @@ def main() -> int:
     diagnosis = _diagnose(state.requests)
     if failed_body is None:
         diagnosis.append(
-            "未在请求上限内复现 HTTP 400；本次运行不能证明历史故障已消失，建议保留报告并与失败运行比较。"
+            "HTTP 400 was not reproduced within the request cap. This run does not prove the historical failure is resolved; retain the report and compare it with a failing run."
         )
     endpoint_parts = urlsplit(endpoint)
     report = {

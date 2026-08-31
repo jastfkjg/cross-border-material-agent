@@ -352,7 +352,7 @@ class VisualSelectionTests(unittest.TestCase):
 
         self.assertEqual(result["repair_targets"], [2])
         self.assertTrue(all(url.startswith("https://") for url in reviewer.generated_urls))
-        self.assertTrue(any("语义重复" in item for item in pipeline.warnings))
+        self.assertTrue(any("semantic duplicates" in item for item in pipeline.warnings))
 
     def test_six_image_review_never_substitutes_local_provenance_pixels(self) -> None:
         facts = load_product_facts(
@@ -679,7 +679,7 @@ class VisualSelectionTests(unittest.TestCase):
                 offline=True,
             )
             pipeline.client = SoftIssueSelectorClient()
-            with self.assertRaisesRegex(Exception, "候选均未通过语义质检"):
+            with self.assertRaisesRegex(Exception, "candidate passed semantic quality control"):
                 pipeline._select_detail_candidate(
                     2,
                     facts,
@@ -724,7 +724,7 @@ class VisualSelectionTests(unittest.TestCase):
                 offline=True,
             )
             pipeline.client = CollageSelectorClient()
-            with self.assertRaisesRegex(Exception, "候选均未通过语义质检"):
+            with self.assertRaisesRegex(Exception, "candidate passed semantic quality control"):
                 pipeline._select_detail_candidate(
                     2,
                     facts,

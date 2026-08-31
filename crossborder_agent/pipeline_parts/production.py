@@ -14,7 +14,7 @@ from typing import Any
 
 from ..agent_tools import ToolExecution
 from ..api import ApiError
-from ..localization import generate_copy_payload, render_description
+from ..localization import _localized_display, generate_copy_payload, render_description
 from ..media import (
     MediaError,
     create_catalog_video,
@@ -45,6 +45,8 @@ from .common import (
     reviewed_media_description as _reviewed_media_description,
     unique as _unique,
 )
+
+_MAIN_IMAGE_MAX_BYTES = 1024 * 1024 - 1
 
 
 class ProductionPipelineMixin:
@@ -305,7 +307,7 @@ class ProductionPipelineMixin:
     def _find_asset(assets: list[AssetResult], name: str) -> AssetResult:
         asset = next((item for item in assets if item.name == name), None)
         if asset is None:
-            raise PipelineError(f"修复目标不存在: {name}")
+            raise PipelineError(f"Repair target does not exist: {name}")
         return asset
 
     def _repair_main_image(
@@ -358,6 +360,7 @@ class ProductionPipelineMixin:
                 downloads_dir,
                 canvas=(1600, 1600),
                 white_background=True,
+                max_bytes=_MAIN_IMAGE_MAX_BYTES,
             )
             os.replace(staged, Path(asset.path))
             asset.source_url = selected
@@ -626,6 +629,7 @@ class ProductionPipelineMixin:
         canvas: tuple[int, int],
         white_background: bool,
         focus_crop: str = "",
+        max_bytes: int = 5 * 1024 * 1024,
     ) -> None:
         raw_path = self._next_raw_path(downloads_dir, ".asset")
         self.downloader.download(url, raw_path, max_bytes=30 * 1024 * 1024, timeout=180)
@@ -633,7 +637,7 @@ class ProductionPipelineMixin:
             raw_path,
             destination,
             canvas=canvas,
-            max_bytes=5 * 1024 * 1024,
+            max_bytes=max_bytes,
             white_background=white_background,
             focus_crop=focus_crop,
         )
@@ -648,6 +652,7 @@ class ProductionPipelineMixin:
         white_background: bool,
         avoid_hashes: list[int] | None = None,
         focus_crop: str = "",
+        max_bytes: int = 5 * 1024 * 1024,
     ) -> str:
         errors: list[str] = []
         for url in source_urls:
@@ -664,6 +669,7 @@ class ProductionPipelineMixin:
                     canvas=canvas,
                     white_background=white_background,
                     focus_crop=focus_crop,
+                    max_bytes=max_bytes,
                 )
                 if avoid_hashes:
                     quality = inspect_image_quality(candidate_destination)
@@ -671,7 +677,9 @@ class ProductionPipelineMixin:
                         hash_distance(quality.difference_hash, seen_hash) <= 10
                         for seen_hash in avoid_hashes
                     ):
-                        errors.append(f"候选源图与已用详情图近重复: {url}")
+                        errors.append(
+                            f"Candidate source image is a near-duplicate of an accepted detail image: {url}"
+                        )
                         candidate_destination.unlink(missing_ok=True)
                         continue
                     os.replace(candidate_destination, destination)
@@ -679,7 +687,7 @@ class ProductionPipelineMixin:
             except (ApiError, MediaError) as exc:
                 errors.append(str(exc))
                 candidate_destination.unlink(missing_ok=True)
-        raise PipelineError("所有源图片回退均失败: " + "; ".join(errors[-3:]))
+        raise PipelineError("All source-image fallbacks failed: " + "; ".join(errors[-3:]))
 
     def _build_main_image(
         self,
@@ -719,12 +727,13 @@ class ProductionPipelineMixin:
                         downloads_dir,
                         canvas=(1600, 1600),
                         white_background=True,
+                        max_bytes=_MAIN_IMAGE_MAX_BYTES,
                     )
                 except (ApiError, MediaError) as download_error:
                     if self.deadline - time.monotonic() < 360:
                         raise
                     self.logger.warning(
-                        "主图候选下载或物理校验失败，重新生成一次而非直接回退: %s",
+                        "Main-image candidate download or physical validation failed; regenerating once: %s",
                         download_error,
                     )
                     generated_url, model = self._generate_main_with_semantic_retry(
@@ -743,6 +752,7 @@ class ProductionPipelineMixin:
                         downloads_dir,
                         canvas=(1600, 1600),
                         white_background=True,
+                        max_bytes=_MAIN_IMAGE_MAX_BYTES,
                     )
                 return (
                     AssetResult(
@@ -757,14 +767,18 @@ class ProductionPipelineMixin:
                 )
             except (ApiError, MediaError) as exc:
                 generation_failure = str(exc)
-                self.logger.warning("主图生成失败，使用源图回退: %s", exc)
-                self.warnings.append(f"主图生成回退: {exc}")
+                self.logger.warning(
+                    "Main-image generation failed; using a source-image fallback: %s",
+                    exc,
+                )
+                self.warnings.append(f"Main-image generation fallback: {exc}")
         fallback_url = self._fallback_image(
             self._fallback_source_urls(facts, asset_name="main_image.jpeg"),
             destination,
             downloads_dir,
             canvas=(1600, 1600),
             white_background=True,
+            max_bytes=_MAIN_IMAGE_MAX_BYTES,
         )
         return (
             AssetResult(
@@ -823,7 +837,7 @@ class ProductionPipelineMixin:
                 if semantic_attempt > 0 or self.deadline - time.monotonic() < 420:
                     raise
                 self.logger.warning(
-                    "主图存在明确语义硬伤，携带质检反馈重新生成一次: %s",
+                    "Main image has a confirmed semantic defect; regenerating once with review feedback: %s",
                     exc.feedback[:500],
                 )
                 active_prompt = (
@@ -832,7 +846,7 @@ class ProductionPipelineMixin:
                     + exc.feedback[:1200]
                     + "\nPreserve exact product identity and correct only these hard defects."
                 )
-        raise last_rejection or SemanticRejection("主图语义纠错失败")
+        raise last_rejection or SemanticRejection("Main-image semantic correction failed")
 
     @staticmethod
     def _is_children_product(facts: ProductFacts) -> bool:
@@ -946,7 +960,7 @@ class ProductionPipelineMixin:
                     if self.deadline - time.monotonic() < 300:
                         raise
                     self.logger.warning(
-                        "详情图 %d 候选下载或物理校验失败，重新生成一次: %s",
+                        "Detail-image %d candidate download or physical validation failed; regenerating once: %s",
                         index,
                         download_error,
                     )
@@ -987,8 +1001,12 @@ class ProductionPipelineMixin:
                 )
             except (ApiError, MediaError) as exc:
                 generation_failure = str(exc)
-                self.logger.warning("详情图 %d 生成失败，使用源图回退: %s", index, exc)
-                self.warnings.append(f"详情图 {index} 生成回退: {exc}")
+                self.logger.warning(
+                    "Detail-image %d generation failed; using a source-image fallback: %s",
+                    index,
+                    exc,
+                )
+                self.warnings.append(f"Detail-image {index} generation fallback: {exc}")
 
         fallback_url = self._fallback_image(
             fallback_urls,
@@ -1162,8 +1180,13 @@ class ProductionPipelineMixin:
                 editorial_context=editorial_context,
             )
         except (ApiError, AttributeError) as exc:
-            self.logger.warning("详情图候选池全局选片不可用，保留逐槽结果: %s", exc)
-            self.warnings.append(f"详情图候选池全局选片未完成: {exc}")
+            self.logger.warning(
+                "Global detail-image candidate selection is unavailable; keeping per-slot results: %s",
+                exc,
+            )
+            self.warnings.append(
+                f"Global detail-image candidate selection was not completed: {exc}"
+            )
             self.trace.emit(
                 "image.detail_pool_selection_failed",
                 error=str(exc),
@@ -1187,7 +1210,9 @@ class ProductionPipelineMixin:
         rows = review.get("candidates")
         selections = review.get("selections")
         if not isinstance(rows, list) or not isinstance(selections, list):
-            self.warnings.append("详情图候选池评审结构不完整，保留逐槽结果")
+            self.warnings.append(
+                "Detail-image candidate-pool review is incomplete; keeping per-slot results"
+            )
             return False
         by_index = {
             item.get("candidate_index"): item
@@ -1200,7 +1225,9 @@ class ProductionPipelineMixin:
             if isinstance(item, dict) and isinstance(item.get("candidate_index"), int)
         }
         if set(selected_by_slot) != set(indices_by_slot):
-            self.warnings.append("详情图候选池未覆盖全部可选槽位，保留逐槽结果")
+            self.warnings.append(
+                "Detail-image candidate-pool review did not cover every slot; keeping per-slot results"
+            )
             return False
 
         staged: dict[int, tuple[Path, str]] = {}
@@ -1213,7 +1240,7 @@ class ProductionPipelineMixin:
                     row, dict
                 ):
                     raise PipelineError(
-                        f"全局选片返回了槽位外候选: {slot}/{candidate_index}"
+                        f"Global selection returned a candidate outside its slot: {slot}/{candidate_index}"
                     )
                 hard_ok = bool(
                     row.get("usable") is True
@@ -1229,7 +1256,9 @@ class ProductionPipelineMixin:
                     and row.get("major_artifacts") is not True
                 )
                 if not hard_ok:
-                    raise PipelineError(f"全局选片候选未通过硬门禁: {slot}")
+                    raise PipelineError(
+                        f"Globally selected candidate failed a hard gate: {slot}"
+                    )
                 selected_url = candidate_urls[candidate_index]
                 if selected_url == detail_assets[index].source_url:
                     continue
@@ -1245,8 +1274,13 @@ class ProductionPipelineMixin:
         except (ApiError, MediaError, OSError, PipelineError) as exc:
             for path, _ in staged.values():
                 path.unlink(missing_ok=True)
-            self.logger.warning("详情图候选池全局组合安装失败，保留逐槽结果: %s", exc)
-            self.warnings.append(f"详情图候选池全局组合未安装: {exc}")
+            self.logger.warning(
+                "Global detail-image set installation failed; keeping per-slot results: %s",
+                exc,
+            )
+            self.warnings.append(
+                f"Global detail-image set was not installed: {exc}"
+            )
             return False
 
         for index, (path, selected_url) in staged.items():
@@ -1353,7 +1387,7 @@ class ProductionPipelineMixin:
                 ):
                     raise
                 self.logger.warning(
-                    "详情图 %d 存在明确语义硬伤，携带质检反馈重新生成一次: %s",
+                    "Detail image %d has a confirmed semantic defect; regenerating once with review feedback: %s",
                     index,
                     exc.feedback[:500],
                 )
@@ -1363,7 +1397,9 @@ class ProductionPipelineMixin:
                     + exc.feedback[:1200]
                     + "\nPreserve exact product identity and storyboard purpose."
                 )
-        raise last_rejection or SemanticRejection(f"详情图 {index} 语义纠错失败")
+        raise last_rejection or SemanticRejection(
+            f"Detail-image {index} semantic correction failed"
+        )
 
     def _record_detail_candidate_pool(
         self,
@@ -1532,14 +1568,19 @@ class ProductionPipelineMixin:
                 )
             except (ApiError, MediaError, OSError) as exc:
                 generation_failure = str(exc)
-                self.logger.warning("视频模型失败，创建确定性视频回退: %s", exc)
-                self.warnings.append(f"视频生成回退: {exc}")
+                self.logger.warning(
+                    "Video model failed; creating a deterministic video fallback: %s",
+                    exc,
+                )
+                self.warnings.append(f"Video generation fallback: {exc}")
         elif self.client is not None:
             if self.fast_mode:
                 generation_failure = "fast profile skips video-model generation"
                 self.trace.emit("video.generation_skipped", reason="fast-profile")
             else:
-                self.warnings.append("首帧源图触发知识产权或视觉风险，跳过衍生视频生成")
+                self.warnings.append(
+                    "The first-frame source image triggered IP or visual-risk signals; derivative video generation was skipped"
+                )
         create_slideshow_video(main_image_path, destination, duration=8)
         return AssetResult(
             name=destination.name,
@@ -1572,8 +1613,11 @@ class ProductionPipelineMixin:
             create_evidence_table_image(table, destination)
             view = presentation_view(table)
         except (MediaError, ValueError) as exc:
-            self.logger.warning("来源表格渲染失败，保留原详情图: %s", exc)
-            self.warnings.append(f"来源表格详情图生成失败: {exc}")
+            self.logger.warning(
+                "Source-table rendering failed; keeping the existing detail image: %s",
+                exc,
+            )
+            self.warnings.append(f"Source-table detail-image generation failed: {exc}")
             return
         asset.path = str(destination)
         asset.source_url = table.source_url or asset.source_url
@@ -1601,8 +1645,11 @@ class ProductionPipelineMixin:
             os.replace(candidate, Path(video_asset.path))
         except (MediaError, OSError) as exc:
             candidate.unlink(missing_ok=True)
-            self.logger.warning("多镜头视频回退不可用，保留稳定单图视频: %s", exc)
-            self.warnings.append(f"多镜头视频回退不可用: {exc}")
+            self.logger.warning(
+                "Multi-shot video fallback is unavailable; keeping the stable single-image video: %s",
+                exc,
+            )
+            self.warnings.append(f"Multi-shot video fallback is unavailable: {exc}")
             return
         video_asset.model = "ffmpeg-catalog-fallback"
         rebuild_reason = "rebuilt from the final available image set"
@@ -1694,7 +1741,8 @@ class ProductionPipelineMixin:
                     asset.model = "deterministic-source-detail-crop"
                     asset.description = f"Seller-source {focus_crop} close-up repaired from a duplicate slot"
                     note = (
-                        f"自动修复近重复详情图: {asset.name} -> {focus_crop} close-up"
+                        f"Automatically repaired a near-duplicate detail image: "
+                        f"{asset.name} -> {focus_crop} close-up"
                     )
                     if note not in self.warnings:
                         self.warnings.append(note)
@@ -1715,55 +1763,75 @@ class ProductionPipelineMixin:
         work_dir: Path,
     ) -> None:
         facts, taxonomy = state.facts, state.taxonomy
+        english_payload = localization_payloads.get("en", {})
+        raw_english_terms = (
+            english_payload.get("localized_terms")
+            if isinstance(english_payload, dict)
+            else None
+        )
+        english_terms = raw_english_terms if isinstance(raw_english_terms, dict) else {}
+
+        def english_display(value: Any) -> str:
+            raw = str(value or "")
+            rendered = _localized_display("en", raw, english_terms)
+            if re.search(r"[\u4e00-\u9fff]", rendered):
+                rendered = _localized_display("en", raw, {})
+            return (
+                rendered
+                if not re.search(r"[\u4e00-\u9fff]", rendered)
+                else "Seller-declared source value"
+            )
+
         schema_id = (
             taxonomy.attribute_schema_category_id or taxonomy.category.category_id
         )
         schema_note = (
-            f"叶子类目缺少独立属性元数据，属性映射使用同一平台快照中的上级/通用 schema {schema_id}；"
-            f"上架叶子类目仍保持 {taxonomy.category.category_id}。"
+            f"The leaf category has no independent attribute metadata, so attribute mapping uses "
+            f"parent/general schema {schema_id} from the same marketplace snapshot; the listing leaf "
+            f"category remains {taxonomy.category.category_id}."
             if schema_id != taxonomy.category.category_id
-            else f"属性映射使用叶子类目 schema {schema_id}。"
+            else f"Attribute mapping uses leaf-category schema {schema_id}."
         )
 
         role_labels = {
-            "complete_product": "完整商品补充视角",
-            "primary_verified_detail": "核心可见细节",
-            "secondary_verified_detail": "第二可见细节",
-            "verified_variants": "已核验选项展示",
-            "verified_alternate_view": "已核验替代视角",
-            "verified_use_context": "有来源支持的使用场景",
-            "product_only_context": "纯商品应用场景",
-            "texture_closeup": "材质与表面近景",
-            "collar_and_closure": "领部与开合结构",
-            "color_variant_grid": "已核验颜色组合",
-            "hem_and_trim": "下摆与收边细节",
-            "back_silhouette": "背面轮廓",
-            "neckline_closeup": "领口结构近景",
-            "pattern_texture": "图案与表面近景",
-            "sleeve_cuff": "袖口结构近景",
-            "back_view": "商品背面",
-            "hem_shape": "下摆轮廓",
-            "data_table": "来源数据表",
+            "complete_product": "Complementary Full-Product View",
+            "primary_verified_detail": "Primary Verified Detail",
+            "secondary_verified_detail": "Secondary Verified Detail",
+            "verified_variants": "Verified Options",
+            "verified_alternate_view": "Verified Alternate View",
+            "verified_use_context": "Source-Supported Use Context",
+            "product_only_context": "Product-Only Context",
+            "texture_closeup": "Material and Surface Close-Up",
+            "collar_and_closure": "Collar and Closure Construction",
+            "color_variant_grid": "Verified Color Options",
+            "hem_and_trim": "Hem and Trim Detail",
+            "back_silhouette": "Back Silhouette",
+            "neckline_closeup": "Neckline Construction Close-Up",
+            "pattern_texture": "Pattern and Surface Close-Up",
+            "sleeve_cuff": "Sleeve and Cuff Construction",
+            "back_view": "Back View",
+            "hem_shape": "Hem Silhouette",
+            "data_table": "Source Data Table",
         }
 
         def role_purpose(role: str) -> str:
             normalized = str(role or "").strip().casefold()
             if "table" in normalized:
-                return "把模型选择的来源表格按原始单元格内容转化为清晰、易读的购买参考"
+                return "Turns the model-selected source table into a clear buying reference using the exact source cells"
             if any(token in normalized for token in ("variant", "color")):
-                return "集中呈现有来源支持的可选项，帮助买家快速比较"
+                return "Presents source-supported options together for quick comparison"
             if any(token in normalized for token in ("texture", "surface", "material")):
-                return "近距离呈现可见表面特征，补充主图无法传达的细节"
+                return "Shows visible surface characteristics that the hero image cannot convey"
             if any(
                 token in normalized
                 for token in ("collar", "closure", "construction", "detail", "trim", "hem")
             ):
-                return "突出来源图可见的关键结构与做工，不扩展未展示部件"
+                return "Highlights source-visible construction without inventing unseen parts"
             if any(token in normalized for token in ("back", "side", "alternate")):
-                return "补足主图未覆盖的商品视角，帮助理解整体轮廓"
+                return "Adds a product angle not covered by the hero image to clarify the silhouette"
             if any(token in normalized for token in ("use", "context", "lifestyle")):
-                return "在来源证据允许的范围内说明商品的实际呈现方式"
-            return "承担与其他图片不重复的商品信息补充职责"
+                return "Shows practical presentation only within the limits of source evidence"
+            return "Adds product information without duplicating the other images"
 
         reconciled = (
             facts.reconciled_fact_ledger
@@ -1776,17 +1844,17 @@ class ProductionPipelineMixin:
             if isinstance(item, dict)
         ]
         market_labels = {
-            "en": "美国英语（en-US）",
-            "ko": "韩国市场（ko-KR）",
-            "pt": "巴西葡萄牙语（pt-BR）",
+            "en": "United States English (en-US)",
+            "ko": "South Korean market (ko-KR)",
+            "pt": "Brazilian Portuguese (pt-BR)",
         }
         default_market_angles = {
-            "en": "采用自然、直接的商品表达；公制数据保留来源值，并在有数据时提供英制换算。",
-            "ko": "采用自然简洁的韩国购物语气并保留公制，不推导未经证实的韩国尺码对应。",
-            "pt": "采用巴西电商常用词汇与公制表达，避免欧洲葡语措辞和未经证实的地区尺码映射。",
+            "en": "Use natural, direct commerce language; preserve source metric values and add imperial conversions only when the data supports them.",
+            "ko": "Use concise, natural Korean shopping language and metric units without inferring unsupported Korean size equivalents.",
+            "pt": "Use Brazilian commerce vocabulary and metric units while avoiding European Portuguese phrasing and unsupported regional size mappings.",
         }
         market_lines = [
-            f"- **{market_labels[language]}：** {default_market_angles[language]}"
+            f"- **{market_labels[language]}:** {default_market_angles[language]}"
             for language in ("en", "ko", "pt")
         ]
 
@@ -1799,7 +1867,7 @@ class ProductionPipelineMixin:
             )
             role_label = role_labels.get(str(role), str(role).replace("_", " "))
             detail_lines.append(
-                f"- **detail_image_{index}.jpeg｜{role_label}：** {role_purpose(str(role))}。"
+                f"- **detail_image_{index}.jpeg | {role_label}:** {role_purpose(str(role))}."
             )
 
         if decision_rows:
@@ -1812,45 +1880,54 @@ class ProductionPipelineMixin:
                 source = facts.attributes[index]
                 decision = str(row.get("decision") or "publish")
                 if decision == "publish" and len(published) < 5:
-                    published.append(f"{source.name}={source.value}")
+                    published.append(
+                        f"{english_display(source.name)}={english_display(source.value)}"
+                    )
                 elif decision != "publish" and len(withheld) < 3:
-                    withheld.append(f"{source.name}={source.value}")
+                    withheld.append(
+                        f"{english_display(source.name)}={english_display(source.value)}"
+                    )
             conflict_summaries = []
             for conflict in reconciled.get("conflicts", []):
                 if not isinstance(conflict, dict) or len(conflict_summaries) >= 3:
                     continue
-                structured = " ".join(str(conflict.get("structured_value") or "").split())
-                visual = " ".join(str(conflict.get("visual_value") or "").split())
+                structured = english_display(
+                    " ".join(str(conflict.get("structured_value") or "").split())
+                )
+                visual = english_display(
+                    " ".join(str(conflict.get("visual_value") or "").split())
+                )
                 if structured and visual:
                     conflict_summaries.append(
-                        f"卖家声明“{structured}”，源图核验为“{visual}”，公开外观采用源图结果"
+                        f'The seller states "{structured}", while source-image review verifies "{visual}"; public appearance claims use the image-verified result'
                     )
             fact_decision_lines = [
-                "可用于买家表达的主要事实："
-                + ("、".join(published) if published else "以源数据和源图共同确认的商品特征为准")
-                + "。",
-                "未直接进入买家文案的声明："
-                + ("；".join(withheld) if withheld else "无需要特别说明的冲突项")
-                + "。这些字段仍可在有来源依据的平台映射中保留，但不会驱动无依据的视觉生成。",
+                "Primary facts available for shopper-facing copy: "
+                + (", ".join(published) if published else "features jointly supported by source data and source images")
+                + ".",
+                "Claims withheld from shopper-facing copy: "
+                + ("; ".join(withheld) if withheld else "no conflict requires special disclosure")
+                + ". These fields may remain in evidence-backed marketplace mappings but never drive unsupported visual generation.",
             ]
             if conflict_summaries:
-                fact_decision_lines.append("本次关键冲突处理：" + "；".join(conflict_summaries) + "。")
+                fact_decision_lines.append(
+                    "Key conflict handling for this run: "
+                    + "; ".join(conflict_summaries)
+                    + "."
+                )
         else:
             fact_decision_lines = [
-                "本次运行未产生独立的视觉冲突裁决明细；公开事实仍只取自源数据、可直接核验的源图信息和确定性换算，"
-                "无法确认的字段不进入扩展性营销表达。",
+                "This run produced no separate visual-conflict adjudication details. Public facts still come only from source data, directly verifiable source-image evidence, and deterministic conversions; unverified fields are excluded from expanded marketing claims.",
             ]
 
         category_method = str(taxonomy.category.method or "").casefold()
         if "react" in category_method or "model" in category_method:
             category_selection_note = (
-                "本次叶子类目由模型在平台快照中自主检索候选、读取关系并提交选择，代码负责验证节点存在、"
-                "确为叶子类目且映射 ID 可回查。"
+                "The model independently searched candidates and relationships in the marketplace snapshot before submitting the leaf category. Host code verified that the node exists, is a leaf, and that every mapping ID can be resolved."
             )
         else:
             category_selection_note = (
-                "本次未使用模型类目探索，采用通用的本地证据排序保住可交付性；提交前仍校验类目节点和映射 ID，"
-                "但该结果的语义置信度低于模型完成的平台检索。"
+                "Model-based category exploration was unavailable, so a general local evidence ranking preserved delivery availability. Category nodes and mapping IDs were still validated before submission, but semantic confidence is lower than for completed model exploration."
             )
 
         model_locales = [
@@ -1859,10 +1936,9 @@ class ProductionPipelineMixin:
             if source and "fallback" not in source and "guard" not in source
         ]
         localization_delivery_note = (
-            "本次三种语言均由目标语种写作模型起草，并经过独立事实审校；机器附录再由代码从平台映射确定性生成。"
+            "All three language versions were drafted by target-language writers and independently fact-audited; code then generated the machine appendix deterministically from marketplace mappings."
             if len(model_locales) == 3
-            else "本次至少一种语言启用了可用性保底；保底文案仍从裁决后事实生成，且保持机器附录完整，"
-            "不会用固定商品答案替代未知语义。"
+            else "At least one language used an availability fallback. Fallback copy still derives from adjudicated facts and retains the complete machine appendix; it never substitutes fixed product answers for unknown semantics."
         )
 
         video_asset = next(
@@ -1870,110 +1946,93 @@ class ProductionPipelineMixin:
         )
         if video_asset is not None and video_asset.generated:
             video_delivery = (
-                "使用已核验首帧生成短时动态展示，以克制镜头运动串联商品轮廓和核心细节。"
+                "Uses a verified first frame to create a short dynamic presentation with restrained camera motion across the product silhouette and key details."
             )
         else:
             video_delivery = (
-                "使用最终通过质检的图片组成短时目录式展示，确保视频可播放且与最终图片版本一致。"
+                "Uses the final quality-checked images in a short catalog presentation so the video remains playable and synchronized with the delivered image set."
             )
 
         selected_table = select_render_table(facts.evidence_tables)
         if selected_table is not None:
             table_strategy = (
-                "源图片中的表格已通过引用、行列和展示用途校验，并按模型选择的内容进入详情与文案附录；"
-                "代码只复现被引用的原始单元格，不补造字段。"
+                "A table found in a source image passed reference, row/column, and presentation-purpose validation and appears in the selected detail asset and copy appendix. Code reproduces only referenced source cells and does not invent fields."
             )
         elif facts.evidence_tables:
             table_strategy = (
-                "源图片中虽识别到结构化表格，但模型未将其判定为适合本次交付的购买信息，因此不向买家承诺"
-                "不存在的尺码表或测量数据。"
+                "Structured tables were detected in source images, but the model did not judge them suitable as buying information for this delivery. The copy therefore makes no unsupported size-chart or measurement promises."
             )
         else:
-            table_strategy = "源图片中没有可安全转写的表格，文案只使用结构化商品与 SKU 事实。"
+            table_strategy = "No source-image table could be transcribed safely, so the copy uses only structured product and SKU facts."
 
         lines = [
-            "# 商品本地化素材生成策略说明",
+            "# Product Localization Asset Strategy",
             "",
-            "## 1. 商品定位与交付目标",
+            "## 1. Product Positioning and Delivery Objective",
             "",
-            f"- 商品 ID：{facts.offer_id}",
-            f"- 数据来源：{facts.platform}",
-            f"- 源商品 URL：{facts.source_url}",
-            f"- AliExpress 叶子类目：{taxonomy.category.name}（{taxonomy.category.category_id}）",
-            "- 交付目标：形成可直接进入上架流程的三语文案、1 张主图、5 张职责互补的详情图和 1 个商品视频。",
+            f"- Product ID: {facts.offer_id}",
+            f"- Source platform: {english_display(facts.platform)}",
+            f"- Source product URL: {facts.source_url}",
+            f"- AliExpress leaf category: {english_display(taxonomy.category.name)} ({taxonomy.category.category_id})",
+            "- Delivery objective: produce listing-ready copy in three languages, one hero image, five complementary detail images, and one product video.",
             "",
-            "Agent 的整体流程是：① 汇总商品 JSON、SKU 与源图；② 优先由模型探索平台类目并解释语义选择；"
-            "③ 将结构化声明与可见外观统一裁决；④ 从同一事实状态生成三语文案和六图视觉叙事；"
-            "⑤ 对单项素材和整组交付做一致性复核，只有更安全的候选才替换当前成品。"
-            "买家阅读层与平台解析层分别组织，因此自然表达不会破坏 ID、SKU 和枚举值的准确性。",
+            "The Agent follows five stages: (1) consolidate product JSON, SKUs, and source images; "
+            "(2) let the model explore the marketplace taxonomy and explain its semantic choice; "
+            "(3) adjudicate structured seller statements against visible appearance; "
+            "(4) generate three localized copy versions and a six-image narrative from the same fact state; and "
+            "(5) review individual assets and the complete set, replacing an accepted asset only with a safer candidate. "
+            "Shopper-facing prose and machine-parseable listing data are kept separate so natural language cannot alter IDs, SKUs, or enumerated values.",
             "",
-            "## 2. 事实一致性与源数据冲突处理",
+            "## 2. Factual Consistency and Source-Conflict Handling",
             "",
-            "Agent 将商品 JSON、SKU、平台类目快照和源图片观察统一整理为一个可追溯事实状态。"
-            "标题和结构化属性用于提供卖家声明，源图片用于核验外观；两者冲突时，不把冲突字段直接写入买家文案，"
-            "而是将可见事实、仅机器保留字段和拒绝发布字段分开处理。",
+            "The Agent consolidates product JSON, SKUs, the marketplace taxonomy snapshot, and source-image observations into one traceable fact state. Titles and structured attributes provide seller statements, while source images verify appearance. When they conflict, the field is not copied directly into shopper prose; verified visible facts, machine-only fields, and rejected publication claims are handled separately.",
             "",
             *fact_decision_lines,
             table_strategy,
-            "所有三语文案、图片提示和媒体说明共享同一份裁决后事实。任何数值转换只执行确定性换算，"
-            "不补全材质含量、性能、认证、地区尺码或其他源数据未支持的信息。",
+            "All three copy versions, image prompts, and media descriptions share the same adjudicated facts. Numeric conversions are deterministic only; material composition, performance, certifications, regional sizing, and any other unsupported information are never filled in.",
             "",
-            "## 3. 平台类目与可上架结构",
+            "## 3. Marketplace Taxonomy and Listing Structure",
             "",
-            f"- 叶子类目 ID：{taxonomy.category.category_id}",
-            f"- 叶子类目名称：{taxonomy.category.name}",
-            f"- 类目路径：{taxonomy.category.path}",
-            f"- 命中的平台商品/销售属性数：{len(taxonomy.attributes)}",
+            f"- Leaf category ID: {taxonomy.category.category_id}",
+            f"- Leaf category name: {english_display(taxonomy.category.name)}",
+            f"- Category path: {english_display(taxonomy.category.path)}",
+            f"- Mapped marketplace product/sales attributes: {len(taxonomy.attributes)}",
             "",
-            "类目选择以商品类型、使用人群、形态和已核验属性为依据，并只接受平台快照中存在的叶子节点。"
-            "最终提交的属性 ID、枚举 Value ID、销售属性和 SKU 组合均回查平台数据关系；证据不足的必填项保留为未决，"
-            "不通过猜测补齐。",
+            "Category selection is grounded in product type, intended wearer, form, and verified attributes, and accepts only leaf nodes present in the marketplace snapshot. Submitted attribute IDs, enumerated value IDs, sales attributes, and SKU combinations are resolved back to platform relationships. Required fields without sufficient evidence remain unresolved instead of being guessed.",
             category_selection_note,
             schema_note,
             "",
-            "## 4. 三个目标市场的本地化策略",
+            "## 4. Localization Strategy for the Three Target Markets",
             "",
             *market_lines,
             "",
             f"- {localization_delivery_note}",
-            "- 买家文案按商品特征 → 可核验结构 → 保守购买价值组织；任一步缺少事实或像素证据时停止延伸。",
-            "- 买家文案与机器附录独立构建：模型只生成标题、概述、卖点和尺码提示；代码从已核验的类目、属性、"
-            "SKU 和媒体契约确定性渲染附录，保证三种语言中的商品 ID、URL、平台映射和 SKU 信息一致。",
+            "- Shopper copy is organized from product characteristics to verifiable construction to conservative buying value; expansion stops whenever fact or pixel evidence is missing.",
+            "- Shopper prose and the machine appendix are built independently. The model authors only the title, overview, highlights, and sizing note, while code renders the appendix deterministically from verified taxonomy, attributes, SKUs, and media contracts. Product IDs, URLs, marketplace mappings, and SKU data therefore remain consistent in all three languages.",
             "",
-            "## 5. 六图视觉叙事与视频职责",
+            "## 5. Six-Image Narrative and Video Role",
             "",
-            "为兼顾三个市场并降低文化误读，整体视觉采用克制、清晰、以商品为中心的电商表达："
-            "主图负责快速识别，详情图按实际证据补充整体视角、结构、表面、选项或使用信息，视频负责串联最终成品。"
-            "六张图片通过同一商品身份、克制背景和协调光线建立系列感，同时避免只更换构图却重复表达。",
+            "To serve all three markets while reducing cultural ambiguity, the visual system uses restrained, clear, product-centered commerce imagery. The hero image enables rapid recognition; detail images add evidence-backed views, construction, surfaces, options, or usage information; and the video connects the final assets. The six images maintain product identity, controlled backgrounds, and coordinated lighting while avoiding role duplication disguised as composition changes.",
             "",
-            "- **main_image.jpeg｜转化入口：** 使用单一完整商品和干净近白背景建立第一识别锚点；"
-            "不添加文字、价格、徽章、水印或无来源道具。",
+            "- **main_image.jpeg | Conversion Entry Point:** Uses one complete product on a clean near-white background as the primary recognition anchor, with no text, prices, badges, watermarks, or unsupported props.",
             *detail_lines,
-            f"- **product_video.mp4｜动态总览：** {video_delivery}",
+            f"- **product_video.mp4 | Dynamic Overview:** {video_delivery}",
             "",
-            "候选图片先独立检查商品身份、结构、颜色、文字和重大瑕疵，再以六图集合检查重复职责和信息覆盖。"
-            "只有通过硬性门禁且不削弱现有成品的候选才会替换当前素材。",
+            "Each image candidate is first checked for product identity, construction, color, unwanted text, and major defects. The complete six-image set is then reviewed for duplicate roles and information coverage. A candidate replaces an accepted asset only after passing hard gates without weakening the current delivery.",
             "",
-            "## 6. 事实一致、合规与素材质检",
+            "## 6. Factual Consistency, Compliance, and Asset Quality Control",
             "",
-            "- **内容合规：** 买家文案排除价格、折扣、联系方式、站外营销、评级、无来源认证和身体改造类表达；"
-            "生成图片与视频禁止新增文字、平台标记、二维码、水印和品牌标识。",
-            "- **事实一致：** 文案声明、平台映射、SKU 表、图片职责和媒体说明均投影自同一裁决后事实；"
-            "视觉与结构化字段冲突时，公开层使用已核验结果并保留内部证据链。",
-            "- **图片质检：** 检查格式、尺寸、文件大小、空白图、近重复、主体完整度、结构保持和六图职责覆盖。",
-            "- **视频质检：** 完整解码视频流，检查时长、容器、分辨率、可播放性、身份稳定和不可容忍瑕疵。",
-            "- **修复策略：** 只针对有具体证据的缺陷做单项返修；新候选失败时保留已验收版本，"
-            "任何改动均同步其文案、媒体说明和视频依赖后重新评审。",
+            "- **Content compliance:** Shopper copy excludes prices, discounts, contact details, off-platform marketing, ratings, unsupported certifications, and body-altering claims. Generated images and video may not add text, marketplace marks, QR codes, watermarks, or brand identifiers.",
+            "- **Factual consistency:** Copy claims, marketplace mappings, SKU tables, image roles, and media descriptions are projections of the same adjudicated fact state. When pixels and structured fields conflict, public content uses the verified result while the private evidence trail is preserved.",
+            "- **Image quality control:** Checks format, dimensions, file size, blank or low-information output, near-duplicates, subject completeness, construction fidelity, and six-image role coverage.",
+            "- **Video quality control:** Fully decodes the video stream and checks duration, container, resolution, playability, identity stability, and unacceptable defects.",
+            "- **Repair strategy:** Repairs only defects backed by concrete evidence. A failed new candidate never replaces an accepted version, and every change synchronizes dependent copy, media descriptions, and video before review runs again.",
             "",
-            "## 7. 可直接上架的交付保障",
+            "## 7. Listing-Ready Delivery Assurance",
             "",
-            "最终交付严格使用平台要求的 11 个文件名。三份文案均包含标题、来源平台、商品 ID 与 URL、"
-            "叶子类目、平台属性、SKU/Spec ID、五张详情图说明和视频说明；机器附录保持字段可解析，"
-            "买家阅读层保持目标语言自然表达。",
+            "The final delivery uses exactly the 11 required filenames. Each copy file includes a title, source platform, product ID and URL, leaf category, marketplace attributes, SKU/Spec IDs, descriptions of all five detail images, and a video description. The machine appendix remains field-parseable while shopper-facing prose stays natural in its target language.",
             "",
-            "所有素材先在临时目录完成事实、格式、规格和语义质检，再原子写入输出目录并执行一次完整复核。"
-            "这套流程的目标不是最大化生成数量，而是在一次运行内稳定交付一组事实一致、职责完整、"
-            "可播放且可直接进入 AliExpress 上架流程的本地化素材。",
+            "Every asset completes factual, format, specification, and semantic checks in a temporary directory before an atomic write to the output directory and one final full-delivery review. The objective is not to maximize generation volume, but to deliver a stable, fact-consistent, role-complete, playable localization package ready for the AliExpress listing workflow in a single run.",
         ]
         lines.append("")
         (work_dir / "strategy_document.md").write_text(

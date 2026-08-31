@@ -420,7 +420,7 @@ class TransactionPipelineMixin:
 
         clean_reason = " ".join(str(reason).split())[:1200]
         if clean_reason:
-            warning = f"交付进入可用性保底: {clean_reason}"
+            warning = f"Delivery entered availability fallback: {clean_reason}"
             if warning not in self.warnings:
                 self.warnings.append(warning)
             self.logger.warning(warning)
@@ -439,6 +439,7 @@ class TransactionPipelineMixin:
             canvas: tuple[int, int],
             white_background: bool,
             focus_crop: str = "",
+            max_bytes: int = 5 * 1024 * 1024,
         ) -> None:
             staged = destination.with_name(
                 f".{destination.stem}-{uuid.uuid4().hex}.recovery.jpeg"
@@ -448,7 +449,7 @@ class TransactionPipelineMixin:
                     source,
                     staged,
                     canvas=canvas,
-                    max_bytes=5 * 1024 * 1024,
+                    max_bytes=max_bytes,
                     white_background=white_background,
                     focus_crop=focus_crop,
                 )
@@ -458,6 +459,14 @@ class TransactionPipelineMixin:
 
         by_name = {item.name: item for item in state.assets}
         main_path = work_dir / "main_image.jpeg"
+        if image_is_readable(main_path) and main_path.stat().st_size >= 1024 * 1024:
+            replace_normalized(
+                main_path,
+                main_path,
+                canvas=(1600, 1600),
+                white_background=True,
+                max_bytes=1024 * 1024 - 1,
+            )
         if not image_is_readable(main_path):
             local_source = next(
                 (
@@ -473,6 +482,7 @@ class TransactionPipelineMixin:
                     main_path,
                     canvas=(1600, 1600),
                     white_background=True,
+                    max_bytes=1024 * 1024 - 1,
                 )
             else:
                 downloaded = False
@@ -484,10 +494,14 @@ class TransactionPipelineMixin:
                             downloads_dir,
                             canvas=(1600, 1600),
                             white_background=True,
+                            max_bytes=1024 * 1024 - 1,
                         )
                         downloaded = True
                     except Exception as exc:
-                        self.logger.warning("最终源图保底不可用，创建中性占位图: %s", exc)
+                        self.logger.warning(
+                            "Final source-image fallback is unavailable; creating a neutral placeholder: %s",
+                            exc,
+                        )
                 if not downloaded:
                     create_emergency_image(main_path, canvas=(1600, 1600))
             by_name["main_image.jpeg"] = AssetResult(
@@ -638,17 +652,20 @@ class TransactionPipelineMixin:
                 work_dir,
             )
         except Exception as exc:
-            self.logger.warning("完整策略文档构建失败，写入最小可解析版本: %s", exc)
+            self.logger.warning(
+                "Full strategy-document generation failed; writing a minimal parseable version: %s",
+                exc,
+            )
             (work_dir / "strategy_document.md").write_text(
                 "\n".join(
                     (
-                        "# Agent 本地化交付策略",
+                        "# Agent Localization Delivery Strategy",
                         "",
-                        f"- 商品 ID：{facts.offer_id}",
-                        f"- 平台叶子类目 ID：{taxonomy.category.category_id}",
-                        "- 事实：所有公开内容以输入商品数据和已保存素材为准。",
-                        "- 本地化：分别交付英语、韩语和巴西葡萄牙语版本。",
-                        "- 质检：保留格式、尺寸、命名和可播放性检查结果；异常时提交最佳可用快照。",
+                        f"- Product ID: {facts.offer_id}",
+                        f"- Marketplace leaf category ID: {taxonomy.category.category_id}",
+                        "- Facts: all public content is grounded in input product data and saved assets.",
+                        "- Localization: separate English, Korean, and Brazilian Portuguese versions are delivered.",
+                        "- Quality control: format, dimensions, naming, and playability are checked; the best available snapshot is submitted after an unexpected failure.",
                         "",
                     )
                 ),

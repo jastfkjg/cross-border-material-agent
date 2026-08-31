@@ -239,7 +239,7 @@ class TaxonomyPipelineMixin:
             state.visual_set_review,
         )
         self.logger.info(
-            "分类返修已原子提交: category=%s schema=%s mappings=%d",
+            "Taxonomy repair was committed atomically: category=%s schema=%s mappings=%d",
             taxonomy.category.category_id,
             taxonomy.attribute_schema_category_id,
             len(taxonomy.attributes),
@@ -278,7 +278,10 @@ class TaxonomyPipelineMixin:
             resolved_category = explorer.resolve_category(facts)
         except ApiError as exc:
             explorer.close()
-            self.logger.warning("类目 ReAct 探索失败，保留离线降级结果: %s", exc)
+            self.logger.warning(
+                "Category ReAct exploration failed; keeping the offline fallback result: %s",
+                exc,
+            )
             self.trace.emit(
                 "taxonomy.category_transaction_failed",
                 category=taxonomy.category.category_id,
@@ -303,7 +306,7 @@ class TaxonomyPipelineMixin:
         except ApiError as exc:
             resolved = category_anchored_fallback
             self.logger.warning(
-                "属性 ReAct 探索失败，保留已提交类目并仅降级 schema/mapping: %s",
+                "Attribute ReAct exploration failed; keeping the committed category and falling back only for schema/mapping: %s",
                 exc,
             )
             self.trace.emit(
