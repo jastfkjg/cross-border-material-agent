@@ -51,7 +51,7 @@ _RUBRIC_DEFINITIONS = {
     "A2": {
         "name": "Artifact specification compliance",
         "scope": "Completeness and physical file specifications only; do not judge semantic correctness here.",
-        "judge": "Each text file must exist and be below 1 MB; hero must be jpeg/png and at least 800x800; every detail image must be jpeg/png, both dimensions above 260 px, and at most 5 MB; video must exist, be playable mp4/mov, and below 200 MB.",
+        "judge": "Each text file must exist and be below 1 MB; hero must be jpeg/png, at least 800x800, and below 1 MB; every detail image must be jpeg/png, both dimensions above 260 px, and at most 5 MB; video must exist, be playable mp4/mov, and below 200 MB.",
         "weight": 20,
     },
     "A3": {
@@ -131,6 +131,11 @@ class BoundedDeliveryAgent:
             and item.get("inspection_complete") is True
             and item.get("safe_for_generation_reference") is True
         }
+        visual_index = [
+            self._compact_source_image_index(item)
+            for item in source_images
+            if isinstance(item, dict)
+        ]
         if self.client is None or not use_model:
             return default
         workspace_temp = tempfile.TemporaryDirectory(
@@ -167,7 +172,19 @@ class BoundedDeliveryAgent:
                 "missing_required": taxonomy.missing_required,
             },
         )
-        workspace.host_write_json("evidence/visual.json", vision)
+        # The planner needs a navigable index, not the full per-image vision
+        # transcript.  Keeping the complete transcript in every tool response
+        # caused otherwise valid plans to exceed provider request limits on
+        # products with many source images.  Detailed rows remain available in
+        # bounded pages through inspect_evidence.
+        workspace.host_write_json(
+            "evidence/visual.json",
+            {
+                "summary": self._compact_visual_evidence(vision),
+                "source_image_index": visual_index,
+                "tables": self._compact_table_presentations(vision),
+            },
+        )
         workspace.host_write_json(
             "workspace/index.json",
             {
@@ -236,12 +253,50 @@ class BoundedDeliveryAgent:
                     "missing_required": taxonomy.missing_required,
                 }
             if section == "visual":
+                requested_indexes = arguments.get("indexes")
+                if isinstance(requested_indexes, list):
+                    wanted = {
+                        item
+                        for item in requested_indexes[:20]
+                        if isinstance(item, int) and item >= 0
+                    }
+                    selected = [
+                        item
+                        for item in source_images
+                        if isinstance(item, dict) and item.get("index") in wanted
+                    ]
+                    offset = 0
+                else:
+                    try:
+                        offset = max(0, int(arguments.get("offset", 0)))
+                    except (TypeError, ValueError):
+                        offset = 0
+                    try:
+                        limit = min(20, max(1, int(arguments.get("limit", 12))))
+                    except (TypeError, ValueError):
+                        limit = 12
+                    selected = [
+                        item
+                        for item in source_images[offset : offset + limit]
+                        if isinstance(item, dict)
+                    ]
+                page = [self._compact_source_image_detail(item) for item in selected]
+                next_offset = offset + len(selected)
                 return {
                     "section": section,
                     "evidence": self._compact_visual_evidence(vision),
-                    "indexed_source_images": [
-                        item for item in source_images if isinstance(item, dict)
-                    ],
+                    "safe_reference_indexes": sorted(available_reference_indexes),
+                    "source_image_index": visual_index,
+                    "source_image_details": page,
+                    "detail_page": {
+                        "offset": offset,
+                        "count": len(page),
+                        "total": len(source_images),
+                        "next_offset": (
+                            next_offset if next_offset < len(source_images) else None
+                        ),
+                    },
+                    "table_presentations": self._compact_table_presentations(vision),
                 }
             if section == "capabilities":
                 return {
@@ -329,7 +384,14 @@ class BoundedDeliveryAgent:
                 "section": {
                     "type": "string",
                     "enum": ["product", "canonical", "taxonomy", "visual", "capabilities"],
-                }
+                },
+                "offset": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                "indexes": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 0},
+                    "maxItems": 20,
+                },
             },
             "required": ["section"],
             "additionalProperties": False,
@@ -428,7 +490,8 @@ class BoundedDeliveryAgent:
             "Plan this delivery. Start from workspace/index.json and inspect whatever evidence you need, then submit one complete plan. "
             "The output contract requires one square hero, exactly five vertical detail images, one short video, "
             "and localized en-US, ko-KR, and pt-BR copy. Detail jobs and their order are yours to choose. "
-            "Inspect the indexed source images and bind every visual job to the exact safe evidence indexes it needs. "
+            "Use the compact visual index and request only the bounded detail pages or exact indexes you need; "
+            "bind every visual job to the exact safe evidence indexes it needs. "
             "When evidence is insufficient for a proposed view, choose a different grounded job. "
             "Also choose the production launch order after placing the reference hero first."
         )
@@ -447,12 +510,17 @@ class BoundedDeliveryAgent:
             )
             self.orchestrator_messages = result.messages
         except ApiError as exc:
-            self.logger.warning("LLM 编排规划不可用，采用保守有界策略: %s", exc)
+            self.logger.warning(
+                "LLM orchestration planning is unavailable; using a conservative bounded strategy: %s",
+                exc,
+            )
             return default
         finally:
             workspace_temp.cleanup()
         if not submitted:
-            self.logger.warning("编排器未在预算内提交有效计划，采用保守计划")
+            self.logger.warning(
+                "The orchestrator did not submit a valid plan within budget; using the conservative plan"
+            )
             return default
         return self._normalize_plan(submitted, default)
 
@@ -534,9 +602,78 @@ class BoundedDeliveryAgent:
             or vision.get("design_features"),
             "preservation_constraints": vision.get("preservation_constraints"),
             "image_quality_notes": vision.get("image_quality_notes"),
+            "best_hero_image_index": vision.get("best_hero_image_index"),
             "inspected_source_image_count": inspected_count,
             "source_image_role_counts": role_counts,
         }
+
+    @staticmethod
+    def _compact_source_image_index(item: dict[str, Any]) -> dict[str, Any]:
+        """Return the minimum planner-facing directory row for one source image."""
+
+        return {
+            "index": item.get("index"),
+            "role": item.get("role"),
+            "safe_reference": item.get("safe_for_generation_reference") is True,
+            "coverage": item.get("product_coverage"),
+            "sharpness": item.get("sharpness"),
+            "color": item.get("dominant_color"),
+            "cleanup": item.get("reference_requires_cleanup") is True,
+        }
+
+    @staticmethod
+    def _compact_source_image_detail(item: dict[str, Any]) -> dict[str, Any]:
+        """Expose relevant visual facts without replaying URLs or raw transcripts."""
+
+        boolean_fields = (
+            "has_text",
+            "has_overlay_text",
+            "has_intrinsic_product_text",
+            "has_logo",
+            "has_third_party_brand",
+            "has_person",
+            "has_unrelated_props",
+            "multiple_products",
+            "product_complete",
+            "clean_neutral_background",
+            "product_obscured",
+        )
+        return {
+            **BoundedDeliveryAgent._compact_source_image_index(item),
+            "inspection_complete": item.get("inspection_complete") is True,
+            "observations": {
+                field: item.get(field) is True
+                for field in boolean_fields
+                if item.get(field) is True
+            },
+            "risk_reasons": [
+                str(reason)[:240]
+                for reason in (item.get("risk_reasons") or [])[:8]
+                if isinstance(reason, str)
+            ],
+        }
+
+    @staticmethod
+    def _compact_table_presentations(vision: dict[str, Any]) -> list[dict[str, Any]]:
+        """Keep table creative intent while excluding the potentially large OCR grid."""
+
+        result: list[dict[str, Any]] = []
+        tables = vision.get("tables") if isinstance(vision, dict) else None
+        if not isinstance(tables, list):
+            return result
+        for table in tables[:12]:
+            if not isinstance(table, dict):
+                continue
+            presentation = table.get("presentation")
+            result.append(
+                {
+                    "table_id": table.get("table_id"),
+                    "source_image_index": table.get("source_image_index"),
+                    "cell_count": len(table.get("cells") or []),
+                    "presentation": presentation if isinstance(presentation, dict) else {},
+                }
+            )
+        return result
 
     def reconcile_facts(
         self,
@@ -575,7 +712,9 @@ Do not edit source data. Instead decide which appearance claims may be used in b
 Return exactly:
 - seller_title_decision: publish or machine_only
 - attribute_decisions: array of objects with attribute_index, decision (publish, reject, or machine_only),
-  canonical_value, reason, and visual_evidence (string array). Include every structured attribute whose
+  surface_decisions (object with buyer_copy, media_generation, marketplace_mapping and machine_appendix;
+  each value is publish, reject, or machine_only), canonical_value, reason, and visual_evidence (string array).
+  The per-surface decisions are authoritative; decision is only a compact overall summary. Include every structured attribute whose
   buyer-facing appearance meaning is confirmed, contradicted, ambiguous, or superseded by source pixels.
 - canonical_visual_claims: array of objects with concept, value, confidence (0-1), and evidence (string array).
   Include only directly and consistently visible claims useful to downstream copy or media.
@@ -644,16 +783,109 @@ question to investigate, never as evidence by itself):
         normalized: dict[str, dict[str, Any]] = {}
         for model, payload, error in results:
             if payload is None:
-                self.logger.warning("事实裁决模型 %s 不可用: %s", model, error)
+                self.logger.warning(
+                    "Fact-adjudication model %s is unavailable: %s", model, error
+                )
                 continue
             parsed = self._normalize_reconciliation(payload, len(attributes))
             if parsed:
                 normalized[model] = parsed
             else:
-                self.logger.warning("事实裁决模型 %s 返回结构无效", model)
+                self.logger.warning(
+                    "Fact-adjudication model %s returned an invalid structure", model
+                )
         if not normalized:
             return {}
-        return self._aggregate_reconciliations(normalized)
+        aggregated = self._aggregate_reconciliations(normalized)
+        has_disagreement = any(
+            len(set(item.get("model_votes", {}).values())) > 1
+            or any(
+                len(set(vote for vote in votes.values() if vote)) > 1
+                for votes in item.get("surface_model_votes", {}).values()
+                if isinstance(votes, dict)
+            )
+            for item in aggregated.get("attribute_decisions", [])
+            if isinstance(item, dict)
+        ) or len(set(aggregated.get("seller_title_votes", {}).values())) > 1
+        if not has_disagreement:
+            return aggregated
+
+        # Do not let host vote arithmetic become the semantic decision maker.
+        # A fresh adjudicator receives the exact dissent, source rows and visual
+        # observations, then resolves only the disputed projections. If that
+        # bounded call is unavailable, the conservative aggregate remains a
+        # complete availability result.
+        adjudication_system = (
+            "You are the final evidence adjudicator for structured-versus-visual product facts. "
+            "Return JSON only. Resolve model disagreements from the supplied evidence; do not use "
+            "product-specific rules or benchmark memory. Pixel non-observability is not contradiction. "
+            "Keep buyer_copy, media_generation, marketplace_mapping and machine_appendix decisions distinct."
+        )
+        adjudication_prompt = f"""
+Return the same reconciliation schema used by the candidate reports:
+- seller_title_decision
+- attribute_decisions with attribute_index, decision, surface_decisions, canonical_value, reason, visual_evidence
+- canonical_visual_claims
+- conflicts
+
+Preserve source-grounded non-visual facts for buyer_copy or marketplace_mapping when appropriate even if
+media_generation must not depict them. Use reject only for direct contradictory evidence. Include every
+disputed attribute index and any additional row required to make the decision coherent.
+
+Indexed structured attributes:
+{json.dumps(attributes, ensure_ascii=False)}
+
+Compact source-image evidence:
+{json.dumps(self._compact_visual_evidence(vision), ensure_ascii=False)}
+
+Independent candidate reports:
+{json.dumps(normalized, ensure_ascii=False)}
+""".strip()
+        try:
+            adjudicated_payload = self.client.chat_json(
+                adjudication_system,
+                adjudication_prompt,
+                model=self.client.config.review_model,
+                fallback_model=self.client.config.review_fallback_model,
+            )
+            adjudicated = self._normalize_reconciliation(
+                adjudicated_payload, len(attributes)
+            )
+        except (ApiError, ValueError, TypeError) as exc:
+            self.logger.warning(
+                "Fact-reconciliation disagreement adjudicator is unavailable; preserving conservative aggregate: %s",
+                exc,
+            )
+            return aggregated
+        if not adjudicated:
+            return aggregated
+        adjudicated_by_index = {
+            item["attribute_index"]: item
+            for item in adjudicated["attribute_decisions"]
+        }
+        for item in aggregated["attribute_decisions"]:
+            replacement = adjudicated_by_index.get(item["attribute_index"])
+            if replacement is None:
+                continue
+            item.update(
+                {
+                    "decision": replacement["decision"],
+                    "surface_decisions": replacement["surface_decisions"],
+                    "canonical_value": replacement["canonical_value"],
+                    "reason": replacement["reason"],
+                    "visual_evidence": replacement["visual_evidence"],
+                    "adjudicated": True,
+                }
+            )
+        aggregated["seller_title_decision"] = adjudicated["seller_title_decision"]
+        if adjudicated["canonical_visual_claims"]:
+            aggregated["canonical_visual_claims"] = adjudicated[
+                "canonical_visual_claims"
+            ]
+        if adjudicated["conflicts"]:
+            aggregated["conflicts"] = adjudicated["conflicts"]
+        aggregated["disagreement_adjudicated"] = True
+        return aggregated
 
     @staticmethod
     def _normalize_reconciliation(
@@ -677,6 +909,24 @@ question to investigate, never as evidence by itself):
                     continue
                 seen.add(index)
                 evidence = item.get("visual_evidence")
+                raw_surface_decisions = item.get("surface_decisions")
+                allowed_surface_names = {
+                    "buyer_copy",
+                    "media_generation",
+                    "marketplace_mapping",
+                    "machine_appendix",
+                }
+                allowed_decisions = {"publish", "reject", "machine_only"}
+                surface_decisions = (
+                    {
+                        str(key): str(value)
+                        for key, value in raw_surface_decisions.items()
+                        if str(key) in allowed_surface_names
+                        and str(value) in allowed_decisions
+                    }
+                    if isinstance(raw_surface_decisions, dict)
+                    else {}
+                )
                 decisions.append(
                     {
                         "attribute_index": index,
@@ -690,6 +940,7 @@ question to investigate, never as evidence by itself):
                         ][:12]
                         if isinstance(evidence, list)
                         else [],
+                        "surface_decisions": surface_decisions,
                     }
                 )
         canonical: list[dict[str, Any]] = []
@@ -823,6 +1074,31 @@ question to investigate, never as evidence by itself):
             canonical_values = [
                 item["canonical_value"] for _, item in rows if item["canonical_value"]
             ]
+            surface_decisions: dict[str, str] = {}
+            for surface in (
+                "buyer_copy",
+                "media_generation",
+                "marketplace_mapping",
+                "machine_appendix",
+            ):
+                surface_votes = [
+                    item.get("surface_decisions", {}).get(surface)
+                    for _, item in rows
+                    if item.get("surface_decisions", {}).get(surface)
+                ]
+                if not surface_votes:
+                    continue
+                counts = {
+                    value: surface_votes.count(value)
+                    for value in ("publish", "reject", "machine_only")
+                }
+                leaders = [
+                    value for value, count in counts.items()
+                    if count == max(counts.values())
+                ]
+                surface_decisions[surface] = (
+                    leaders[0] if len(leaders) == 1 else "machine_only"
+                )
             decisions.append(
                 {
                     "attribute_index": index,
@@ -839,6 +1115,14 @@ question to investigate, never as evidence by itself):
                         )
                     )[:20],
                     "model_votes": {model: item["decision"] for model, item in rows},
+                    "surface_decisions": surface_decisions,
+                    "surface_model_votes": {
+                        surface: {
+                            model: item.get("surface_decisions", {}).get(surface, "")
+                            for model, item in rows
+                        }
+                        for surface in surface_decisions
+                    },
                 }
             )
 
@@ -891,7 +1175,7 @@ question to investigate, never as evidence by itself):
             for item in result["conflicts"]
         ][:50]
         return {
-            "version": 1,
+            "version": 2,
             "models": list(results),
             "seller_title_decision": title_decision,
             "seller_title_votes": title_votes,
@@ -1020,8 +1304,11 @@ already represented by the independent six-image set review. The video input, wh
 generated video URL. A provenance_source_url is never the final artifact and must not be used to claim that
 the final artifact contains the source image's text, people, background, layout, or other pixels.
 Local deterministic artifacts cannot be uploaded to the model. Judge them only from final_artifact
-physical/hash/rendered-text evidence in the manifest. If that evidence cannot establish a semantic
-defect, do not invent one and do not request a repair for it.
+physical/hash/rendered-text evidence in the manifest. A semantic_observability value of physical_only
+means the pixels were not presented to you: do not describe their appearance as verified and do not
+treat the absence of visible evidence as a pass. You may report the explicit quality degradation of a
+catalog/slideshow/availability fallback from its model and fallback_reason, but must not invent a
+specific visual defect that the supplied evidence cannot establish.
 
 Return exactly these keys:
 - summary: concise evidence-grounded diagnosis
@@ -1122,12 +1409,14 @@ Allowed artifact target names (use only these exact names):
         evaluations: dict[str, AgentEvaluation] = {}
         for model, evaluation, error in results:
             if evaluation is None:
-                self.logger.warning("全局评估模型 %s 不可用: %s", model, error)
+                self.logger.warning(
+                    "Global evaluation model %s is unavailable: %s", model, error
+                )
             else:
                 evaluations[model] = evaluation
         if not evaluations:
             self.logger.warning(
-                "全局交付评估没有获得有效模型结果；跳过语义返修但继续交付",
+                "Global delivery evaluation produced no valid model result; skipping semantic repair and continuing delivery",
             )
             return None
         return self._adjudicate_evaluations(
@@ -1189,7 +1478,10 @@ Previous observations:
                     fallback_model=planner_fallback,
                 )
             except (ApiError, ValueError, TypeError) as exc:
-                self.logger.warning("返修规划器不可用，使用确定性目标映射: %s", exc)
+                self.logger.warning(
+                    "Repair planner is unavailable; using deterministic target mapping: %s",
+                    exc,
+                )
 
         by_defect = {str(item.get("defect_id") or ""): item for item in findings}
         actions: list[AgentAction] = []
@@ -1444,7 +1736,13 @@ Current six-image set review:
                 "evidence_mode": (
                     "remote-final-output"
                     if delivery_visual_url
-                    else "local-final-inspection"
+                    else "physical-only-local-output"
+                ),
+                "semantic_observability": (
+                    "direct_visual" if delivery_visual_url else "physical_only"
+                ),
+                "semantic_review_status": (
+                    "observable" if delivery_visual_url else "not_observed"
                 ),
                 "delivery_visual_url": delivery_visual_url,
                 "provenance_source_url": asset.source_url,

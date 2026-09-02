@@ -81,6 +81,34 @@ def _taxonomy() -> TaxonomyResult:
 
 
 class DecisionStateTests(unittest.TestCase):
+    def test_claim_surfaces_preserve_nonvisual_fact_without_using_it_for_media(self) -> None:
+        facts = _facts()
+        facts.reconciled_fact_ledger = {
+            "attribute_decisions": [
+                {
+                    "attribute_index": 0,
+                    "decision": "machine_only",
+                    "surface_decisions": {
+                        "buyer_copy": "publish",
+                        "media_generation": "machine_only",
+                        "marketplace_mapping": "publish",
+                        "machine_appendix": "publish",
+                    },
+                    "reason": "source-grounded but not visually observable",
+                }
+            ]
+        }
+
+        claim = next(
+            item
+            for item in build_claim_ledger(facts, _taxonomy())
+            if item.source_type == "seller_attribute"
+        )
+
+        self.assertIn("buyer_copy", claim.allowed_surfaces)
+        self.assertIn("machine_appendix", claim.allowed_surfaces)
+        self.assertNotIn("image_prompt", claim.allowed_surfaces)
+
     def test_canonical_state_keeps_conflict_evidence_but_not_publishable_raw_claim(self) -> None:
         facts = _facts()
         facts.reconciled_fact_ledger = {

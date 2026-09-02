@@ -24,7 +24,12 @@ def configure_logging(*, debug: bool = False) -> logging.Logger:
 
     logger = logging.getLogger("crossborder_agent")
     logger.setLevel(logging.DEBUG if debug else logging.INFO)
-    logger.handlers.clear()
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        try:
+            handler.close()
+        except OSError:
+            pass
 
     formatter = logging.Formatter(
         "%(asctime)s %(levelname)s %(name)s %(message)s",

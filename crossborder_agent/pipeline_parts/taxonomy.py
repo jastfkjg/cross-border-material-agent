@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,54 @@ from ..taxonomy_agent import TaxonomyReActAgent
 
 
 class TaxonomyPipelineMixin:
+    def _fresh_taxonomy_agent(
+        self,
+        category_tree: dict[str, Any],
+        attribute_data: dict[str, Any],
+        *,
+        max_turns: int,
+    ) -> TaxonomyReActAgent:
+        """Create a clean semantic recovery context over the same grounded data."""
+
+        return TaxonomyReActAgent(
+            self.client,
+            category_tree,
+            attribute_data,
+            skill_instructions=self.skills.compile(
+                "taxonomy", "product-grounding", "aliexpress-taxonomy"
+            ),
+            trace=self.trace,
+            max_turns=max_turns,
+        )
+
+    def _recover_category_with_model(
+        self,
+        facts: ProductFacts,
+        category_tree: dict[str, Any],
+        attribute_data: dict[str, Any],
+        *,
+        context: str,
+        max_turns: int = 14,
+    ) -> CategoryChoice | None:
+        """Let a fresh model context recover a semantic category transaction."""
+
+        if self.client is None or self.deadline - time.monotonic() < 540:
+            return None
+        recovery = self._fresh_taxonomy_agent(
+            category_tree, attribute_data, max_turns=max_turns
+        )
+        try:
+            return recovery.resolve_category(facts, decision_context=context)
+        except Exception as exc:
+            self.trace.emit(
+                "taxonomy.category_model_recovery_failed",
+                error=str(exc),
+                context=context[:1000],
+            )
+            return None
+        finally:
+            recovery.close()
+
     def _repair_taxonomy(
         self,
         instruction: str,
@@ -69,7 +118,7 @@ class TaxonomyPipelineMixin:
             revised_category = explorer.resolve_category(
                 facts, decision_context=instruction
             )
-        except ApiError as exc:
+        except Exception as exc:
             explorer.close()
             return ToolExecution("failed", f"category reconsideration failed: {exc}")
         category_anchored_fallback = resolve_taxonomy(
@@ -84,7 +133,7 @@ class TaxonomyPipelineMixin:
                 revised_category,
                 decision_context=instruction,
             )
-        except ApiError as exc:
+        except Exception as exc:
             revised = category_anchored_fallback
             self.trace.emit(
                 "taxonomy.attribute_transaction_failed",
@@ -239,7 +288,7 @@ class TaxonomyPipelineMixin:
             state.visual_set_review,
         )
         self.logger.info(
-            "分类返修已原子提交: category=%s schema=%s mappings=%d",
+            "Taxonomy repair was committed atomically: category=%s schema=%s mappings=%d",
             taxonomy.category.category_id,
             taxonomy.attribute_schema_category_id,
             len(taxonomy.attributes),
@@ -265,27 +314,48 @@ class TaxonomyPipelineMixin:
     ) -> TaxonomyResult:
         if self.client is None:
             return taxonomy
-        explorer = TaxonomyReActAgent(
-            self.client,
-            category_tree,
-            attribute_data,
-            skill_instructions=self.skills.compile(
-                "taxonomy", "product-grounding", "aliexpress-taxonomy"
-            ),
-            trace=self.trace,
+        explorer = self._fresh_taxonomy_agent(
+            category_tree, attribute_data, max_turns=50
         )
         try:
             resolved_category = explorer.resolve_category(facts)
-        except ApiError as exc:
+        except Exception as exc:
             explorer.close()
-            self.logger.warning("类目 ReAct 探索失败，保留离线降级结果: %s", exc)
-            self.trace.emit(
-                "taxonomy.category_transaction_failed",
-                category=taxonomy.category.category_id,
-                confidence=taxonomy.category.confidence,
-                error=str(exc),
+            resolved_category = self._recover_category_with_model(
+                facts,
+                category_tree,
+                attribute_data,
+                context=(
+                    "A previous category transaction ended without a validated result. "
+                    f"Failure type={getattr(exc, 'category', type(exc).__name__)}; "
+                    f"diagnostic={str(exc)[:1200]}. "
+                    "Start from the source evidence and taxonomy workspace in this fresh context, "
+                    "change the exploration strategy, and commit the best grounded leaf. Do not "
+                    "delegate the semantic choice to a lexical fallback."
+                ),
             )
-            return taxonomy
+            if resolved_category is None:
+                self.logger.warning(
+                    "Category ReAct exploration and fresh model recovery failed; keeping the availability fallback result: %s",
+                    exc,
+                )
+                self.trace.emit(
+                    "taxonomy.category_transaction_failed",
+                    category=taxonomy.category.category_id,
+                    confidence=taxonomy.category.confidence,
+                    error=str(exc),
+                )
+                return taxonomy
+            self.trace.emit(
+                "taxonomy.category_model_recovered",
+                fallback_category_id=taxonomy.category.category_id,
+                selected_category_id=resolved_category.category_id,
+                trigger=str(exc),
+            )
+            explorer = self._fresh_taxonomy_agent(
+                category_tree, attribute_data, max_turns=32
+            )
+
         category_anchored_fallback = resolve_taxonomy(
             facts,
             category_tree,
@@ -300,10 +370,40 @@ class TaxonomyPipelineMixin:
         )
         try:
             resolved = explorer.resolve_attributes(facts, resolved_category)
-        except ApiError as exc:
-            resolved = category_anchored_fallback
+        except Exception as exc:
+            recovered: TaxonomyResult | None = None
+            if self.deadline - time.monotonic() >= 480:
+                recovery = self._fresh_taxonomy_agent(
+                    category_tree, attribute_data, max_turns=16
+                )
+                try:
+                    recovered = recovery.resolve_attributes(
+                        facts,
+                        resolved_category,
+                        decision_context=(
+                            "A prior attribute transaction failed after the leaf category was committed. "
+                            f"Failure type={getattr(exc, 'category', type(exc).__name__)}; "
+                            f"diagnostic={str(exc)[:1600]}. "
+                            "Use the fresh workspace to inspect the committed category's schema, source refs, "
+                            "accepted mappings and unresolved evidence. Change strategy and submit the best "
+                            "grounded mapping ledger; never change the committed category."
+                        ),
+                    )
+                except Exception as recovery_exc:
+                    self.trace.emit(
+                        "taxonomy.attribute_model_recovery_failed",
+                        selected_category_id=resolved_category.category_id,
+                        error=str(recovery_exc),
+                    )
+                finally:
+                    recovery.close()
+            resolved = recovered or category_anchored_fallback
             self.logger.warning(
-                "属性 ReAct 探索失败，保留已提交类目并仅降级 schema/mapping: %s",
+                (
+                    "Attribute ReAct exploration failed; a fresh model recovery was used: %s"
+                    if recovered is not None
+                    else "Attribute ReAct exploration and fresh model recovery failed; keeping the committed category and falling back only for schema/mapping: %s"
+                ),
                 exc,
             )
             self.trace.emit(
@@ -312,6 +412,7 @@ class TaxonomyPipelineMixin:
                 selected_category_path=resolved_category.path,
                 fallback_schema_id=resolved.attribute_schema_category_id,
                 fallback_mapping_count=len(resolved.attributes),
+                model_recovered=recovered is not None,
                 error=str(exc),
             )
             return resolved

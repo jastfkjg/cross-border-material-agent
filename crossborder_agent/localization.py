@@ -830,17 +830,33 @@ _EMERGENCY_GARMENT_TYPE_KEYWORDS: tuple[tuple[str, dict[str, str]], ...] = (
 )
 
 
-def _reconciled_decision_rows(facts: ProductFacts) -> dict[int, dict[str, str]]:
+def _reconciled_decision_rows(facts: ProductFacts) -> dict[int, dict[str, Any]]:
     ledger = facts.reconciled_fact_ledger
     if not isinstance(ledger, dict):
         return {}
-    rows: dict[int, dict[str, str]] = {}
+    rows: dict[int, dict[str, Any]] = {}
     for item in ledger.get("attribute_decisions", []):
         if not isinstance(item, dict) or not isinstance(item.get("attribute_index"), int):
             continue
         rows[item["attribute_index"]] = {
             "decision": str(item.get("decision") or "publish"),
             "canonical_value": str(item.get("canonical_value") or ""),
+            "surface_decisions": (
+                {
+                    str(key): str(value)
+                    for key, value in item.get("surface_decisions", {}).items()
+                    if str(key)
+                    in {
+                        "buyer_copy",
+                        "media_generation",
+                        "marketplace_mapping",
+                        "machine_appendix",
+                    }
+                    and str(value) in {"publish", "reject", "machine_only"}
+                }
+                if isinstance(item.get("surface_decisions"), dict)
+                else {}
+            ),
         }
     return rows
 
@@ -933,10 +949,16 @@ def _reconciled_feature_values(
     decision_rows = _reconciled_decision_rows(facts)
     values: list[str] = []
     for index, item in enumerate(facts.attributes):
-        if item.name not in _MARKETING_ATTRIBUTE_NAMES:
+        if not buyer_safe_source_name(item.name):
             continue
         row = decision_rows.get(index, {})
-        decision = row.get("decision", "publish")
+        surface_decisions = row.get("surface_decisions")
+        surface_decisions = (
+            surface_decisions if isinstance(surface_decisions, dict) else {}
+        )
+        decision = surface_decisions.get(
+            "buyer_copy", row.get("decision", "publish")
+        )
         if decision == "publish":
             source_value = item.value
         elif decision == "reject" and row.get("canonical_value") not in {"", "N/A"}:
@@ -1164,6 +1186,52 @@ def _repair_numeric_fields(
 _BUYER_COPY_FIELDS = ("title", "overview", "highlights", "fit_note")
 
 
+def _usable_runtime_term(value: Any) -> bool:
+    """Whether one runtime translation is safe to project into listing tables.
+
+    Terminology is evaluated field by field.  A partial or unavailable audit
+    must not erase unrelated translations, while a source-script echo or the
+    deterministic unavailable marker must not be mistaken for localization.
+    """
+
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and not re.search(r"[\u4e00-\u9fff]", value)
+        and value.strip() not in _UNTRANSLATED_VALUES
+    )
+
+
+def _merge_runtime_terms(
+    fallback_terms: dict[str, Any],
+    draft_terms: Any,
+    audited_terms: Any,
+    *,
+    audit_applied: bool,
+) -> dict[str, str]:
+    """Build a complete ledger without making audit availability a data gate."""
+
+    draft = draft_terms if isinstance(draft_terms, dict) else {}
+    audited = audited_terms if isinstance(audited_terms, dict) else {}
+    merged: dict[str, str] = {}
+    for source_term, fallback_value in fallback_terms.items():
+        audited_value = audited.get(source_term) if audit_applied else None
+        draft_value = draft.get(source_term)
+        if _usable_runtime_term(audited_value):
+            merged[source_term] = audited_value.strip()
+        elif _usable_runtime_term(fallback_value):
+            # A reviewed deterministic translation is preferable to an
+            # unaudited writer substitution for already-covered vocabulary.
+            merged[source_term] = str(fallback_value).strip()
+        elif _usable_runtime_term(draft_value):
+            merged[source_term] = draft_value.strip()
+        else:
+            # Machine-scored listing facts remain observable even when no
+            # trustworthy localized rendering survived the model boundary.
+            merged[source_term] = source_term
+    return merged
+
+
 def _compose_copy_layers(
     candidate: Any, fallback: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1188,12 +1256,7 @@ def _compose_copy_layers(
     if isinstance(candidate_terms, dict):
         for term in localized_terms:
             value = candidate_terms.get(term)
-            if (
-                isinstance(value, str)
-                and value.strip()
-                and not re.search(r"[\u4e00-\u9fff]", value)
-                and value.strip() not in _UNTRANSLATED_VALUES
-            ):
+            if _usable_runtime_term(value):
                 localized_terms[term] = value.strip()
     payload["localized_terms"] = localized_terms
     return payload
@@ -1522,21 +1585,6 @@ def _payload_validation_error(
         for item in normalized_highlights
     ):
         return "repetitive-shopper-copy-guard"
-    incomplete_main_material = any(
-        item.name == "主面料成分含量" and item.value == "30%以下"
-        for item in facts.attributes
-    )
-    predominant_material_terms = {
-        "en": "main material",
-        "ko": "주요 소재",
-        "pt": "material principal",
-    }
-    if (
-        incomplete_main_material
-        and predominant_material_terms[language].casefold()
-        in natural_text.casefold()
-    ):
-        return "incomplete-composition-marketing-guard"
     feature_values = _reconciled_feature_values(language, facts, localized_terms)
     matched_features = sum(
         _localized_concept_is_mentioned(language, value, natural_text)
@@ -2289,9 +2337,9 @@ Do not add ratings, review or sales counts, urgency, promotions, shipping or ret
 endorsements, contact details, social handles, or external links.
 Avoid inferred benefits such as breathable, lightweight, comfortable, durable, shape-retaining,
 flattering, premium quality, or easy-care unless the exact benefit is explicitly stated in the source facts.
-When a material is labeled as the main material but its declared content is below 30% and the complete
-fiber composition is unavailable, do not present it as the predominant material. Omit it from shopper
-prose or qualify it as a seller-listed material with incomplete composition information.
+Preserve qualifiers and scope for composition or component claims. Do not promote a partial,
+conditional or incomplete seller value into a predominant-material claim; qualify it conservatively
+when the supplied evidence does not establish a complete composition.
 Prefer concrete source-backed, category-relevant details from the supplied facts. Do not assume
 apparel parts, materials, functions or usage when this product belongs to another category.
 The title, overview and highlights together must name at least three concrete verified product
@@ -2385,9 +2433,6 @@ extract only concrete product type, construction, silhouette, pattern, color and
                 error=str(exc),
             )
         return fallback, "deterministic-fallback"
-    draft_localized_terms = (
-        draft.get("localized_terms") if isinstance(draft, dict) else None
-    )
     if trace:
         trace.emit("copy.draft", language=language, payload=draft)
 
@@ -2423,17 +2468,19 @@ extract only concrete product type, construction, silhouette, pattern, color and
 You are a native {locale["locale"]} factual copy auditor. Return JSON only.
 Rewrite the candidate listing so every product claim is directly supported by the verified source facts.
 Remove inferred benefits, marketing embellishment, unsupported measurements and regional size equivalence.
-Do not describe a seller-listed material as predominant when its declared content is below 30% and
-the full fiber composition is unavailable; omit or explicitly qualify that material statement.
+Preserve every supplied qualifier and scope for composition or component statements. Do not turn a
+partial, conditional or incomplete seller value into an unqualified predominant-material claim.
 Remove ratings, sales counts, urgency, promotions, shipping or return promises, endorsements,
 contact details, social handles and external links.
 Keep natural localized language, but prefer precise field-level facts over generic filler.
 Replace stock marketing phrases with product-specific syntax and vary sentence structure. Keep buyer
 copy free of IDs and raw field labels because code renders machine-oriented data in a separate appendix.
 Make each highlight serve a distinct purchase decision instead of repeating the overview.
-The result must contain the four requested buyer-copy fields; ignore harmless extra top-level metadata
+The result must contain the four requested buyer-copy fields and localized_terms; ignore harmless extra top-level metadata
 instead of rewriting good prose. Do not copy Chinese characters into buyer-facing prose. Do not add
 machine appendix fields: code supplies category, attribute, SKU and media data independently.
+Audit localized_terms independently: keep exactly the supplied source keys, correct inaccurate or generic
+translations, preserve identifiers and model codes, and ensure every value is natural {locale["locale"]}.
 When the candidate contains valid claim_refs, preserve only ledger IDs that still support the rewritten field.
 Apply native {locale["locale"]} grammar and retail terminology, not literal source-language word order.
 Use natural paragraphing for the overview. Remove process language, evidence-led phrasing and
@@ -2441,8 +2488,8 @@ instructions to inspect a SKU matrix.
 {skill_instructions}
 """.strip()
     audit_prompt = f"""
-Audit and, where needed, correct this candidate buyer-copy payload:
-{json.dumps({key: draft.get(key) for key in (*_BUYER_COPY_FIELDS, "claim_refs") if key in draft}, ensure_ascii=False)}
+Audit and, where needed, correct this candidate buyer-copy payload and runtime terminology ledger:
+{json.dumps({key: draft.get(key) for key in (*_BUYER_COPY_FIELDS, "claim_refs", "localized_terms") if key in draft}, ensure_ascii=False)}
 
 Verified source facts:
 {json.dumps(facts.compact_dict(), ensure_ascii=False)}
@@ -2453,8 +2500,10 @@ Resolved AliExpress category:
 Evidence-availability contract for sizing and table references:
 {json.dumps(evidence_contract, ensure_ascii=False)}
 
-Required top-level keys: title, overview, highlights, fit_note.
-Do not output media_descriptions or localized_terms. Output the corrected buyer-copy JSON object only.
+Required top-level keys: title, overview, highlights, fit_note, localized_terms.
+localized_terms must contain exactly these source keys:
+{json.dumps(sorted(fallback["localized_terms"]), ensure_ascii=False)}
+Do not output media_descriptions. Output the corrected JSON object only.
 """.strip()
     audit_applied = True
     try:
@@ -2470,9 +2519,17 @@ Do not output media_descriptions or localized_terms. Output the corrected buyer-
                 retryable=exc.retryable,
                 error=str(exc),
             )
-    if isinstance(audited, dict) and isinstance(draft_localized_terms, dict):
+    draft_terms = draft.get("localized_terms") if isinstance(draft, dict) else None
+    audited_terms = audited.get("localized_terms") if isinstance(audited, dict) else None
+    verified_localized_terms = _merge_runtime_terms(
+        fallback["localized_terms"],
+        draft_terms,
+        audited_terms,
+        audit_applied=audit_applied,
+    )
+    if isinstance(audited, dict):
         audited = dict(audited)
-        audited["localized_terms"] = draft_localized_terms
+        audited["localized_terms"] = verified_localized_terms
     if trace:
         trace.emit(
             "copy.audit",
@@ -2482,6 +2539,7 @@ Do not output media_descriptions or localized_terms. Output the corrected buyer-
         )
 
     payload = _compose_copy_layers(audited, fallback)
+    payload["localized_terms"] = verified_localized_terms
     expected_media = set(fallback["media_descriptions"])
     expected_terms = set(fallback["localized_terms"])
     validation_error = _payload_validation_error(
@@ -2544,10 +2602,8 @@ Evidence-availability contract for sizing and table references:
             if salvaged is not fallback:
                 return salvaged, f"{client.config.chat_model}-{salvage_source}"
             return fallback, validation_error
-        if isinstance(payload, dict) and isinstance(draft_localized_terms, dict):
-            payload = dict(payload)
-            payload["localized_terms"] = draft_localized_terms
         payload = _compose_copy_layers(payload, fallback)
+        payload["localized_terms"] = verified_localized_terms
         validation_error = _payload_validation_error(
             language, payload, facts, taxonomy, expected_media, expected_terms
         )
@@ -2604,11 +2660,22 @@ def _escape_table(value: str) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ").strip()
 
 
-def _localized_display(language: str, value: str, term_map: dict[str, Any]) -> str:
+def _localized_display(
+    language: str,
+    value: str,
+    term_map: dict[str, Any],
+    *,
+    preserve_source: bool = False,
+) -> str:
     raw = str(value).strip()
     if "/" in raw:
         localized_parts = [
-            _localized_display(language, part.strip(), term_map)
+            _localized_display(
+                language,
+                part.strip(),
+                term_map,
+                preserve_source=preserve_source,
+            )
             for part in raw.split("/")
             if part.strip()
         ]
@@ -2626,7 +2693,7 @@ def _localized_display(language: str, value: str, term_map: dict[str, Any]) -> s
     else:
         rendered = _static_localize_term(language, raw)
     if rendered in _UNTRANSLATED_VALUES:
-        return "—"
+        return raw if preserve_source and raw else "—"
     seller_weight = _seller_weight_display(language, raw)
     if seller_weight:
         rendered = seller_weight
@@ -2662,12 +2729,18 @@ def render_description(
         f"- {str(item).strip()}" for item in payload["highlights"] if str(item).strip()
     )
     category = taxonomy.category
-    localized_platform = _localized_display(language, facts.platform, term_map)
-    localized_source_category = _localized_display(
-        language, facts.source_category_name, term_map
+    localized_platform = _localized_display(
+        language, facts.platform, term_map, preserve_source=True
     )
-    localized_leaf_name = _localized_display(language, category.name, term_map)
-    localized_leaf_path = _localized_display(language, category.path, term_map)
+    localized_source_category = _localized_display(
+        language, facts.source_category_name, term_map, preserve_source=True
+    )
+    localized_leaf_name = _localized_display(
+        language, category.name, term_map, preserve_source=True
+    )
+    localized_leaf_path = _localized_display(
+        language, category.path, term_map, preserve_source=True
+    )
     lines.extend(["", f"## {locale['appendix']}", ""])
     lines.extend(
         [
@@ -2682,26 +2755,6 @@ def render_description(
     )
 
     decision_rows = _reconciled_decision_rows(facts)
-    main_material_content = next(
-        (
-            item
-            for index, item in enumerate(facts.attributes)
-            if item.name == "主面料成分含量"
-            and item.value
-            and decision_rows.get(index, {}).get("decision", "publish") == "publish"
-        ),
-        None,
-    )
-    qualified_material_labels = {
-        "en": "Listed material",
-        "ko": "표기 소재",
-        "pt": "Material informado",
-    }
-    incomplete_material_notes = {
-        "en": "seller-listed content: {content}; full fiber composition not provided",
-        "ko": "판매자 표기 함량: {content}; 전체 혼용률 정보 없음",
-        "pt": "teor informado pelo vendedor: {content}; composição têxtil completa não informada",
-    }
     public_rows: dict[str, dict[str, list[str]]] = {}
     natural_buyer_text = "\n".join(
         [
@@ -2717,14 +2770,17 @@ def render_description(
     for attribute_index, item in enumerate(facts.attributes):
         if decision_rows.get(attribute_index, {}).get("decision", "publish") != "publish":
             continue
-        localized_value = _localized_display(language, item.value, term_map)
+        buyer_localized_value = _localized_display(language, item.value, term_map)
+        localized_value = _localized_display(
+            language, item.value, term_map, preserve_source=True
+        )
         mentioned_in_buyer_copy = (
             buyer_safe_source_name(item.name)
             and
-            localized_value != "—"
-            and len(re.sub(r"\W+", "", localized_value)) >= 3
+            buyer_localized_value != "—"
+            and len(re.sub(r"\W+", "", buyer_localized_value)) >= 3
             and _localized_concept_is_mentioned(
-                language, localized_value, natural_buyer_text
+                language, buyer_localized_value, natural_buyer_text
             )
         )
         if (
@@ -2733,22 +2789,10 @@ def render_description(
             and not mentioned_in_buyer_copy
         ):
             continue
-        name = _localized_display(language, item.name, term_map)
+        name = _localized_display(
+            language, item.name, term_map, preserve_source=True
+        )
         value = localized_value
-        if (
-            item.name == "主面料成分"
-            and main_material_content is not None
-            and main_material_content.value == "30%以下"
-        ):
-            name = qualified_material_labels[language]
-            content = _localized_display(
-                language, main_material_content.value, term_map
-            )
-            value = (
-                f"{value} ("
-                + incomplete_material_notes[language].format(content=content)
-                + ")"
-            )
         if name == "—" or value == "—":
             continue
         row = public_rows.setdefault(name, {"ids": [], "values": []})
@@ -2811,9 +2855,15 @@ def render_description(
     )
     for item in taxonomy.attributes:
         item_type = platform_types[1] if item.sales_attribute else platform_types[0]
-        name = _localized_display(language, item.name, term_map)
-        value = _localized_display(language, item.platform_value, term_map)
-        source_name = _localized_display(language, item.source_name, term_map)
+        name = _localized_display(
+            language, item.name, term_map, preserve_source=True
+        )
+        value = _localized_display(
+            language, item.platform_value, term_map, preserve_source=True
+        )
+        source_name = _localized_display(
+            language, item.source_name, term_map, preserve_source=True
+        )
         evidence_pointer = str(item.source_evidence_pointer or "")
         if evidence_pointer == facts.source_title_evidence_pointer:
             source_label = {
@@ -2859,7 +2909,7 @@ def render_description(
         "| SKU ID | Spec ID | "
         + " | ".join(
             _escape_table(
-                f"{_localized_display(language, name, term_map)} "
+                f"{_localized_display(language, name, term_map, preserve_source=True)} "
                 f"(ID {next((attr.attribute_id for sku in facts.skus for attr in sku.attributes if attr.name == name), '')})"
             )
             for name in all_sku_names
@@ -2870,7 +2920,12 @@ def render_description(
     for sku in facts.skus:
         values = {item.name: item.value for item in sku.attributes}
         row = [sku.sku_id, sku.spec_id] + [
-            _localized_display(language, values.get(name, ""), term_map)
+            _localized_display(
+                language,
+                values.get(name, ""),
+                term_map,
+                preserve_source=True,
+            )
             for name in all_sku_names
         ]
         lines.append("| " + " | ".join(_escape_table(value) for value in row) + " |")
@@ -2919,7 +2974,12 @@ def render_description(
             )
         for size in facts.size_conversions:
             row = [
-                _localized_display(language, size.source_label, term_map),
+                _localized_display(
+                    language,
+                    size.source_label,
+                    term_map,
+                    preserve_source=True,
+                ),
                 size.kilograms,
             ]
             if include_imperial:

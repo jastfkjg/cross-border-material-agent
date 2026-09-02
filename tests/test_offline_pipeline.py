@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import re
 import shutil
 import tempfile
 import threading
@@ -71,8 +72,11 @@ class OfflinePipelineTests(unittest.TestCase):
                     input_dir / "clothing_attributes.json",
                 )
 
-                logger = logging.getLogger("offline-pipeline-test")
-                logger.addHandler(logging.NullHandler())
+                log_path = root / "agent.log"
+                logger = logging.getLogger(f"offline-pipeline-test-{id(root)}")
+                log_handler = logging.FileHandler(log_path, encoding="utf-8")
+                logger.handlers = [log_handler]
+                logger.propagate = False
                 state = Pipeline(
                     input_dir=input_dir,
                     output_dir=output_dir,
@@ -80,6 +84,7 @@ class OfflinePipelineTests(unittest.TestCase):
                     timeout_seconds=240,
                     offline=True,
                 ).run()
+                log_handler.flush()
                 self.assertEqual(
                     {path.name for path in output_dir.iterdir()}, EXPECTED_FILES
                 )
@@ -88,36 +93,48 @@ class OfflinePipelineTests(unittest.TestCase):
                 self.assertGreater(
                     (output_dir / "product_video.mp4").stat().st_size, 1000
                 )
+                self.assertLess(
+                    (output_dir / "main_image.jpeg").stat().st_size,
+                    1024 * 1024,
+                )
                 strategy = (output_dir / "strategy_document.md").read_text(
                     encoding="utf-8"
                 )
                 for expected in (
-                    "事实一致性与源数据冲突处理",
-                    "三个目标市场的本地化策略",
-                    "六图视觉叙事与视频职责",
-                    "事实一致、合规与素材质检",
-                    "可直接上架的交付保障",
-                    "美国英语（en-US）",
-                    "韩国市场（ko-KR）",
-                    "巴西葡萄牙语（pt-BR）",
-                    "main_image.jpeg｜转化入口",
-                    "product_video.mp4｜动态总览",
-                    "Agent 的整体流程是",
+                    "Factual Consistency and Source-Conflict Handling",
+                    "Localization Strategy for the Three Target Markets",
+                    "Six-Image Narrative and Video Role",
+                    "Factual Consistency, Compliance, and Asset Quality Control",
+                    "Listing-Ready Delivery Assurance",
+                    "United States English (en-US)",
+                    "South Korean market (ko-KR)",
+                    "Brazilian Portuguese (pt-BR)",
+                    "main_image.jpeg | Conversion Entry Point",
+                    "product_video.mp4 | Dynamic Overview",
+                    "The Agent follows five stages",
                 ):
                     self.assertIn(expected, strategy)
+                self.assertIsNone(re.search(r"[\u4e00-\u9fff]", strategy))
+                self.assertIsNone(
+                    re.search(
+                        r"[\u4e00-\u9fff]",
+                        log_path.read_text(encoding="utf-8"),
+                    )
+                )
                 for internal_log_section in (
                     "Claim Ledger",
-                    "模型配置：",
-                    "全局评估轨迹",
-                    "定向修复轨迹",
-                    "API 失败摘要",
-                    "运行质检记录",
-                    "单模型证据惩罚分",
-                    "本次共读取",
-                    "个原始单元格",
+                    "Model configuration:",
+                    "Global evaluation trace",
+                    "Targeted repair trace",
+                    "API failure summary",
+                    "Runtime quality-control record",
+                    "Single-model evidence penalty score",
+                    "raw cells were read",
                 ):
                     self.assertNotIn(internal_log_section, strategy)
             finally:
+                if "log_handler" in locals():
+                    log_handler.close()
                 server.shutdown()
                 server.server_close()
 

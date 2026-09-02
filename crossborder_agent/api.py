@@ -40,6 +40,22 @@ def _failure_category(status_code: int | None, message: str) -> str:
     """Classify provider failures so upper layers can choose a useful recovery."""
 
     lowered = message.casefold()
+    # A provider-side allocation exhaustion is not the same failure mode as a
+    # short-lived request throttle.  Retrying it only burns the global delivery
+    # deadline and prevents deterministic/other-capability fallbacks from
+    # completing.  Match provider protocol vocabulary, not any product data.
+    if any(
+        token in lowered
+        for token in (
+            "insufficient_quota",
+            "quota has been exhausted",
+            "quota exhausted",
+            "account quota exceeded",
+            "weekly quota",
+            "1-week quota",
+        )
+    ):
+        return "quota_exhausted"
     if status_code == 429 or any(
         token in lowered
         for token in ("rate limit", "ratelimit", "throttl", "quota exceeded")
@@ -112,6 +128,10 @@ class ApiConfig:
     image_model: str = "wan2.7-image-pro"
     image_fallback_model: str = "qwen-image-3.0-pro"
     video_model: str = "wan2.7-i2v-2026-04-25"
+    video_fallback_models: tuple[str, ...] = (
+        "happyhorse-1.1-r2v",
+        "happyhorse-1.1-t2v",
+    )
     evaluation_models: tuple[str, ...] = ("qwen3.8-max", "qwen3.7-plus")
 
     @classmethod
@@ -131,6 +151,16 @@ class ApiConfig:
         evaluation_models = tuple(dict.fromkeys(configured_evaluators))[:3]
         if len(evaluation_models) < 2:
             evaluation_models = ("qwen3.8-max", "qwen3.7-plus")
+        configured_video_fallbacks = tuple(
+            dict.fromkeys(
+                item.strip()
+                for item in os.environ.get(
+                    "AGENT_VIDEO_FALLBACK_MODELS",
+                    "happyhorse-1.1-r2v,happyhorse-1.1-t2v",
+                ).split(",")
+                if item.strip()
+            )
+        )[:3]
         return cls(
             api_key=api_key,
             dashscope_base_url=dashscope,
@@ -156,6 +186,7 @@ class ApiConfig:
                 "AGENT_IMAGE_FALLBACK_MODEL", "qwen-image-3.0-pro"
             ),
             video_model=os.environ.get("AGENT_VIDEO_MODEL", "wan2.7-i2v-2026-04-25"),
+            video_fallback_models=configured_video_fallbacks,
             evaluation_models=evaluation_models,
         )
 
@@ -206,11 +237,42 @@ class HttpJsonClient:
         self.deadline = deadline
         self.trace = trace
         self.ssl_context = ssl.create_default_context()
+        self._terminal_failure: ApiError | None = None
+        self._terminal_failure_lock = threading.Lock()
+
+    @property
+    def service_available(self) -> bool:
+        """Whether authenticated model requests can still succeed in this run."""
+
+        with self._terminal_failure_lock:
+            return self._terminal_failure is None
+
+    def _raise_terminal_failure(self) -> None:
+        with self._terminal_failure_lock:
+            failure = self._terminal_failure
+        if failure is not None:
+            raise ApiError(
+                str(failure),
+                status_code=failure.status_code,
+                retryable=False,
+                category=failure.category,
+            )
+
+    def _remember_terminal_failure(self, failure: ApiError) -> None:
+        # Only an explicit account-level quota exhaustion proves that every
+        # model capability is unavailable.  Endpoint throttles and permission
+        # failures may be model- or capability-specific, so globally caching
+        # either would suppress otherwise usable chat/image/video fallbacks.
+        if failure.category != "quota_exhausted":
+            return
+        with self._terminal_failure_lock:
+            if self._terminal_failure is None:
+                self._terminal_failure = failure
 
     def _remaining(self, maximum: float) -> float:
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
-            raise ApiError("全局运行截止时间已到")
+            raise ApiError("The global runtime deadline has been reached")
         return max(1.0, min(maximum, remaining))
 
     @property
@@ -227,6 +289,7 @@ class HttpJsonClient:
         timeout: float = 180,
         attempts: int = 4,
     ) -> dict[str, Any]:
+        self._raise_terminal_failure()
         payload = (
             None
             if body is None
@@ -253,7 +316,7 @@ class HttpJsonClient:
                 parsed = json.loads(data.decode("utf-8"))
                 if not isinstance(parsed, dict):
                     raise ApiError(
-                        "API 返回值不是 JSON 对象",
+                        "API response is not a JSON object",
                         retryable=True,
                         category="response_format",
                     )
@@ -268,7 +331,18 @@ class HttpJsonClient:
             except HTTPError as exc:
                 detail = exc.read(8192).decode("utf-8", errors="replace")
                 last_error = f"HTTP {exc.code}: {detail}"
-                retryable = exc.code in {408, 409, 425, 429, 500, 502, 503, 504}
+                category = _failure_category(exc.code, last_error)
+                retryable = (
+                    exc.code in {408, 409, 425, 429, 500, 502, 503, 504}
+                    and category not in {"quota_exhausted", "authorization"}
+                )
+                failure = ApiError(
+                    last_error,
+                    status_code=exc.code,
+                    retryable=retryable,
+                    category=category,
+                )
+                self._remember_terminal_failure(failure)
                 if self.trace:
                     self.trace.emit(
                         "http.request.failure",
@@ -277,16 +351,11 @@ class HttpJsonClient:
                         attempt=attempt + 1,
                         status_code=exc.code,
                         retryable=retryable,
-                        category=_failure_category(exc.code, last_error),
+                        category=category,
                         error=last_error,
                     )
                 if not retryable or attempt + 1 >= attempts:
-                    raise ApiError(
-                        last_error,
-                        status_code=exc.code,
-                        retryable=retryable,
-                        category=_failure_category(exc.code, last_error),
-                    ) from exc
+                    raise failure from exc
                 retry_after = exc.headers.get("Retry-After", "")
                 try:
                     delay = min(30.0, max(0.0, float(retry_after)))
@@ -348,11 +417,13 @@ class HttpJsonClient:
                     error=last_error,
                 )
             self.logger.warning(
-                "API 请求失败，%.1f 秒后重试: %s", delay, last_error[:500]
+                "API request failed; retrying in %.1f seconds: %s",
+                delay,
+                last_error[:500],
             )
             time.sleep(min(delay, self._remaining(delay)))
         raise ApiError(
-            last_error or "API 请求失败", retryable=True, category="unknown"
+            last_error or "API request failed", retryable=True, category="unknown"
         )
 
     def download(
@@ -360,7 +431,7 @@ class HttpJsonClient:
     ) -> None:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ApiError(f"拒绝下载非法 URL: {url!r}")
+            raise ApiError(f"Refusing to download an invalid URL: {url!r}")
         last_error = ""
         for attempt in range(4):
             try:
@@ -372,7 +443,9 @@ class HttpJsonClient:
                 ) as response:
                     content_length = response.headers.get("Content-Length")
                     if content_length and int(content_length) > max_bytes:
-                        raise ApiError(f"下载文件超过限制: {content_length} bytes")
+                        raise ApiError(
+                            f"Downloaded file exceeds the limit: {content_length} bytes"
+                        )
                     path.parent.mkdir(parents=True, exist_ok=True)
                     total = 0
                     with path.open("wb") as handle:
@@ -382,7 +455,9 @@ class HttpJsonClient:
                                 break
                             total += len(block)
                             if total > max_bytes:
-                                raise ApiError(f"下载文件超过限制: {max_bytes} bytes")
+                                raise ApiError(
+                                    f"Downloaded file exceeds the limit: {max_bytes} bytes"
+                                )
                             handle.write(block)
                 return
             except (
@@ -396,10 +471,12 @@ class HttpJsonClient:
                 last_error = str(exc)
                 path.unlink(missing_ok=True)
                 if attempt == 3:
-                    raise ApiError(f"下载失败: {last_error}") from exc
+                    raise ApiError(f"Download failed: {last_error}") from exc
                 delay = min(10.0, (2**attempt) + random.random())
                 self.logger.warning(
-                    "下载失败，%.1f 秒后重试: %s", delay, last_error[:500]
+                    "Download failed; retrying in %.1f seconds: %s",
+                    delay,
+                    last_error[:500],
                 )
                 time.sleep(min(delay, self._remaining(delay)))
 
@@ -465,6 +542,7 @@ class QwenClient:
             "image": self.config.image_model,
             "image_fallback": self.config.image_fallback_model,
             "video": self.config.video_model,
+            "video_fallbacks": list(self.config.video_fallback_models),
             "evaluation_models": list(self.evaluation_models),
         }
 
@@ -534,7 +612,7 @@ class QwenClient:
             content = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ApiError(
-                f"Chat API 返回结构异常: {json.dumps(response, ensure_ascii=False)[:1000]}",
+                f"Chat API returned an invalid structure: {json.dumps(response, ensure_ascii=False)[:1000]}",
                 retryable=True,
                 category="response_format",
             ) from exc
@@ -577,13 +655,13 @@ class QwenClient:
             message = response["choices"][0]["message"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ApiError(
-                f"Chat tool API 返回结构异常: {json.dumps(response, ensure_ascii=False)[:1000]}",
+                f"Chat tool API returned an invalid structure: {json.dumps(response, ensure_ascii=False)[:1000]}",
                 retryable=True,
                 category="response_format",
             ) from exc
         if not isinstance(message, dict):
             raise ApiError(
-                "Chat tool API message 不是对象",
+                "Chat tool API message is not an object",
                 retryable=True,
                 category="response_format",
             )
@@ -657,20 +735,20 @@ class QwenClient:
                         parsed = json.loads(text)
                     except json.JSONDecodeError:
                         last_error = ApiError(
-                            f"模型未返回合法 JSON: {text[:1000]}",
+                            f"Model did not return valid JSON: {text[:1000]}",
                             retryable=True,
                             category="response_format",
                         )
                         if format_attempt == 0 and self.http.remaining_seconds > 90:
                             self.logger.warning(
-                                "模型 %s 返回非法 JSON，重试一次结构化评审",
+                                "Model %s returned invalid JSON; retrying structured review once",
                                 candidate_model,
                             )
                             continue
                         break
                     if not isinstance(parsed, dict):
                         last_error = ApiError(
-                            "模型 JSON 顶层不是对象",
+                            "Model JSON root is not an object",
                             retryable=True,
                             category="response_format",
                         )
@@ -680,11 +758,11 @@ class QwenClient:
                     return parsed
                 if candidate_model != models[-1] and self.http.remaining_seconds > 60:
                     self.logger.warning(
-                        "模型 %s 的结构化调用失败，切换评审回退模型: %s",
+                        "Structured call to model %s failed; switching to the review fallback model: %s",
                         candidate_model,
                         last_error,
                     )
-        raise last_error or ApiError("结构化模型调用失败")
+        raise last_error or ApiError("Structured model call failed")
 
     def chat_tool_step(
         self,
@@ -764,7 +842,7 @@ class QwenClient:
                         raise
                     if candidate_model != models[-1] and self.http.remaining_seconds > 60:
                         self.logger.warning(
-                            "模型 %s 的工具调用失败，切换回退模型: %s",
+                            "Tool call to model %s failed; switching to the fallback model: %s",
                             candidate_model,
                             exc,
                         )
@@ -772,13 +850,13 @@ class QwenClient:
                 tool_calls = message.get("tool_calls")
                 if not isinstance(tool_calls, list) or not tool_calls:
                     last_error = ApiError(
-                        "模型未调用任何可用工具",
+                        "Model did not call any available tool",
                         retryable=True,
                         category="response_format",
                     )
                     continue
                 return message
-        raise last_error or ApiError("模型工具调用失败")
+        raise last_error or ApiError("Model tool call failed")
 
     def analyze_product_images(
         self,
@@ -1226,15 +1304,22 @@ Verified facts:
                     self._disable_model_on_configuration_error(
                         self.config.image_model, exc
                     )
-                    self.logger.warning("主图像模型失败，切换回退模型: %s", exc)
+                    self.logger.warning(
+                        "Primary image model failed; switching to the fallback model: %s",
+                        exc,
+                    )
             else:
-                errors.append(f"{self.config.image_model}: 本轮已因配置错误熔断")
+                errors.append(
+                    f"{self.config.image_model}: disabled for this run after a configuration error"
+                )
             if self.http.remaining_seconds < 300:
-                errors.append("剩余时间不足 300 秒，跳过慢速图像回退模型")
+                errors.append(
+                    "Fewer than 300 seconds remain; skipping the slower image fallback model"
+                )
                 raise ApiError("; ".join(errors), retryable=False)
             if self._model_disabled(self.config.image_fallback_model):
                 errors.append(
-                    f"{self.config.image_fallback_model}: 本轮已因配置错误熔断"
+                    f"{self.config.image_fallback_model}: disabled for this run after a configuration error"
                 )
                 raise ApiError("; ".join(errors), retryable=False)
             try:
@@ -1263,6 +1348,8 @@ Verified facts:
         return bool(model and not self._model_disabled(model))
 
     def operation_available(self, operation: str) -> bool:
+        if not self.http.service_available:
+            return False
         if operation == "image":
             return any(
                 self.model_available(model)
@@ -1272,10 +1359,31 @@ Verified facts:
                 )
             )
         if operation == "video":
-            return self.model_available(self.config.video_model)
+            return any(self.model_available(model) for model in self.video_models)
         if operation in {"chat", "review"}:
             return True
         return False
+
+    @property
+    def video_models(self) -> tuple[str, ...]:
+        """Return the ordered, run-local video capability chain.
+
+        The environment controls the concrete platform models.  Deduplication is
+        deliberately mechanical: choosing which successful rendition best fits
+        the product remains a model/reviewer decision, while the host only keeps
+        a provider configuration failure from disabling all video generation.
+        """
+
+        return tuple(
+            dict.fromkeys(
+                model.strip()
+                for model in (
+                    self.config.video_model,
+                    *self.config.video_fallback_models,
+                )
+                if model.strip()
+            )
+        )
 
     def _disable_model_on_configuration_error(
         self, model: str, error: ApiError
@@ -1285,7 +1393,7 @@ Verified facts:
         with self._disabled_models_lock:
             self._disabled_models.add(model)
         self.logger.error(
-            "模型 %s 因不可恢复的 %s 错误在本轮熔断",
+            "Model %s was disabled for this run after a non-recoverable %s error",
             model,
             error.category,
         )
@@ -1329,13 +1437,13 @@ Verified facts:
                     raise
                 delay = 4.0 if exc.category in {"rate_limit", "queue"} else 2.0
                 self.logger.warning(
-                    "图像模型 %s 在底层重试后仍遇到 %s，%.1f 秒后重新提交一次",
+                    "Image model %s still encountered %s after transport retries; resubmitting once in %.1f seconds",
                     model,
                     exc.category,
                     delay,
                 )
                 time.sleep(min(delay, self.http._remaining(delay)))
-        raise last_error or ApiError("图像生成失败")
+        raise last_error or ApiError("Image generation failed")
 
     def _generate_sync_images(
         self,
@@ -1395,100 +1503,175 @@ Verified facts:
         urls = _collect_urls(response, preferred_keys=("image", "url"))
         if not urls:
             raise ApiError(
-                f"图像响应没有 URL: {json.dumps(response, ensure_ascii=False)[:1000]}",
+                f"Image response has no URL: {json.dumps(response, ensure_ascii=False)[:1000]}",
                 retryable=True,
                 category="response_format",
             )
         return urls[:count]
 
+    @staticmethod
+    def _video_request_body(
+        model: str,
+        prompt: str,
+        first_frame_url: str,
+        negative_prompt: str,
+    ) -> dict[str, Any]:
+        """Build the supported provider protocol without product-specific logic."""
+
+        happyhorse_r2v = model.endswith("-r2v")
+        happyhorse_t2v = model.endswith("-t2v")
+        input_payload: dict[str, Any] = {"prompt": prompt}
+        # Text-to-video remains a useful model-authored degraded result if all
+        # reference-conditioned models are unavailable.  Other supported video
+        # families receive the exact generated/source-grounded first frame.
+        if happyhorse_r2v:
+            # HappyHorse reference-to-video uses reference_image media and
+            # requires positional [Image N] grounding in the prompt.  It is not
+            # the same protocol as a first-frame image-to-video model.
+            input_payload["prompt"] = (
+                "[Image 1] shows the exact product reference to preserve. " + prompt
+            )
+            input_payload["media"] = [
+                {"type": "reference_image", "url": first_frame_url}
+            ]
+        elif not happyhorse_t2v:
+            input_payload["media"] = [
+                {"type": "first_frame", "url": first_frame_url}
+            ]
+        # HappyHorse documents no negative_prompt field; unsupported extras can
+        # turn a healthy fallback into an InvalidParameter response.  Wan's
+        # first-frame protocol accepts the field and keeps the safety guidance.
+        if negative_prompt and not (happyhorse_r2v or happyhorse_t2v):
+            input_payload["negative_prompt"] = negative_prompt
+        parameters: dict[str, Any] = {
+            "resolution": "720P",
+            "duration": 8,
+            "watermark": False,
+        }
+        if happyhorse_r2v or happyhorse_t2v:
+            parameters["ratio"] = "9:16"
+        return {
+            "model": model,
+            "input": input_payload,
+            "parameters": parameters,
+        }
+
+    def _generate_video_with_model(
+        self,
+        model: str,
+        prompt: str,
+        first_frame_url: str,
+        negative_prompt: str,
+    ) -> str:
+        body = self._video_request_body(
+            model, prompt, first_frame_url, negative_prompt
+        )
+        last_error: ApiError | None = None
+        for submission_attempt in range(2):
+            try:
+                response = self.http.request_json(
+                    _endpoint(
+                        self.config.dashscope_base_url,
+                        "services/aigc/video-generation/video-synthesis",
+                    ),
+                    headers={
+                        "Authorization": f"Bearer {self.config.api_key}",
+                        "X-DashScope-Async": "enable",
+                    },
+                    body=body,
+                    timeout=180,
+                )
+                return self._poll_task_for_url(
+                    response,
+                    preferred_keys=("video", "url"),
+                    timeout_seconds=720,
+                )
+            except ApiError as exc:
+                last_error = exc
+                self._disable_model_on_configuration_error(model, exc)
+                transient = exc.retryable is True or exc.category in {
+                    "rate_limit",
+                    "queue",
+                    "timeout",
+                    "server",
+                    "network",
+                    "response_format",
+                }
+                if (
+                    not transient
+                    or submission_attempt > 0
+                    or self.http.remaining_seconds < 480
+                ):
+                    raise
+                self.logger.warning(
+                    "Video model %s encountered %s; resubmitting once before trying another capability: %s",
+                    model,
+                    exc.category,
+                    exc,
+                )
+                time.sleep(min(4.0, self.http._remaining(4.0)))
+        raise last_error or ApiError(f"Video generation failed for {model}")
+
     def generate_video(
         self, prompt: str, first_frame_url: str, *, negative_prompt: str = ""
     ) -> tuple[str, str]:
-        if not self.model_available(self.config.video_model):
-            raise ApiError(
-                f"video model {self.config.video_model} is disabled for this run",
-                retryable=False,
-                category="model_configuration",
-            )
-        body = {
-            "model": self.config.video_model,
-            "input": {
-                "prompt": prompt,
-                "media": [{"type": "first_frame", "url": first_frame_url}],
-            },
-            "parameters": {
-                "resolution": "720P",
-                "duration": 8,
-                "prompt_extend": False,
-                "watermark": False,
-            },
-        }
-        if negative_prompt:
-            body["input"]["negative_prompt"] = negative_prompt
-        started = time.monotonic()
+        errors: list[str] = []
+        error_categories: list[str] = []
         with self._video_slots:
-            last_error: ApiError | None = None
-            for submission_attempt in range(2):
+            for index, model in enumerate(self.video_models):
+                if not self.model_available(model):
+                    errors.append(f"{model}: disabled after a configuration error")
+                    continue
+                # Preserve enough time to validate and commit a local playable
+                # fallback. The primary is allowed a tighter budget because it
+                # has the strongest identity conditioning.
+                reserve = 120 if index == 0 else 300
+                if self.http.remaining_seconds <= reserve:
+                    errors.append(
+                        f"{model}: skipped with only {self.http.remaining_seconds:.0f}s remaining"
+                    )
+                    continue
+                started = time.monotonic()
                 try:
-                    response = self.http.request_json(
-                        _endpoint(
-                            self.config.dashscope_base_url,
-                            "services/aigc/video-generation/video-synthesis",
-                        ),
-                        headers={
-                            "Authorization": f"Bearer {self.config.api_key}",
-                            "X-DashScope-Async": "enable",
-                        },
-                        body=body,
-                        timeout=180,
+                    url = self._generate_video_with_model(
+                        model,
+                        prompt,
+                        first_frame_url,
+                        negative_prompt,
                     )
-                    url = self._poll_task_for_url(
-                        response,
-                        preferred_keys=("video", "url"),
-                        timeout_seconds=720,
-                    )
-                    break
                 except ApiError as exc:
-                    last_error = exc
-                    self._disable_model_on_configuration_error(
-                        self.config.video_model, exc
+                    errors.append(f"{model}: {exc}")
+                    error_categories.append(exc.category)
+                    self._record_metric(
+                        operation="video",
+                        model=model,
+                        started=started,
+                        status="error",
+                        error=str(exc),
                     )
-                    transient = exc.retryable is True or exc.category in {
-                        "rate_limit",
-                        "queue",
-                        "timeout",
-                        "server",
-                        "network",
-                        "response_format",
-                    }
-                    if (
-                        not transient
-                        or submission_attempt > 0
-                        or self.http.remaining_seconds < 480
-                    ):
-                        self._record_metric(
-                            operation="video",
-                            model=self.config.video_model,
-                            started=started,
-                            status="error",
-                            error=str(exc),
-                        )
-                        raise
                     self.logger.warning(
-                        "视频任务因 %s 失败，保留时间预算后重新提交一次: %s",
-                        exc.category,
+                        "Video capability %s failed; trying the next configured model: %s",
+                        model,
                         exc,
                     )
-                    time.sleep(min(4.0, self.http._remaining(4.0)))
-            else:
-                raise last_error or ApiError("视频生成失败")
-        self._record_metric(
-            operation="video",
-            model=self.config.video_model,
-            started=started,
-            status="ok",
+                    continue
+                self._record_metric(
+                    operation="video",
+                    model=model,
+                    started=started,
+                    status="ok",
+                )
+                return url, model
+        raise ApiError(
+            "All configured video capabilities failed: " + "; ".join(errors),
+            retryable=False,
+            category=(
+                "model_configuration"
+                if error_categories
+                and all(category == "model_configuration" for category in error_categories)
+                else "video_capabilities_exhausted"
+            ),
         )
-        return url, self.config.video_model
 
     def _poll_task_for_url(
         self,
@@ -1504,7 +1687,7 @@ Verified facts:
             if urls:
                 return urls[0]
             raise ApiError(
-                f"异步响应缺少 task_id: {json.dumps(initial_response, ensure_ascii=False)[:1000]}",
+                f"Asynchronous response is missing task_id: {json.dumps(initial_response, ensure_ascii=False)[:1000]}",
                 retryable=True,
                 category="response_format",
             )
@@ -1528,7 +1711,7 @@ Verified facts:
                 urls = _collect_urls(response, preferred_keys=preferred_keys)
                 if not urls:
                     raise ApiError(
-                        "任务成功但没有返回产物 URL",
+                        "Task succeeded but returned no artifact URL",
                         retryable=True,
                         category="response_format",
                     )
@@ -1537,7 +1720,7 @@ Verified facts:
                 message = output.get("message") or response.get("message") or status
                 category = _failure_category(None, str(message))
                 raise ApiError(
-                    f"异步任务失败: {message}",
+                    f"Asynchronous task failed: {message}",
                     retryable=category
                     in {"rate_limit", "queue", "timeout", "server", "network"},
                     category=category,
@@ -1545,7 +1728,7 @@ Verified facts:
             time.sleep(min(delay, self.http._remaining(delay)))
             delay = min(15.0, delay * 1.35)
         raise ApiError(
-            f"异步任务轮询超时: {task_id}",
+            f"Asynchronous task polling timed out: {task_id}",
             retryable=True,
             category="timeout",
         )

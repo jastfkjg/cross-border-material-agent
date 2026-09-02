@@ -105,8 +105,8 @@ def filter_invalid_mapping_provenance(
             kept.append(item)
             continue
         warnings.append(
-            f"属性映射来源不一致，已移除 {item.name}: "
-            f"{item.source_name}={item.source_value} ({pointer or '无证据指针'})"
+            f"Removed mapped attribute {item.attr_id}/{item.value_id or 'no-value-id'} "
+            f"because its source evidence is inconsistent ({pointer or 'no evidence pointer'})"
         )
         if item.required and item.name not in taxonomy.missing_required:
             taxonomy.missing_required.append(item.name)
@@ -173,11 +173,21 @@ def build_claim_ledger(
     for attribute_index, item in enumerate(facts.attributes):
         buyer_safe = buyer_safe_source_name(item.name)
         surfaces = ["machine_appendix"]
-        decision = str(
-            attribute_decisions.get(attribute_index, {}).get("decision") or "publish"
+        decision_row = attribute_decisions.get(attribute_index, {})
+        decision = str(decision_row.get("decision") or "publish")
+        surface_decisions = decision_row.get("surface_decisions")
+        surface_decisions = (
+            surface_decisions if isinstance(surface_decisions, dict) else {}
         )
-        if buyer_safe and decision == "publish":
-            surfaces = ["buyer_copy", "machine_appendix", "image_prompt"]
+        # Surface-specific model decisions prevent pixel observability from
+        # suppressing a source-grounded non-visual fact everywhere. The host
+        # translates surfaces mechanically and never infers product semantics.
+        buyer_decision = str(surface_decisions.get("buyer_copy") or decision)
+        media_decision = str(surface_decisions.get("media_generation") or decision)
+        if buyer_safe and buyer_decision == "publish":
+            surfaces.append("buyer_copy")
+        if media_decision == "publish":
+            surfaces.append("image_prompt")
         add(
             item.name,
             item.value,

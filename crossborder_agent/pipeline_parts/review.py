@@ -195,10 +195,10 @@ class ReviewPipelineMixin:
                     "\n".join(
                         (
                             "# Agent control preview",
-                            f"商品事实: {facts.offer_id}",
-                            f"平台类目: {taxonomy.category.category_id}",
-                            "本地化: en-US, ko-KR, pt-BR",
-                            "质检: deterministic artifact gate",
+                            f"Product facts: {facts.offer_id}",
+                            f"Marketplace category: {taxonomy.category.category_id}",
+                            "Localization: en-US, ko-KR, pt-BR",
+                            "Quality control: deterministic artifact gate",
                         )
                     ),
                     encoding="utf-8",
@@ -709,7 +709,7 @@ class ReviewPipelineMixin:
             finally:
                 shutil.rmtree(runtime_dir, ignore_errors=True)
         except ApiError as exc:
-            self.warnings.append(f"顶层交付编排器提前停止: {exc}")
+            self.warnings.append(f"Top-level delivery orchestrator stopped early: {exc}")
             self.trace.emit("orchestrator.delivery_failed", error=str(exc))
             state.accepted_artifact_fingerprint = fingerprint()
             self.trace.emit(
@@ -772,8 +772,8 @@ class ReviewPipelineMixin:
                 or "current delivery did not satisfy the acceptance contract"
             )
             warning = (
-                f"顶层交付编排未显式完成（{result.stop_reason}）: {gate_error}；"
-                "提交当前可用快照并保留问题记录"
+                f"Top-level delivery orchestration did not finish explicitly ({result.stop_reason}): "
+                f"{gate_error}; submitting the current usable snapshot and retaining the issue record"
             )
             self.warnings.append(warning)
             self.logger.warning(warning)
@@ -816,7 +816,11 @@ Candidate 1:
                 system, prompt, model=self.client.config.review_model
             )
         except ApiError as exc:
-            self.logger.warning("%s 文案 A/B 评审不可用，保留旧文案: %s", language, exc)
+            self.logger.warning(
+                "%s copy A/B review is unavailable; keeping the prior copy: %s",
+                language,
+                exc,
+            )
             return False
         rows = review.get("candidates")
         if not isinstance(rows, list):
@@ -911,11 +915,15 @@ Candidate 1:
         ) and 0 <= incumbent_index < len(candidate_urls)
         if not ranked:
             if incumbent_valid:
-                self.logger.warning("%s 新候选均有语义硬伤，保留当前资产", label)
+                self.logger.warning(
+                    "Every new %s candidate has a hard semantic defect; keeping the current asset",
+                    label,
+                )
                 return candidate_urls[incumbent_index]
-            feedback = "; ".join(hard_reasons[:4]) or "评审未返回可比较候选"
+            feedback = "; ".join(hard_reasons[:4]) or "Review returned no comparable candidate"
             raise SemanticRejection(
-                f"{label} 候选均未通过语义质检（存在硬伤）", feedback=feedback
+                f"No {label} candidate passed semantic quality control because of hard defects",
+                feedback=feedback,
             )
 
         best_score, best_index, _ = max(ranked, key=lambda row: (row[0], -row[1]))
@@ -932,7 +940,7 @@ Candidate 1:
             required = incumbent_score + max(0.0, minimum_improvement)
             if best_score < required:
                 self.logger.info(
-                    "%s 修复候选提升不足: old=%.1f new=%.1f required=%.1f，保留旧资产",
+                    "%s repair candidate improvement is insufficient: old=%.1f new=%.1f required=%.1f; keeping the prior asset",
                     label,
                     incumbent_score,
                     best_score,
@@ -940,7 +948,7 @@ Candidate 1:
                 )
                 return candidate_urls[incumbent_index]
         self.logger.info(
-            "%s 候选选优: 选择 %d/%d，软评分 %.1f",
+            "%s candidate selection: selected %d/%d with soft score %.1f",
             label,
             best_index + 1,
             len(candidate_urls),
@@ -958,7 +966,7 @@ Candidate 1:
         minimum_improvement: float = 0.0,
     ) -> str:
         if not candidate_urls:
-            raise ApiError("主图模型未返回候选")
+            raise ApiError("Main-image model returned no candidate")
         # A single generated candidate still needs semantic acceptance. Skipping
         # review here lets structure drift pass merely because no alternative
         # candidate was requested for this storyboard slot.
@@ -978,11 +986,13 @@ Candidate 1:
                 else 0
             )
             self.logger.warning(
-                "主图语义评审不可用，保留确定性安全候选 %d，避免误回退: %s",
+                "Main-image semantic review is unavailable; keeping deterministic safe candidate %d to avoid a false fallback: %s",
                 keep,
                 exc,
             )
-            self.warnings.append(f"主图候选评审不可用，保留候选: {exc}")
+            self.warnings.append(
+                f"Main-image candidate review is unavailable; keeping the candidate: {exc}"
+            )
             return candidate_urls[keep]
 
         candidates = review.get("candidates")
@@ -998,7 +1008,9 @@ Candidate 1:
         )
         if not isinstance(candidates, list):
             keep = incumbent_index if incumbent_index is not None else 0
-            self.warnings.append("主图语义评审结构不完整，采用确定性候选")
+            self.warnings.append(
+                "Main-image semantic review is incomplete; using the deterministic candidate"
+            )
             return candidate_urls[keep]
         wearer_supported = self._hero_wearer_supported(facts, source_urls)
         ranked: list[tuple[float, int, dict[str, Any]]] = []
@@ -1040,7 +1052,7 @@ Candidate 1:
                 score -= 2
             ranked.append((score, index, item))
         return self._choose_monotonic_candidate(
-            "主图",
+            "main image",
             candidate_urls,
             ranked,
             incumbent_index=incumbent_index,
@@ -1060,7 +1072,7 @@ Candidate 1:
         minimum_improvement: float = 0.0,
     ) -> str:
         if not candidate_urls:
-            raise ApiError(f"详情图 {index} 模型未返回候选")
+            raise ApiError(f"Detail-image {index} model returned no candidate")
         # A single generated detail candidate still needs semantic acceptance;
         # otherwise structure drift can pass just because there is no alternative.
         if self.client is None:
@@ -1086,12 +1098,14 @@ Candidate 1:
                 else 0
             )
             self.logger.warning(
-                "详情图 %d 语义评审不可用，保留确定性安全候选 %d: %s",
+                "Detail-image %d semantic review is unavailable; keeping deterministic safe candidate %d: %s",
                 index,
                 keep,
                 exc,
             )
-            self.warnings.append(f"详情图 {index} 评审不可用，保留候选: {exc}")
+            self.warnings.append(
+                f"Detail-image {index} review is unavailable; keeping the candidate: {exc}"
+            )
             return candidate_urls[keep]
         self._detail_candidate_reviews[index] = copy.deepcopy(review)
         candidates = review.get("candidates")
@@ -1109,7 +1123,9 @@ Candidate 1:
         )
         if not isinstance(candidates, list):
             keep = incumbent_index if incumbent_index is not None else 0
-            self.warnings.append(f"详情图 {index} 评审结构不完整，采用确定性候选")
+            self.warnings.append(
+                f"Detail-image {index} review is incomplete; using the deterministic candidate"
+            )
             return candidate_urls[keep]
         ranked: list[tuple[float, int, dict[str, Any]]] = []
         hard_reasons: list[str] = []
@@ -1153,7 +1169,7 @@ Candidate 1:
             score = self._candidate_soft_score(item, selected_index=selected)
             ranked.append((score, candidate_index, item))
         return self._choose_monotonic_candidate(
-            f"详情图 {index}",
+            f"detail image {index}",
             candidate_urls,
             ranked,
             incumbent_index=incumbent_index,
@@ -1182,7 +1198,9 @@ Candidate 1:
         for left_index, (left_name, left_hash) in enumerate(hashes):
             for right_name, right_hash in hashes[left_index + 1 :]:
                 if hash_distance(left_hash, right_hash) <= 10:
-                    warning = f"最终商品图近重复: {left_name}, {right_name}"
+                    warning = (
+                        f"Final product images are near-duplicates: {left_name}, {right_name}"
+                    )
                     if warning not in self.warnings:
                         self.warnings.append(warning)
 
@@ -1211,24 +1229,31 @@ Candidate 1:
                 usable += 1
 
         if risky_names:
-            warning = "最终视觉兜底未达到直接发布门禁: " + ", ".join(risky_names)
+            warning = (
+                "Final visual fallback did not meet the direct-publication gate: "
+                + ", ".join(risky_names)
+            )
             if warning not in self.warnings:
                 self.warnings.append(warning)
         if image_assets:
             usable_rate = usable / len(image_assets)
             estimate_basis = (
-                "视觉门禁与感知差异"
+                "visual gates and perceptual distinctness"
                 if self._source_image_observations
-                else "物理规格与感知差异（未执行模型语义门禁）"
+                else "physical specifications and perceptual distinctness (model semantic gates were not run)"
             )
             if usable_rate < 0.8:
-                warning = f"按{estimate_basis}估算的出图可用率为 {usable_rate:.0%}，低于 A6 的 80% 阈值"
+                warning = (
+                    f"Image usability estimated from {estimate_basis} is {usable_rate:.0%}, "
+                    "below the A6 80% threshold"
+                )
                 if warning not in self.warnings:
                     self.warnings.append(warning)
             elif not self._source_image_observations:
                 warning = (
-                    f"离线图片物理规格与感知差异检查通过 {usable}/{len(image_assets)}；"
-                    "语义可用率未评估，正式交付仍需确认背景、人物道具、分镜任务与商品身份"
+                    f"Offline physical-specification and perceptual-distinctness checks passed for "
+                    f"{usable}/{len(image_assets)} images; semantic usability was not evaluated, so "
+                    "backgrounds, people or props, storyboard roles, and product identity still require confirmation before publication"
                 )
                 if warning not in self.warnings:
                     self.warnings.append(warning)
@@ -1237,7 +1262,9 @@ Candidate 1:
             (asset for asset in assets if asset.name == "product_video.mp4"), None
         )
         if video and not video.generated and risky_names:
-            warning = "回退视频继承了未通过直接发布门禁的静态图片"
+            warning = (
+                "Fallback video inherits static images that did not pass the direct-publication gate"
+            )
             if warning not in self.warnings:
                 self.warnings.append(warning)
 
@@ -1255,7 +1282,9 @@ Candidate 1:
             return {}
         remaining = self.deadline - time.monotonic()
         if remaining <= 3 * 60:
-            self.warnings.append("剩余时间不足，跳过六图集合语义评审")
+            self.warnings.append(
+                "Insufficient time remains; six-image set semantic review was skipped"
+            )
             self.trace.emit(
                 "image.set_review_skipped",
                 reason="insufficient-stage-budget",
@@ -1267,7 +1296,9 @@ Candidate 1:
         ]
         by_name = {asset.name: asset for asset in assets}
         if any(name not in by_name for name in ordered_names):
-            self.warnings.append("六图集合不完整，无法执行集合级语义评审")
+            self.warnings.append(
+                "The six-image set is incomplete, so set-level semantic review cannot run"
+            )
             self.trace.emit("image.set_review_skipped", reason="incomplete-image-set")
             return {}
         reviewable_names = [
@@ -1305,8 +1336,13 @@ Candidate 1:
                 )
             except ApiError as exc:
                 # A judge outage is not evidence that an already accepted image is bad.
-                self.logger.warning("六图集合语义评审不可用，保留当前素材: %s", exc)
-                self.warnings.append(f"六图集合语义评审未完成: {exc}")
+                self.logger.warning(
+                    "Six-image set semantic review is unavailable; keeping current assets: %s",
+                    exc,
+                )
+                self.warnings.append(
+                    f"Six-image set semantic review was not completed: {exc}"
+                )
                 self.trace.emit(
                     "image.set_review_failed",
                     category=exc.category,
@@ -1328,7 +1364,9 @@ Candidate 1:
 
         rows = review.get("assets")
         if not isinstance(rows, list) or len(rows) != len(reviewable_names):
-            self.warnings.append("六图集合评审返回结构异常，忽略该评审而不判定素材失败")
+            self.warnings.append(
+                "Six-image set review returned an invalid structure; ignoring the review without marking assets as failed"
+            )
             self.trace.emit("image.set_review_invalid", review=review)
             return {}
         remote_by_name: dict[str, dict[str, Any]] = {}
@@ -1411,12 +1449,13 @@ Candidate 1:
                     )
             if readable_pairs:
                 self.warnings.append(
-                    "六图集合存在语义重复: " + ", ".join(readable_pairs)
+                    "Six-image set contains semantic duplicates: "
+                    + ", ".join(readable_pairs)
                 )
         missing_roles = review.get("missing_roles")
         if isinstance(missing_roles, list) and missing_roles:
             self.warnings.append(
-                "六图集合商业任务覆盖不足: "
+                "Six-image set has insufficient commercial-role coverage: "
                 + ", ".join(str(item)[:80] for item in missing_roles[:5])
             )
         self.trace.emit("image.set_review", review=review)
