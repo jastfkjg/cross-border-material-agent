@@ -1186,6 +1186,52 @@ def _repair_numeric_fields(
 _BUYER_COPY_FIELDS = ("title", "overview", "highlights", "fit_note")
 
 
+def _usable_runtime_term(value: Any) -> bool:
+    """Whether one runtime translation is safe to project into listing tables.
+
+    Terminology is evaluated field by field.  A partial or unavailable audit
+    must not erase unrelated translations, while a source-script echo or the
+    deterministic unavailable marker must not be mistaken for localization.
+    """
+
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and not re.search(r"[\u4e00-\u9fff]", value)
+        and value.strip() not in _UNTRANSLATED_VALUES
+    )
+
+
+def _merge_runtime_terms(
+    fallback_terms: dict[str, Any],
+    draft_terms: Any,
+    audited_terms: Any,
+    *,
+    audit_applied: bool,
+) -> dict[str, str]:
+    """Build a complete ledger without making audit availability a data gate."""
+
+    draft = draft_terms if isinstance(draft_terms, dict) else {}
+    audited = audited_terms if isinstance(audited_terms, dict) else {}
+    merged: dict[str, str] = {}
+    for source_term, fallback_value in fallback_terms.items():
+        audited_value = audited.get(source_term) if audit_applied else None
+        draft_value = draft.get(source_term)
+        if _usable_runtime_term(audited_value):
+            merged[source_term] = audited_value.strip()
+        elif _usable_runtime_term(fallback_value):
+            # A reviewed deterministic translation is preferable to an
+            # unaudited writer substitution for already-covered vocabulary.
+            merged[source_term] = str(fallback_value).strip()
+        elif _usable_runtime_term(draft_value):
+            merged[source_term] = draft_value.strip()
+        else:
+            # Machine-scored listing facts remain observable even when no
+            # trustworthy localized rendering survived the model boundary.
+            merged[source_term] = source_term
+    return merged
+
+
 def _compose_copy_layers(
     candidate: Any, fallback: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1210,12 +1256,7 @@ def _compose_copy_layers(
     if isinstance(candidate_terms, dict):
         for term in localized_terms:
             value = candidate_terms.get(term)
-            if (
-                isinstance(value, str)
-                and value.strip()
-                and not re.search(r"[\u4e00-\u9fff]", value)
-                and value.strip() not in _UNTRANSLATED_VALUES
-            ):
+            if _usable_runtime_term(value):
                 localized_terms[term] = value.strip()
     payload["localized_terms"] = localized_terms
     return payload
@@ -2478,20 +2519,14 @@ Do not output media_descriptions. Output the corrected JSON object only.
                 retryable=exc.retryable,
                 error=str(exc),
             )
-    verified_localized_terms: dict[str, Any]
+    draft_terms = draft.get("localized_terms") if isinstance(draft, dict) else None
     audited_terms = audited.get("localized_terms") if isinstance(audited, dict) else None
-    if (
-        audit_applied
-        and isinstance(audited_terms, dict)
-        and set(audited_terms) == set(fallback["localized_terms"])
-        and all(isinstance(value, str) and value.strip() for value in audited_terms.values())
-    ):
-        verified_localized_terms = dict(audited_terms)
-    else:
-        # An unreviewed term map can silently corrupt every deterministic table.
-        # Preserve a complete availability projection unless a second model pass
-        # validates the runtime-authored terminology ledger.
-        verified_localized_terms = dict(fallback["localized_terms"])
+    verified_localized_terms = _merge_runtime_terms(
+        fallback["localized_terms"],
+        draft_terms,
+        audited_terms,
+        audit_applied=audit_applied,
+    )
     if isinstance(audited, dict):
         audited = dict(audited)
         audited["localized_terms"] = verified_localized_terms
@@ -2504,6 +2539,7 @@ Do not output media_descriptions. Output the corrected JSON object only.
         )
 
     payload = _compose_copy_layers(audited, fallback)
+    payload["localized_terms"] = verified_localized_terms
     expected_media = set(fallback["media_descriptions"])
     expected_terms = set(fallback["localized_terms"])
     validation_error = _payload_validation_error(
@@ -2566,10 +2602,8 @@ Evidence-availability contract for sizing and table references:
             if salvaged is not fallback:
                 return salvaged, f"{client.config.chat_model}-{salvage_source}"
             return fallback, validation_error
-        if isinstance(payload, dict):
-            payload = dict(payload)
-            payload["localized_terms"] = verified_localized_terms
         payload = _compose_copy_layers(payload, fallback)
+        payload["localized_terms"] = verified_localized_terms
         validation_error = _payload_validation_error(
             language, payload, facts, taxonomy, expected_media, expected_terms
         )
@@ -2626,11 +2660,22 @@ def _escape_table(value: str) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ").strip()
 
 
-def _localized_display(language: str, value: str, term_map: dict[str, Any]) -> str:
+def _localized_display(
+    language: str,
+    value: str,
+    term_map: dict[str, Any],
+    *,
+    preserve_source: bool = False,
+) -> str:
     raw = str(value).strip()
     if "/" in raw:
         localized_parts = [
-            _localized_display(language, part.strip(), term_map)
+            _localized_display(
+                language,
+                part.strip(),
+                term_map,
+                preserve_source=preserve_source,
+            )
             for part in raw.split("/")
             if part.strip()
         ]
@@ -2648,7 +2693,7 @@ def _localized_display(language: str, value: str, term_map: dict[str, Any]) -> s
     else:
         rendered = _static_localize_term(language, raw)
     if rendered in _UNTRANSLATED_VALUES:
-        return "—"
+        return raw if preserve_source and raw else "—"
     seller_weight = _seller_weight_display(language, raw)
     if seller_weight:
         rendered = seller_weight
@@ -2684,12 +2729,18 @@ def render_description(
         f"- {str(item).strip()}" for item in payload["highlights"] if str(item).strip()
     )
     category = taxonomy.category
-    localized_platform = _localized_display(language, facts.platform, term_map)
-    localized_source_category = _localized_display(
-        language, facts.source_category_name, term_map
+    localized_platform = _localized_display(
+        language, facts.platform, term_map, preserve_source=True
     )
-    localized_leaf_name = _localized_display(language, category.name, term_map)
-    localized_leaf_path = _localized_display(language, category.path, term_map)
+    localized_source_category = _localized_display(
+        language, facts.source_category_name, term_map, preserve_source=True
+    )
+    localized_leaf_name = _localized_display(
+        language, category.name, term_map, preserve_source=True
+    )
+    localized_leaf_path = _localized_display(
+        language, category.path, term_map, preserve_source=True
+    )
     lines.extend(["", f"## {locale['appendix']}", ""])
     lines.extend(
         [
@@ -2719,14 +2770,17 @@ def render_description(
     for attribute_index, item in enumerate(facts.attributes):
         if decision_rows.get(attribute_index, {}).get("decision", "publish") != "publish":
             continue
-        localized_value = _localized_display(language, item.value, term_map)
+        buyer_localized_value = _localized_display(language, item.value, term_map)
+        localized_value = _localized_display(
+            language, item.value, term_map, preserve_source=True
+        )
         mentioned_in_buyer_copy = (
             buyer_safe_source_name(item.name)
             and
-            localized_value != "—"
-            and len(re.sub(r"\W+", "", localized_value)) >= 3
+            buyer_localized_value != "—"
+            and len(re.sub(r"\W+", "", buyer_localized_value)) >= 3
             and _localized_concept_is_mentioned(
-                language, localized_value, natural_buyer_text
+                language, buyer_localized_value, natural_buyer_text
             )
         )
         if (
@@ -2735,7 +2789,9 @@ def render_description(
             and not mentioned_in_buyer_copy
         ):
             continue
-        name = _localized_display(language, item.name, term_map)
+        name = _localized_display(
+            language, item.name, term_map, preserve_source=True
+        )
         value = localized_value
         if name == "—" or value == "—":
             continue
@@ -2799,9 +2855,15 @@ def render_description(
     )
     for item in taxonomy.attributes:
         item_type = platform_types[1] if item.sales_attribute else platform_types[0]
-        name = _localized_display(language, item.name, term_map)
-        value = _localized_display(language, item.platform_value, term_map)
-        source_name = _localized_display(language, item.source_name, term_map)
+        name = _localized_display(
+            language, item.name, term_map, preserve_source=True
+        )
+        value = _localized_display(
+            language, item.platform_value, term_map, preserve_source=True
+        )
+        source_name = _localized_display(
+            language, item.source_name, term_map, preserve_source=True
+        )
         evidence_pointer = str(item.source_evidence_pointer or "")
         if evidence_pointer == facts.source_title_evidence_pointer:
             source_label = {
@@ -2847,7 +2909,7 @@ def render_description(
         "| SKU ID | Spec ID | "
         + " | ".join(
             _escape_table(
-                f"{_localized_display(language, name, term_map)} "
+                f"{_localized_display(language, name, term_map, preserve_source=True)} "
                 f"(ID {next((attr.attribute_id for sku in facts.skus for attr in sku.attributes if attr.name == name), '')})"
             )
             for name in all_sku_names
@@ -2858,7 +2920,12 @@ def render_description(
     for sku in facts.skus:
         values = {item.name: item.value for item in sku.attributes}
         row = [sku.sku_id, sku.spec_id] + [
-            _localized_display(language, values.get(name, ""), term_map)
+            _localized_display(
+                language,
+                values.get(name, ""),
+                term_map,
+                preserve_source=True,
+            )
             for name in all_sku_names
         ]
         lines.append("| " + " | ".join(_escape_table(value) for value in row) + " |")
@@ -2907,7 +2974,12 @@ def render_description(
             )
         for size in facts.size_conversions:
             row = [
-                _localized_display(language, size.source_label, term_map),
+                _localized_display(
+                    language,
+                    size.source_label,
+                    term_map,
+                    preserve_source=True,
+                ),
                 size.kilograms,
             ]
             if include_imperial:

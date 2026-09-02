@@ -356,60 +356,6 @@ class TaxonomyPipelineMixin:
                 category_tree, attribute_data, max_turns=32
             )
 
-        # A disagreement with the structurally valid availability candidate is
-        # an uncertainty signal, not a vote for either answer. Give a fresh
-        # challenger the same complete evidence. If it disagrees too, a third
-        # fresh context adjudicates the two grounded proposals. No product term,
-        # category ID, or benchmark-specific preference is encoded here.
-        if (
-            resolved_category.category_id != taxonomy.category.category_id
-            and self.deadline - time.monotonic() >= 780
-        ):
-            challenger = self._recover_category_with_model(
-                facts,
-                category_tree,
-                attribute_data,
-                context=(
-                    "Independently challenge a prior category proposal. Do not assume either the "
-                    "model proposal or the availability candidate is correct. Inspect source evidence, "
-                    "leaf ancestry, sibling specialization and schema relationships before committing. "
-                    f"Prior model proposal: {resolved_category.category_id} | "
-                    f"{resolved_category.path}. Availability candidate: "
-                    f"{taxonomy.category.category_id} | {taxonomy.category.path}."
-                ),
-                max_turns=12,
-            )
-            if (
-                challenger is not None
-                and challenger.category_id != resolved_category.category_id
-                and self.deadline - time.monotonic() >= 660
-            ):
-                adjudicated = self._recover_category_with_model(
-                    facts,
-                    category_tree,
-                    attribute_data,
-                    context=(
-                        "Two independent grounded category explorations disagree. Reinspect the exact "
-                        "product evidence and relevant taxonomy records, explicitly test which leaf's "
-                        "qualifiers are supported, and commit the best answer. Proposal A: "
-                        f"{resolved_category.category_id} | {resolved_category.path}. Proposal B: "
-                        f"{challenger.category_id} | {challenger.path}."
-                    ),
-                    max_turns=12,
-                )
-                if adjudicated is not None:
-                    self.trace.emit(
-                        "taxonomy.category_disagreement_adjudicated",
-                        proposal_a=resolved_category.category_id,
-                        proposal_b=challenger.category_id,
-                        selected=adjudicated.category_id,
-                    )
-                    resolved_category = adjudicated
-            elif challenger is not None:
-                self.trace.emit(
-                    "taxonomy.category_challenger_agreed",
-                    selected_category_id=resolved_category.category_id,
-                )
         category_anchored_fallback = resolve_taxonomy(
             facts,
             category_tree,

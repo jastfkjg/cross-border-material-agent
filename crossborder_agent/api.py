@@ -48,10 +48,11 @@ def _failure_category(status_code: int | None, message: str) -> str:
         token in lowered
         for token in (
             "insufficient_quota",
-            "allocationquota",
             "quota has been exhausted",
             "quota exhausted",
             "account quota exceeded",
+            "weekly quota",
+            "1-week quota",
         )
     ):
         return "quota_exhausted"
@@ -258,7 +259,11 @@ class HttpJsonClient:
             )
 
     def _remember_terminal_failure(self, failure: ApiError) -> None:
-        if failure.category not in {"quota_exhausted", "authorization"}:
+        # Only an explicit account-level quota exhaustion proves that every
+        # model capability is unavailable.  Endpoint throttles and permission
+        # failures may be model- or capability-specific, so globally caching
+        # either would suppress otherwise usable chat/image/video fallbacks.
+        if failure.category != "quota_exhausted":
             return
         with self._terminal_failure_lock:
             if self._terminal_failure is None:

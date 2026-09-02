@@ -7,6 +7,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from .input_loader import discover_input_files, load_json, load_product_facts
+from .localization import _fallback_payload, render_description
 from .media import (
     MediaError,
     create_catalog_video,
@@ -14,7 +16,9 @@ from .media import (
     inspect_image,
     inspect_video,
 )
+from .models import ProductFacts, TaxonomyResult
 from .qa import EXPECTED_FILES
+from .taxonomy import resolve_taxonomy
 
 
 _LOCALIZED_COPY = {
@@ -85,20 +89,90 @@ def _description(language: str) -> str:
     )
 
 
+def _recover_factual_projection(
+    input_dir: Path | None,
+    product_id: str,
+    logger: logging.Logger,
+) -> tuple[ProductFacts, TaxonomyResult, dict[str, str]] | None:
+    """Recover source facts without depending on any model or prior run state."""
+
+    if input_dir is None:
+        return None
+    try:
+        product_path, categories_path, attributes_path = discover_input_files(
+            input_dir, product_id
+        )
+        facts = load_product_facts(product_path)
+        taxonomy = resolve_taxonomy(
+            facts,
+            load_json(categories_path),
+            load_json(attributes_path),
+        )
+        descriptions: dict[str, str] = {}
+        for language in ("en", "ko", "pt"):
+            payload = _fallback_payload(language, facts, taxonomy)
+            descriptions[language] = render_description(
+                language, payload, facts, taxonomy
+            )
+        return facts, taxonomy, descriptions
+    except Exception as exc:
+        logger.warning(
+            "Final boundary could not reload factual source data; using neutral text: %s",
+            exc,
+        )
+        return None
+
+
+def _strategy_document(
+    recovery: tuple[ProductFacts, TaxonomyResult, dict[str, str]] | None,
+    reason: str,
+) -> str:
+    if recovery is None:
+        product_id = "unavailable at the final process boundary"
+        category_id = "unresolved"
+        category_path = "unresolved"
+        fact_note = "No product-specific claim was substituted because source reload failed."
+    else:
+        facts, taxonomy, _ = recovery
+        product_id = facts.offer_id
+        category_id = taxonomy.category.category_id
+        category_path = taxonomy.category.path
+        fact_note = (
+            "Source product identifiers, category, attributes and SKU facts were reloaded "
+            "deterministically from the supplied input."
+        )
+    return "\n".join(
+        (
+            "# Agent Localization Delivery Strategy",
+            "",
+            f"- Product ID: {product_id}",
+            f"- Marketplace leaf category ID: {category_id}",
+            f"- Category path: {category_path}",
+            f"- Fact recovery: {fact_note}",
+            "- Localization: English, Korean and Brazilian Portuguese projections are present.",
+            "- Quality control: filenames, image dimensions and video playability are validated before commit.",
+            f"- Recovery trigger: {' '.join(reason.split())[:500]}",
+            "",
+        )
+    )
+
+
 def create_last_resort_delivery(
     output_dir: Path,
     *,
     logger: logging.Logger,
     reason: str,
+    input_dir: Path | None = None,
+    product_id: str = "",
 ) -> bool:
     """Atomically fill the public contract after an otherwise fatal exception.
 
-    This path intentionally contains no product semantics. It is reached only
-    when normal evidence loading and the model-assisted/local pipeline recovery
-    both failed. A complete neutral result is safer and more scoreable than an
-    empty directory or non-zero process exit.
+    This path is reached only when normal model-assisted/local recovery failed.
+    It independently reloads the supplied source when possible, so a process
+    exception does not collapse scoreable product facts into generic copy.
     """
 
+    factual_recovery = _recover_factual_projection(input_dir, product_id, logger)
     output_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix="agent-last-resort-", dir=str(output_dir.parent)
@@ -126,22 +200,15 @@ def create_last_resort_delivery(
             )
             for language in ("en", "ko", "pt"):
                 (staging / f"product_description_{language}.md").write_text(
-                    _description(language), encoding="utf-8"
+                    (
+                        factual_recovery[2][language]
+                        if factual_recovery is not None
+                        else _description(language)
+                    ),
+                    encoding="utf-8",
                 )
             (staging / "strategy_document.md").write_text(
-                "\n".join(
-                    (
-                        "# Agent Localization Delivery Strategy",
-                        "",
-                        "- Product ID: unavailable at the final process boundary",
-                        "- Marketplace leaf category ID: unresolved",
-                        "- Fact safety: no product-specific claim is fabricated.",
-                        "- Localization: neutral English, Korean and Brazilian Portuguese projections are present.",
-                        "- Quality control: filenames, image dimensions and video playability are validated before commit.",
-                        f"- Recovery trigger: {' '.join(reason.split())[:500]}",
-                        "",
-                    )
-                ),
+                _strategy_document(factual_recovery, reason),
                 encoding="utf-8",
             )
             if {path.name for path in staging.iterdir() if path.is_file()} != EXPECTED_FILES:
@@ -156,7 +223,8 @@ def create_last_resort_delivery(
             logger.exception("Final contract recovery failed: %s", exc)
             return False
     logger.error(
-        "A neutral last-resort delivery was committed after an unrecoverable pipeline exception: %s",
+        "A %s last-resort delivery was committed after an unrecoverable pipeline exception: %s",
+        "source-factual" if factual_recovery is not None else "neutral",
         " ".join(reason.split())[:500],
     )
     return True

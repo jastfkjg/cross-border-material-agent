@@ -34,6 +34,10 @@ from crossborder_agent.media import (
 from crossborder_agent.qa import EXPECTED_FILES
 
 
+ROOT = Path(__file__).resolve().parents[1]
+DATA = ROOT / "Data_for_Users"
+
+
 class _FaultHandler(BaseHTTPRequestHandler):
     counters: dict[str, int] = {}
 
@@ -67,6 +71,20 @@ class _FaultHandler(BaseHTTPRequestHandler):
                 },
                 429,
             )
+        elif self.path == "/allocation-throttle" and count == 1:
+            self._json(
+                {
+                    "error": {
+                        "code": "Throttling.AllocationQuota",
+                        "message": "Request throttled for allocated capacity",
+                    }
+                },
+                429,
+            )
+        elif self.path == "/allocation-throttle":
+            self._json({"ok": True})
+        elif self.path == "/forbidden":
+            self._json({"message": "model endpoint is not authorized"}, 403)
         elif self.path == "/bad-json" and count == 1:
             body = b"{not-json"
             self.send_response(200)
@@ -140,6 +158,33 @@ class ResilienceTests(unittest.TestCase):
         self.assertEqual(self.handler.counters["/retry-json"], 0)
         self.assertFalse(client.service_available)
 
+    def test_allocation_quota_throttle_is_retryable_not_account_terminal(self) -> None:
+        self.handler.counters["/allocation-throttle"] = 0
+        client = self._http()
+
+        response = client.request_json(
+            self.base + "/allocation-throttle", method="GET", body=None
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(self.handler.counters["/allocation-throttle"], 2)
+        self.assertTrue(client.service_available)
+
+    def test_endpoint_authorization_failure_does_not_disable_other_capabilities(self) -> None:
+        self.handler.counters["/forbidden"] = 0
+        self.handler.counters["/retry-json"] = 1
+        client = self._http()
+
+        with self.assertRaises(ApiError) as captured:
+            client.request_json(self.base + "/forbidden", method="GET", body=None)
+        response = client.request_json(
+            self.base + "/retry-json", method="GET", body=None
+        )
+
+        self.assertEqual(captured.exception.category, "authorization")
+        self.assertTrue(response["ok"])
+        self.assertTrue(client.service_available)
+
     @unittest.skipIf(Image is None, "Pillow is required")
     def test_last_resort_delivery_fills_the_public_contract(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agent-last-resort-test-") as temporary:
@@ -148,6 +193,8 @@ class ResilienceTests(unittest.TestCase):
                 output,
                 logger=self.logger,
                 reason="synthetic fatal boundary",
+                input_dir=DATA,
+                product_id="8409262509816",
             )
 
             self.assertTrue(created)
@@ -156,6 +203,16 @@ class ResilienceTests(unittest.TestCase):
                 EXPECTED_FILES,
             )
             self.assertTrue(inspect_video(output / "product_video.mp4")["decoded"])
+            description = (output / "product_description_en.md").read_text(
+                encoding="utf-8"
+            )
+            strategy = (output / "strategy_document.md").read_text(encoding="utf-8")
+            self.assertIn("8409262509816", description)
+            self.assertIn("8409262509816", strategy)
+            self.assertNotIn(
+                "Product-specific identifiers and attributes were not recovered",
+                description,
+            )
 
     def test_cli_returns_success_when_final_contract_recovery_succeeds(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agent-cli-recovery-") as temporary:
@@ -181,6 +238,7 @@ class ResilienceTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         recovery.assert_called_once()
+        self.assertEqual(recovery.call_args.kwargs["input_dir"], input_dir.resolve())
 
     def test_non_retryable_400_preserves_status(self) -> None:
         with self.assertRaises(ApiError) as raised:

@@ -75,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         "on",
     }
     logger = configure_logging(debug=debug)
+    input_dir: Path | None = None
     output_dir: Path | None = None
     try:
         if args.input_dir or args.output_dir:
@@ -120,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
             output_dir,
             logger=logger,
             reason=f"{type(exc).__name__}: {exc}",
+            input_dir=input_dir,
+            product_id=args.product_id.strip(),
         ):
             return 0
         return 1

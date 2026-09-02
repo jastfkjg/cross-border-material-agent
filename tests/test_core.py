@@ -969,6 +969,50 @@ class FactAndTaxonomyTests(unittest.TestCase):
         self.assertNotEqual(taxonomy.category.category_id, facts.offer_id)
         self.assertNotIn(facts.offer_id, repr(taxonomy.category.candidates))
 
+    def test_attribute_schema_availability_does_not_override_leaf_selection(self) -> None:
+        facts = load_product_facts(
+            DATA / "product_info/product_9493156931235.json"
+        )
+        focused = replace(
+            facts,
+            source_title="Alpha widget",
+            source_category_id="",
+            source_category_name="Alpha widget",
+            attributes=[],
+            skus=[],
+        )
+        category_tree = {
+            "categories": [
+                {
+                    "catId": 101,
+                    "name": "Alpha widget",
+                    "categoryPath": "Products/Alpha widget",
+                    "isLeaf": True,
+                },
+                {
+                    "catId": 202,
+                    "name": "Beta accessory",
+                    "categoryPath": "Products/Beta accessory",
+                    "isLeaf": True,
+                },
+            ]
+        }
+        attribute_data = {
+            "categories": [
+                {
+                    "categoryId": 202,
+                    "categoryName": "Beta accessory",
+                    "categoryPath": "Products/Beta accessory",
+                    "categoryMetadata": {},
+                }
+            ]
+        }
+
+        taxonomy = resolve_taxonomy(focused, category_tree, attribute_data)
+
+        self.assertEqual(taxonomy.category.category_id, "101")
+        self.assertEqual(taxonomy.category.method, "local-lexical-ranking")
+
     def test_model_can_choose_storyboard_without_bypassing_safety_guard(self) -> None:
         facts = load_product_facts(DATA / "product_info/product_9493156931235.json")
         taxonomy = resolve_taxonomy(
@@ -1116,7 +1160,7 @@ class FactAndTaxonomyTests(unittest.TestCase):
         self.assertEqual(payload["title"], draft["title"])
         self.assertEqual(source, "copy-model-validated-draft")
 
-    def test_writer_cannot_mutate_deterministic_machine_appendix(self) -> None:
+    def test_failed_term_audit_preserves_known_terms_and_recovers_unknown_draft_terms(self) -> None:
         facts = load_product_facts(DATA / "product_info/product_9493156931235.json")
         taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
         plan = fallback_creative_plan(facts, taxonomy)
@@ -1147,7 +1191,65 @@ class FactAndTaxonomyTests(unittest.TestCase):
             "en", facts, taxonomy, plan, CopyClient()
         )
         self.assertEqual(payload["media_descriptions"], fallback["media_descriptions"])
-        self.assertEqual(payload["localized_terms"], fallback["localized_terms"])
+        known_term = next(
+            key
+            for key, value in fallback["localized_terms"].items()
+            if value != "Seller-declared source value"
+        )
+        unknown_term = next(
+            key
+            for key, value in fallback["localized_terms"].items()
+            if value == "Seller-declared source value"
+        )
+        self.assertEqual(
+            payload["localized_terms"][known_term],
+            fallback["localized_terms"][known_term],
+        )
+        self.assertEqual(
+            payload["localized_terms"][unknown_term], "MODEL MUTATED TERM"
+        )
+
+    def test_partial_term_audit_is_merged_field_by_field(self) -> None:
+        facts = load_product_facts(DATA / "product_info/product_9493156931235.json")
+        taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
+        plan = fallback_creative_plan(facts, taxonomy)
+        fallback = _fallback_payload("en", facts, taxonomy)
+        unknown_terms = [
+            key
+            for key, value in fallback["localized_terms"].items()
+            if value == "Seller-declared source value"
+        ]
+        draft = dict(fallback)
+        draft["localized_terms"] = {
+            key: f"Draft translation {index}"
+            for index, key in enumerate(fallback["localized_terms"])
+        }
+        audited = dict(draft)
+        audited["localized_terms"] = {unknown_terms[0]: "Audited translation"}
+
+        class CopyClient:
+            config = SimpleNamespace(chat_model="copy-model")
+            trace = None
+
+            def __init__(self):
+                self.calls = 0
+
+            def chat_json(self, *args, **kwargs):
+                self.calls += 1
+                return draft if self.calls == 1 else audited
+
+        payload, _ = generate_copy_payload(
+            "en", facts, taxonomy, plan, CopyClient()
+        )
+
+        self.assertEqual(
+            payload["localized_terms"][unknown_terms[0]], "Audited translation"
+        )
+        self.assertTrue(
+            payload["localized_terms"][unknown_terms[1]].startswith(
+                "Draft translation"
+            )
+        )
 
     def test_global_detail_pool_installs_only_hard_safe_improving_combination(self) -> None:
         facts = load_product_facts(DATA / "product_info/product_8822221153828.json")
@@ -1443,6 +1545,15 @@ class FactAndTaxonomyTests(unittest.TestCase):
         )
         self.assertEqual(rendered, "Women’s clothing/Tops/T-shirts")
 
+    def test_machine_field_preserves_source_when_translation_is_unavailable(self) -> None:
+        rendered = _localized_display(
+            "en",
+            "未知平台值",
+            {"未知平台值": "Seller-declared source value"},
+            preserve_source=True,
+        )
+        self.assertEqual(rendered, "未知平台值")
+
     def test_fast_copy_skips_second_model_call_when_draft_is_valid(self) -> None:
         facts = load_product_facts(DATA / "product_info/product_5758364264251.json")
         taxonomy = resolve_taxonomy(facts, self.tree, self.attributes)
@@ -1540,7 +1651,8 @@ Natural localized overview.
         self.assertIn("product_video.mp4", text)
         self.assertIn("Seller Label", text)
         self.assertIn("40–47.5 kg", text)
-        self.assertNotRegex(text, r"[\u4e00-\u9fff]")
+        buyer_surface, _ = _description_language_surfaces(text, "en")
+        self.assertNotRegex(buyer_surface, r"[\u4e00-\u9fff]")
         self.assertNotIn("/ret/result/result", text)
         self.assertNotIn("Source evidence", text)
         first_sku_row = next(

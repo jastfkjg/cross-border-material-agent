@@ -615,26 +615,6 @@ def resolve_taxonomy(
     if not selected_metadata:
         return TaxonomyResult(category=choice)
 
-    if not preferred_category_id:
-        linked_leaf = _find_category(
-            str(selected_metadata.get("category_id") or ""), leaves
-        )
-        current_exact_schema = _find_category(choice.category_id, metadata)
-        if linked_leaf is not None and current_exact_schema is None:
-            # A supplied schema row explicitly identifies a selectable leaf,
-            # while the lexical leaf has no schema relationship at all. Aligning
-            # the two projections is a data-integrity recovery over runtime
-            # relationships, not a product/category exception. Online model-
-            # committed categories always bypass this availability alignment.
-            choice = CategoryChoice(
-                category_id=str(linked_leaf["category_id"]),
-                name=str(linked_leaf["name"]),
-                path=str(linked_leaf["path"]),
-                confidence=min(0.88, max(choice.confidence, 0.6)),
-                method="schema-linked-availability",
-                candidates=candidates,
-            )
-
     raw = selected_metadata.get("raw") or {}
     config = raw.get("categoryMetadata") or {}
     product_mapped, product_missing = _map_attribute_group(
